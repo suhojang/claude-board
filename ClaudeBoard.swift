@@ -7892,7 +7892,7 @@ struct ShortcutAction {
     private func save() {
         UserDefaults.standard.set(overrides, forKey: "shortcuts")
         (NSApp.delegate as? AppDelegate)?.buildMainMenu()
-        registerHotKeys()
+        registerHotKeys(paused: ShortcutSettings.shared.recording != nil)   // 키를 받는 중에 되돌리기 등을 눌렀으면 풀어 둔 채로
     }
 
     // 메뉴 항목에 그 동작의 키를 단다. 앱 안 키 감시(handle)도 이 항목의 동작을 부른다
@@ -7911,10 +7911,12 @@ struct ShortcutAction {
 
     // 앱 안 키 감시 — 표의 키를 키 번호로 맞춰 그 메뉴 동작을 바로 부른다. 그래서 한글 입력기에서 ⌃⌥ + 글자 키가 메뉴에 맞지 않는 일도,
     // 터미널에 포커스가 있을 때 엔진이 사용자가 고른 키를 먼저 가져가는 일도 없다(엔진의 unbind 목록을 사용자 키마다 늘리지 않는다).
-    // 단축키 창이 키를 받는 중이면 그쪽으로. 모달 창(NSAlert 등)이 떠 있거나 글자 칸에서 한글을 조합하는 중이면 그대로 둔다
+    // 단축키 창이 키를 받는 중이면 그쪽으로. 모달 창(NSAlert 등)·⋯ 메뉴 패널(SessionMenuPanel, 키를 스스로 받는다)이 떠 있거나
+    // 글자 칸에서 한글을 조합하는 중이면 그대로 둔다
     func handle(_ e: NSEvent) -> NSEvent? {
         if ShortcutSettings.shared.recording != nil { return ShortcutSettings.shared.record(e) }
-        guard NSApp.modalWindow == nil, (e.window?.firstResponder as? NSTextView)?.hasMarkedText() != true else { return e }
+        guard NSApp.modalWindow == nil, !(e.window is NSPanel),
+              (e.window?.firstResponder as? NSTextView)?.hasMarkedText() != true else { return e }
         let c = KeyCombo(e)
         // ⌘, 는 엔진 기본값(open_config)이 먼저 가져가므로 여기서 받는다
         if c == Self.settingsKey { ShortcutSettings.shared.open(); return nil }
@@ -7986,7 +7988,7 @@ func systemHotKeys() -> [[Int]] {
     @Published private(set) var refused: String?     // 받지 않은 키 안내
     private(set) var systemKeys: [[Int]] = []         // 열 때 읽는다
     private var win: NSWindow?
-    private var observer: NSObjectProtocol?
+    private var observers: [NSObjectProtocol] = []
 
     func open() {
         if let win { win.makeKeyAndOrderFront(nil); return }
@@ -8004,9 +8006,16 @@ func systemHotKeys() -> [[Int]] {
         let f = window.frame
         w.setFrameOrigin(NSPoint(x: TerminalHub.shared.boardOnLeft ? f.minX + 20 : f.maxX - w.frame.width - 20, y: f.midY - w.frame.height / 2))
         win = w
-        observer = NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: w, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.closed() }
-        }
+        let nc = NotificationCenter.default
+        observers = [
+            nc.addObserver(forName: NSWindow.willCloseNotification, object: w, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.closed() }
+            },
+            // 다른 앱·다른 창으로 옮기면 받기를 그만둔다 — 풀어 둔 전역 단축키가 그대로 꺼져 있지 않게
+            nc.addObserver(forName: NSWindow.didResignKeyNotification, object: w, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { if self?.recording != nil { self?.stopRecording() } }
+            },
+        ]
         w.makeKeyAndOrderFront(nil)
     }
 
@@ -8047,8 +8056,8 @@ func systemHotKeys() -> [[Int]] {
 
     private func closed() {
         if recording != nil { stopRecording() }
-        if let observer { NotificationCenter.default.removeObserver(observer) }
-        observer = nil
+        observers.forEach { NotificationCenter.default.removeObserver($0) }
+        observers = []
         win = nil
         if NSApp.isActive, window.isVisible { window.makeKey() }
     }
