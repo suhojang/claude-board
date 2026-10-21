@@ -11,7 +11,7 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use claude_board_core::text::is_py_space;
-use claude_board_core::{clock, fileio, paths, proc, Record};
+use claude_board_core::{claude_live, clock, fileio, paths, proc, Record};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::terminal;
 use serde_json::Value;
@@ -127,7 +127,11 @@ fn non_empty<'a>(s: &'a Record, key: &str) -> Option<&'a str> {
 }
 
 /// 세션 파일을 읽는다. 프로세스가 죽은 세션은 종료로 보고, 종료된 지 30분 넘은 파일은 지운다.
-fn load(sessions: &Path, now: f64) -> Vec<Record> {
+///
+/// working·waiting 인 세션은 Claude Code 의 신호로 덮는다(`board-tui.py:load`) — Esc 로 끊긴 세션은 입력을 기다리는 중이라
+/// idle 이고 대기 시간은 끊은 때부터 센다. 승인한 도구가 도는 동안은 승인 대기로 남으므로 Claude Code 가 다시 busy 면 작업 중이다.
+/// 겹치는 규칙은 [`claude_live::live_state`] 한 곳이다.
+fn load(sessions: &Path, claude_dir: &Path, now: f64) -> Vec<Record> {
     let mut out = Vec::new();
     let Ok(entries) = fs::read_dir(sessions) else { return out };
     for entry in entries.flatten() {
@@ -137,6 +141,10 @@ fn load(sessions: &Path, now: f64) -> Vec<Record> {
         let Some(mut s) = fileio::read_record(&entry.path()) else { continue };
         if get_str(&s, "state") != Some("ended") && !proc::record_alive(&s) {
             s.insert("state".into(), "ended".into());
+        }
+        if let Some((state, since)) = claude_live::live_override(&s, claude_dir) {
+            s.insert("state".into(), state.into());
+            s.insert("since".into(), since.into());
         }
         if get_str(&s, "state") == Some("ended") && now - get_f64(&s, "updated").unwrap_or(0.0) > 1800.0 {
             let _ = fs::remove_file(entry.path());
@@ -386,6 +394,7 @@ pub fn run() -> ExitCode {
     crossterm::ansi_support::supports_ansi();
     let sessions_dir = paths::sessions_dir();
     let theme_file = paths::board_theme_file();
+    let claude_dir = paths::claude_dir();
     let home = paths::home().to_string_lossy().into_owned();
     let mut theme = load_theme(&theme_file);
 
@@ -402,7 +411,7 @@ pub fn run() -> ExitCode {
     let mut tick = 0usize;
     loop {
         if loaded.is_none_or(|t| t.elapsed() >= RELOAD) {
-            sessions = load(&sessions_dir, clock::now());
+            sessions = load(&sessions_dir, &claude_dir, clock::now());
             loaded = Some(Instant::now());
         }
         let size = terminal_size();
@@ -501,6 +510,34 @@ mod tests {
         let empty = strip_ansi(&Painter { theme: &THEMES[1] }.render(&[], 3, (60, 10), now, ""));
         assert!(empty.contains("아직 기록된 세션이 없습니다"));
         assert!(empty.contains("테마: Tokyo Night"));
+    }
+
+    #[test]
+    fn load_overlays_interrupted_and_busy_sessions() {
+        let root = std::env::temp_dir().join(format!("cb-tui-load-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let (sessions, claude) = (root.join("sessions"), root.join("claude"));
+        fs::create_dir_all(&sessions).unwrap();
+        fs::create_dir_all(claude.join("sessions")).unwrap();
+        let stamp = "2026-10-16T19:24:08.5Z";
+        let transcript = root.join("t.jsonl");
+        let line = json!({"type": "user", "timestamp": stamp, "message": {"content": "[Request interrupted by user]"}});
+        fs::write(&transcript, line.to_string()).unwrap();
+        let write = |name: &str, v: Value| fs::write(sessions.join(name), v.to_string()).unwrap();
+        let t = transcript.to_string_lossy().into_owned();
+        // working + 중단된 기록 → idle, since 는 중단 시각
+        write("a.json", json!({"session_id": "a", "state": "working", "since": 1.0, "updated": 2.0, "transcript_path": t}));
+        // waiting + Claude Code status busy → working, since 는 status 가 바뀐 시각 (살아 있는 pid 로 이 프로세스를 쓴다)
+        let pid = std::process::id();
+        fs::write(claude.join(format!("sessions/{pid}.json")), r#"{"sessionId":"b","status":"busy","statusUpdatedAt":7000}"#).unwrap();
+        write("b.json", json!({"session_id": "b", "state": "waiting", "since": 1.0, "updated": 2.0, "pid": pid}));
+        // 겹칠 것이 없는 세션은 그대로
+        write("c.json", json!({"session_id": "c", "state": "working", "since": 1.0, "updated": 2.0}));
+        let mut got = load(&sessions, &claude, 100.0);
+        got.sort_by_key(|s| get_str(s, "session_id").unwrap_or("").to_string());
+        let view: Vec<(&str, f64)> = got.iter().map(|s| (get_str(s, "state").unwrap(), get_f64(s, "since").unwrap())).collect();
+        assert_eq!(view, [("idle", 1_792_178_648.5), ("working", 7.0), ("working", 1.0)]);
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

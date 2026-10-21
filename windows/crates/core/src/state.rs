@@ -3,6 +3,7 @@
 //! [`apply`] 는 순수 함수다: 세션 기록 + 상태 인자 + hook 입력 + 시각 + 주입한 프로세스 정보([`Env`])
 //! → 새 기록 + 바꿀 터미널 제목. 파일 잠금·읽기·쓰기·prune·`.paused` 삭제는 [`run`] 이 맡는다.
 
+use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 
@@ -73,18 +74,26 @@ const CARRY_FLAG: &[&str] = &[
 ];
 
 /// 다시 열 때 넘길 실행 인자만 고른다(argv[0] 은 건너뛴다) — `state.py:carry_args`.
+/// 같은 플래그·같은 `(이름, 값)` 쌍·같은 `--x=v` 형은 한 번만 넘긴다. Claude Code 는 bypass 권한 모드로 이어 열 때
+/// `--allow-dangerously-skip-permissions` 를 스스로 하나 더 붙여 띄우므로, 그대로 넘기면 이어 열 때마다 하나씩 늘어난다.
+/// 값을 여러 개 받는 `--add-dir x` 꼴은 중복을 걸러내지 않는다.
 pub fn carry_args<S: AsRef<str>>(argv: &[S]) -> Vec<String> {
     let argv: Vec<&str> = argv.iter().map(AsRef::as_ref).collect();
     let mut out = Vec::new();
+    let mut seen: HashSet<(&str, Option<&str>)> = HashSet::new();
     let mut i = 1;
     while i < argv.len() {
         let a = argv[i];
         let name = a.split('=').next().unwrap_or(a);
         if (a.contains('=') && (CARRY_ONE.contains(&name) || CARRY_MANY.contains(&name))) || CARRY_FLAG.contains(&a) {
-            out.push(a.to_string());
+            if seen.insert((a, None)) {
+                out.push(a.to_string());
+            }
         } else if CARRY_ONE.contains(&a) && i + 1 < argv.len() {
-            out.push(a.to_string());
-            out.push(argv[i + 1].to_string());
+            if seen.insert((a, Some(argv[i + 1]))) {
+                out.push(a.to_string());
+                out.push(argv[i + 1].to_string());
+            }
             i += 1;
         } else if CARRY_MANY.contains(&a) {
             out.push(a.to_string());
@@ -146,7 +155,7 @@ pub fn effective_state(state: &str, data: &Record) -> String {
 }
 
 /// 기록의 pid 가 양의 정수면 그 값. Python 은 pid 가 None·문자열이면 `alive()` 가 참이다.
-fn record_pid(rec: &Record) -> Option<u32> {
+pub(crate) fn record_pid(rec: &Record) -> Option<u32> {
     rec.get("pid").and_then(Value::as_u64).filter(|&p| p > 0).and_then(|p| u32::try_from(p).ok())
 }
 
@@ -334,7 +343,8 @@ pub fn apply(mut rec: Record, state_arg: &str, data: &Record, now: f64, env: &dy
         rec.shift_remove("limit_hit");
     }
     let changed = rec.get("state").and_then(Value::as_str) != Some(state.as_str());
-    if changed {
+    // Esc 로 끊으면 hook 이 오지 않아 다음 요청은 작업 중 → 작업 중이다 — 새 요청이면 시작 시각을 새로 잡는다
+    if changed || event == Some("UserPromptSubmit") {
         set(&mut rec, "state", state.as_str());
         set(&mut rec, "since", now);
     }
@@ -562,6 +572,48 @@ mod tests {
         assert!(carry_args(&["claude"]).is_empty());
         // 값이 없는 마지막 --agent 는 버린다(state.py 와 같다)
         assert!(carry_args(&["claude", "--agent"]).is_empty());
+    }
+
+    #[test]
+    fn carry_args_dedups_same_args() {
+        let run = |a: &[&str]| {
+            let mut argv = vec!["claude"];
+            argv.extend_from_slice(a);
+            carry_args(&argv)
+        };
+        assert_eq!(run(&["--chrome", "--chrome"]), ["--chrome"]);
+        assert_eq!(
+            run(&["--allow-dangerously-skip-permissions", "--allow-dangerously-skip-permissions"]),
+            ["--allow-dangerously-skip-permissions"]
+        );
+        assert_eq!(run(&["--model", "a", "--model", "a"]), ["--model", "a"]);
+        assert_eq!(run(&["--model", "a", "--model", "b"]), ["--model", "a", "--model", "b"]);
+        assert_eq!(run(&["--model=a", "--model=a"]), ["--model=a"]);
+        assert_eq!(run(&["--model", "a", "--model=a"]), ["--model", "a", "--model=a"]);
+        assert_eq!(run(&["--add-dir=x", "--add-dir=x"]), ["--add-dir=x"]);
+        // 띄운 형은 값이 여러 개일 수 있어 중복을 거르지 않는다
+        assert_eq!(run(&["--add-dir", "x", "--add-dir", "x"]), ["--add-dir", "x", "--add-dir", "x"]);
+    }
+
+    #[test]
+    fn since_restarts_on_new_prompt_only() {
+        let env = fake();
+        let rec = obj(json!({"pid": 42, "args": [], "state": "working", "since": 100.0}));
+        let hook = |name: &str| obj(json!({"session_id": "s", "hook_event_name": name, "cwd": "/w/p"}));
+        // 새 요청은 같은 working 이어도 시작 시각을 새로 잡는다
+        let out = apply(rec.clone(), "working", &hook("UserPromptSubmit"), 500.0, &env);
+        assert_eq!(out.record["state"], "working");
+        assert_eq!(out.record["since"], 500.0);
+        // 도구 호출은 그대로
+        let out = apply(rec.clone(), "working", &hook("PreToolUse"), 500.0, &env);
+        assert_eq!(out.record["since"], 100.0);
+        // 제목은 상태나 주제가 바뀔 때만 — 같은 working 의 새 요청은 제목을 다시 쓰지 않는다
+        let tty_rec = obj(json!({"pid": 42, "args": [], "state": "working", "since": 100.0, "headless": false}));
+        let out = apply(tty_rec.clone(), "working", &hook("UserPromptSubmit"), 500.0, &env);
+        assert_eq!(out.title, None);
+        let out = apply(tty_rec, "idle", &hook("Stop"), 500.0, &env);
+        assert_eq!(out.title.as_deref(), Some("🟢 p"));
+        assert_eq!(out.record["since"], 500.0);
     }
 
     #[test]

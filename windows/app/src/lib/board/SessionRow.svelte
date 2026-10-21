@@ -1,6 +1,6 @@
 <script lang="ts">
   // 세션 한 줄(ClaudeBoard.swift:1743-1913): 서브에이전트 접기 화살표·상태 아이콘·제목·알림 스위치·… 메뉴(종료면 ⓧ),
-  // 둘째 줄에 경과 시간·하위 작업·셸·모델·컨텍스트(좁으면 3단계로 줄임), 승인 대기면 ✋ 요청 내용
+  // 둘째 줄에 경과 시간·하위 작업·셸·세션 이름·모델·컨텍스트(좁으면 3단계로 줄이고 세션 이름은 앞 두 단계에만 보임), 승인 대기면 ✋ 요청 내용
   import { cubicOut } from "svelte/easing";
   import { fly, fade } from "svelte/transition";
   import type { Session } from "$lib/types";
@@ -9,6 +9,7 @@
   import Fit from "./Fit.svelte";
   import Icon from "./Icon.svelte";
   import ModelLabel from "./ModelLabel.svelte";
+  import NameLabel from "./NameLabel.svelte";
   import MuteSwitch from "./MuteSwitch.svelte";
   import StateIcon from "./StateIcon.svelte";
   import SubagentRow from "./SubagentRow.svelte";
@@ -122,6 +123,7 @@
                 <Icon name="shells" size={11} />{level > 0 ? `${s.shells}` : `셸 ${s.shells}개 실행 중`}
               </span>
             {/if}
+            {#if s.name && !ended && level < 2}<NameLabel name={s.name} />{/if}
             {#if s.brain}<ModelLabel brain={s.brain} {level} />{/if}
             {#if s.ctx}<ContextLabel ctx={s.ctx} {level} />{/if}
           </span>

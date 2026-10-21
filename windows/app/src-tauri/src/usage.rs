@@ -5,6 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use claude_board_core::clock::iso_date;
 use claude_board_core::{clock, fileio, Record};
 use serde_json::Value;
 
@@ -102,50 +103,6 @@ pub fn fetch(credentials: &Path) -> (Option<Vec<u8>>, bool) {
     }
 }
 
-/// ISO8601(`2026-10-16T12:00:00.123+00:00`, `…Z`)을 유닉스 초로.
-pub fn iso_date(s: &str) -> Option<f64> {
-    let b = s.as_bytes();
-    let n = |from: usize, len: usize| -> Option<i64> {
-        let part = s.get(from..from + len)?;
-        part.bytes().all(|c| c.is_ascii_digit()).then(|| part.parse().ok())?
-    };
-    if b.len() < 19 || b[4] != b'-' || b[7] != b'-' || !matches!(b[10], b'T' | b't' | b' ') || b[13] != b':' || b[16] != b':' {
-        return None;
-    }
-    let (y, mo, d, h, mi, sec) = (n(0, 4)?, n(5, 2)?, n(8, 2)?, n(11, 2)?, n(14, 2)?, n(17, 2)?);
-    let mut i = 19;
-    let mut frac = 0.0;
-    if b.get(i) == Some(&b'.') {
-        let start = i + 1;
-        i = start;
-        while b.get(i).is_some_and(u8::is_ascii_digit) {
-            i += 1;
-        }
-        frac = format!("0.{}", &s[start..i]).parse().unwrap_or(0.0);
-    }
-    let offset = match b.get(i) {
-        Some(b'Z' | b'z') if i + 1 == b.len() => 0,
-        Some(&c @ (b'+' | b'-')) if b.len() == i + 6 && b[i + 3] == b':' => {
-            let o = n(i + 1, 2)? * 3600 + n(i + 4, 2)? * 60;
-            if c == b'+' {
-                o
-            } else {
-                -o
-            }
-        }
-        _ => return None,
-    };
-    // 그레고리력 날짜 → 1970-01-01 부터 날 수(Howard Hinnant 의 days_from_civil)
-    let y2 = if mo <= 2 { y - 1 } else { y };
-    let era = y2.div_euclid(400);
-    let yoe = y2 - era * 400;
-    let mp = (mo + 9) % 12;
-    let doy = (153 * mp + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = era * 146_097 + doe - 719_468;
-    Some((days * 86400 + h * 3600 + mi * 60 + sec - offset) as f64 + frac)
-}
-
 fn limit(id: String, label: String, o: &Record, key: &str) -> Option<Limit> {
     let pct = num(o.get(key))?;
     let short = match id.as_str() {
@@ -212,16 +169,6 @@ mod tests {
         assert_eq!(l[3].resets, None);
         assert!(parse(br#"{"seven_day": {"utilization": 1}}"#).is_none());
         assert!(parse(b"not json").is_none());
-    }
-
-    #[test]
-    fn iso_dates() {
-        assert_eq!(iso_date("1970-01-01T00:00:00Z"), Some(0.0));
-        assert_eq!(iso_date("2000-02-29T00:00:00+00:00"), Some(951_782_400.0));
-        assert_eq!(iso_date("2026-10-16T19:24:08.5Z"), Some(1_792_178_648.5));
-        assert_eq!(iso_date("2026-10-17T04:24:08+09:00"), Some(1_792_178_648.0));
-        assert_eq!(iso_date("2026-10-16"), None);
-        assert_eq!(iso_date("2026-10-16T19:24:08"), None);
     }
 
     #[test]

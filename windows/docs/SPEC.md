@@ -2,6 +2,7 @@
 
 macOS 판(저장소 최상위의 Swift·Python 소스, 커밋 `68ffed2`)을 역분석해 Windows 판이 지켜야 할 동작을 정리한 문서다.
 Windows 판 개발자(사람·에이전트)는 이 문서를 단일 기준으로 삼는다. macOS 소스의 줄 번호는 `68ffed2` 기준이다.
+2.13 에서 더한 규칙(Claude Code 실시간 상태 덮기·세션 이름·since·인자 중복 제거)은 그 뒤 macOS 3.0~3.1.8 의 `state.py`·`notify.py`·`board-tui.py`·`ClaudeBoard.swift` 에서 왔고, 줄 번호 대신 함수 이름으로 가리킨다.
 
 ## 0. 결정 사항
 
@@ -71,7 +72,7 @@ hook 사본을 바꿀 때는 실행 중인 exe 를 덮어쓸 수 없으므로 `c
 | `session_id`, `cwd`, `project`(= cwd 의 마지막 이름) | | `project` 는 `\`·`/` 모두 구분자로 본다 |
 | `project_dir` | claude 를 띄운 프로젝트 폴더(hook 환경 변수 `CLAUDE_PROJECT_DIR`). `cwd` 는 Claude 가 하위 폴더로 cd 하거나 워크트리에 들어가면 바뀌지만 이 값은 그대로다 — Claude Code 2.1.304 실측: hook 입력 `cwd` 가 `repo` → `repo/sub` → `repo/.claude/worktrees/t1` 로 바뀌는 동안 `CLAUDE_PROJECT_DIR` 은 끝까지 `repo`. 보드·TUI 는 이것으로 카드를 묶고, 이 필드가 없는 예전 기록은 `cwd` 로 묶는다 | 같음 |
 | `state` | `working`·`waiting`·`idle`·`ended` | 같음 |
-| `since` | state 가 마지막으로 바뀐 시각(초, 소수) | 같음 |
+| `since` | state 가 마지막으로 바뀐 시각 또는 새 요청(`UserPromptSubmit`)이 들어온 시각(초, 소수) | 같음 |
 | `updated` | 마지막 hook 시각 | 같음 |
 | `started` | 프로세스 정보를 새로 잡은 시각 | 같음 |
 | `pid` | 조상 가운데 Claude Code 프로세스 pid | `claude.exe`(또는 명령줄에 `claude` 가 든 `node.exe`/`bun.exe`) |
@@ -101,6 +102,22 @@ hook 사본을 바꿀 때는 실행 중인 exe 를 덮어쓸 수 없으므로 `c
 | `app-path` | setup → notify | **Windows 전용**: ClaudeBoard.exe 전체 경로 |
 | `context/<sid>.json` | 사용자 상태줄 → 보드 | `{context_window:{context_window_size, current_usage:{input_tokens,cache_creation_input_tokens,cache_read_input_tokens}, used_percentage}, model, effort, at}` |
 | `%TEMP%\.claude-usage-cache.json` | 보드(·상태줄) | 사용량 API 응답 캐시(macOS 는 `/tmp/.claude-usage-cache.json`) |
+
+### 2.3 `~/.claude/sessions/<pid>.json` (Claude Code 가 쓰고, 우리는 읽기만 한다)
+
+경로 `%USERPROFILE%\.claude\sessions\<pid>.json`, `<pid>` 는 세션 파일(§2.1)의 `pid`. 이 폴더는 `notifier\sessions\` 와 다른 폴더다.
+같은 폴더에 `<pid>.<해시>.key` 같은 파일도 있으므로 정확히 `<pid>.json` 만 연다. Windows 의 Claude Code 2.1.296 이 아래 필드를 쓴다.
+
+| 필드 | 뜻 | 쓰는 곳 |
+|---|---|---|
+| `sessionId` | 이 pid 가 지금 도는 세션 id | 세션 파일의 `session_id` 와 같을 때만 아래 값을 믿는다 |
+| `status` | `idle`·`busy`·`waiting` | §3.9 의 상태 덮기 |
+| `statusUpdatedAt` | `status` 가 바뀐 시각(유닉스 밀리초, 숫자) | §3.9. 읽을 때 1000 으로 나눠 초로 쓴다 |
+| `name` | 세션 이름(`/rename`·`--name`). 비어 있을 수 있다 | 보드의 세션 이름 라벨(§7) |
+| `pid` | Claude Code 프로세스 | |
+
+파일이 없거나, JSON 객체가 아니거나, pid 가 0 이면 "정보 없음"으로 본다. 읽기 실패는 오류로 올리지 않는다. 이 파일을 쓰거나 지우지 않는다.
+**untested:** hook 이 기록하는 `pid`(`proc::find_claude`, §3.4)가 이 파일 이름의 pid 와 같은지는 실제 Claude Code 세션에서 확인하지 않았다(§11.1).
 
 ## 3. hook — `claude-board-hook.exe`
 
@@ -152,7 +169,9 @@ stdin JSON 하나를 읽는다. 어떤 오류도 Claude Code 를 막지 않게 *
    - `UserPromptSubmit` 이면 `<sid>.paused` 를 지운다.
    - `StopFailure` + `error == "rate_limit"` 이고 `last_assistant_message`(공백 정리)가 정규식 `hit your|usage limit`(대소문자 무시)에 맞으면 `limit_hit = {at: now, message: 앞 200}`.
      서브에이전트가 아닌 `UserPromptSubmit`·`PreToolUse`·`PostToolUse`·`Stop`·`SessionStart` 면 `limit_hit` 를 지운다.
-   - 상태가 바뀌면 `state`·`since=now`. idle 이고 `last_assistant_message` 가 있으면 last_message(공백 정리, 200). waiting 이고 `message` 가 있으면 last_message = message 앞 200.
+   - 상태가 바뀌었거나 이벤트가 `UserPromptSubmit` 이면 `state`·`since=now`(`state.py:update`). Esc 로 끊으면 hook 이 오지 않아 다음 요청이 working → working 인데, 그때도 시작 시각을 새로 잡는다.
+     "상태가 바뀌었는가"(`changed`)는 그대로 두며, 아래 터미널 제목 조건이 이 값을 쓴다. 새 요청이 아닌 working → working(`PreToolUse` 등)은 `since` 를 바꾸지 않는다.
+   - idle 이고 `last_assistant_message` 가 있으면 last_message(공백 정리, 200). waiting 이고 `message` 가 있으면 last_message = message 앞 200.
    - `resume_cmd` 를 만든다(§3.3). 원자적으로 쓴다.
    - 상태가 바뀌었거나 topic 이 바뀌었고 `headless == false` 면 터미널 제목을 `"<아이콘> <project> · <topic 앞 20자>…"` 로 바꾼다(아이콘 working 🔵, waiting 🟠, idle 🟢, ended ⚫; topic 이 20자 이하면 `…` 없이, 없으면 ` · ` 부분 없음).
      Windows: `FreeConsole` → `AttachConsole(pid)` → `SetConsoleTitleW` → `FreeConsole`. 실패는 무시. Windows Terminal(ConPTY) 탭 제목도 이것으로 바뀐다(실기 확인, §11.1).
@@ -162,6 +181,11 @@ stdin JSON 하나를 읽는다. 어떤 오류도 Claude Code 를 막지 않게 *
 ### 3.3 `carry_args`·`resume_cmd` — `state.py:57-97`
 
 - 넘길 인자: 값 하나(`--model --permission-mode --agent --settings --plugin-dir`), 값 여럿(`--add-dir --mcp-config`, 다음 `-` 전까지), 값 없음(`--dangerously-skip-permissions --allow-dangerously-skip-permissions --chrome --ide --verbose`), `--x=값` 형태도 받는다. argv[0] 은 건너뛴다.
+- 중복 제거(`state.py:carry_args`): 같은 인자는 한 번만 넘긴다. Claude Code 는 bypass 권한 모드로 이어 열 때 `--allow-dangerously-skip-permissions` 를 스스로 하나 더 붙여 띄우므로, 그대로 넘기면 이어 열 때마다 하나씩 늘어난다.
+  - 값 없는 플래그는 같은 이름이 또 오면 건너뛴다.
+  - 값 하나 인자는 (이름, 값) 쌍이 같을 때만 건너뛴다. `--model a --model b` 는 둘 다 남는다.
+  - `--x=값` 형태는 문자열 전체가 같을 때만 건너뛴다. `--model a` 와 `--model=a` 는 서로 다른 형태라 둘 다 남는다.
+  - 값 여럿 인자(`--add-dir x`)는 중복을 제거하지 않는다. `--add-dir=x` 형태는 위 규칙대로 제거한다.
 - resume: args 에서 `--permission-mode`·`--model` 을 빼고 기록된 값으로 다시 붙인 뒤 `claude <args…> --resume <sid>`. Windows 인용 규칙으로 잇는다.
 
 ### 3.4 Claude 프로세스·headless 판별 (Windows)
@@ -182,6 +206,7 @@ stdin JSON 하나를 읽는다. 어떤 오류도 Claude Code 를 막지 않게 *
    stop: 제목 "작업 완료", kind `done`, 소리 done, 본문 `last_assistant_message` 또는 transcript 끝 400KB 에서 찾은 마지막 assistant 텍스트.
 3. 본문 다듬기(`plain`·`first_sentence`): 코드 블록 제거, 인라인 코드·굵게 기호 제거, 줄머리 `#`·`-`·`*`·`1.`·`|` 제거, 공백 정리, 140자 넘으면 139자 + `…`. 그다음 첫 문장(`.!?。` 로 끝나는 가장 짧은 앞부분, 없으면 전체).
 4. 요약 `waiting=<n>,working=<n>,idle=<n>`: 모든 세션 파일의 상태를 세되, 이 세션은 막 바뀐 상태(wait→waiting, done→idle)로 센다. 다른 세션은 pid 가 죽었으면 뺀다. 이 세션 파일이 아직 없으면 그 상태에 1 을 더한다.
+   살아 있는 **다른** 세션의 기록 상태가 working·waiting 이면 §3.9 의 규칙으로 덮은 상태를 센다(`notify.py:session_summary`). 지금 알림을 내는 세션은 덮지 않는다 — 막 바뀐 상태를 그대로 센다.
 5. 위치: `notify-position` 내용(없거나 비면 `center`).
 6. `app-path` 의 ClaudeBoard.exe 를 `--notify --title <제목> --subtitle <project> --body <본문> --summary <요약> --sound <done|wait> --kind <done|wait> --duration 10 --position <위치>` 로 띄우고 **기다리지 않고** 끝낸다.
    `CREATE_BREAKAWAY_FROM_JOB | DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP`(breakaway 가 거부되면 그 플래그 없이 다시), 표준 입출력은 닫는다. app-path 가 없거나 파일이 없으면 끝.
@@ -194,6 +219,31 @@ uninstall: `uninstall-hooks` → Run 값 삭제 → 실행 중인 ClaudeBoard.ex
 ### 3.8 `tui` — `board-tui.py` 이식
 
 crossterm 으로 같은 화면: 프로젝트 경로별 카드(`project_dir`, 없으면 `cwd`. 테두리 색 = 가장 급한 상태), 상태별 표시(작업 중 스피너 `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`, 승인 대기 `◉/○` 깜빡임, 대기 `✓`, 종료 `✕`), 경과 시간, topic, 백그라운드 표시, 승인 대기 메시지 줄, 아래 상태별 개수, 0.12초 다시 그리기·1초 다시 읽기, `q` 종료, `t` 테마 순환(4종, `notifier\board-theme` 에 저장), 한글 폭 2칸. 종료 후 30분 넘은 ended 세션 파일은 지운다(`board-tui.py:107-129`).
+파일을 읽을 때(`board-tui.py:load`) pid 가 죽은 세션을 ended 로 바꾼 뒤, 30분 prune 보다 앞에서 §3.9 의 덮기를 적용한다. 덮은 세션은 `state` 와 `since` 가 바뀐 채로 그려진다.
+
+### 3.9 Claude Code 실시간 상태 덮기 — `claude_live` (`notify.py`·`board-tui.py` 의 `interrupted_at`·`claude_status`, `ClaudeBoard.swift` 의 `InterruptReader`·`ClaudeNames`)
+
+Claude Code 는 사용자가 Esc 로 응답을 끊으면 `Stop` hook 을 부르지 않는다. 세션 파일이 working·waiting 으로 남으므로 hook 이 오지 않는 두 경우를 Claude Code 가 남긴 기록으로 메운다.
+규칙은 core 의 `live_state` 한 곳에 있고, 알림 요약(§3.6)·TUI(§3.8)·보드(§5.1)가 그 함수를 쓴다.
+
+입력과 결과(순수 함수):
+- 기록된 `state` 가 `working`·`waiting` 일 때만 본다. `idle`·`ended`·`paused` 면 아래 두 조회를 하지 않는다.
+- **중단 시각**(`interrupted_at`): 세션의 `transcript_path` 가 있으면 대화 기록의 끝을 본다. `transcript_path` 가 비어 있으면 중단 없음(보드는 §5.1 의 transcript 경로로 대신한다).
+- **status 변화**(`status_change`): §2.3 의 파일에서 `sessionId` 가 이 세션의 id(비어 있지 않음)와 같고, `status` 가 있고, `statusUpdatedAt/1000` 이 세션 `since`(없으면 0)보다 **클 때만** `(status, 바뀐 시각)`.
+- 중단 시각이 있거나(없을 때 `status == "idle"` 이면 그 바뀐 시각) → `idle`, `since` = 그 시각. 중단이 busy 보다 먼저다.
+- 위가 아니고 기록 상태가 `waiting` 이며 `status == "busy"` 면 → `working`, `since` = 바뀐 시각. 승인한 도구가 도는 동안은 `PostToolUse` 까지 hook 이 없어 승인 대기로 남기 때문이다.
+- 그 밖에는 기록 그대로.
+- 첫 응답이 나오기 전에 Esc 로 끊으면 대화 기록에 중단 표시가 남지 않는다. 이 경우를 `status == "idle"` 이 메운다.
+
+`interrupted_at_in(tail, mtime)` — 대화 기록 끝 256,000 바이트(`INTERRUPT_TAIL`) 이하와 파일 수정 시각(유닉스 초)을 받아 끊은 시각(유닉스 초) 또는 없음:
+1. 끝 조각에 바이트열 `[Request interrupted by user`(`INTERRUPT_MARK`, "… for tool use]" 변형 포함)가 없으면 JSON 을 풀지 않고 없음.
+2. `\n` 으로 나눠 **뒤에서부터** 본다. 줄 끝 `\r` 와 줄 앞 BOM 을 떼고, JSON 으로 풀리지 않는 줄(256,000 경계에서 잘린 첫 줄·UTF-8 이 아닌 줄 포함)은 건너뛴다.
+3. `type` 이 `user`·`assistant` 가 아니거나 `isSidechain`·`isMeta` 가 `true` 인 줄은 건너뛴다. 중단 뒤에 붙는 cost-state·last-prompt 줄이 여기에 든다.
+4. 글(`text`): `message.content` 가 문자열이면 그것, 목록이면 첫 원소의 `text`. `message` 가 객체가 아니거나 글이 없으면 `""`.
+5. `user` 이고 글이 `<` 로 시작하면 건너뛴다(`!` 명령·슬래시 명령 출력).
+6. `user` 이고 글이 `[Request interrupted by user` 로 시작하면 `timestamp`(ISO 8601, `Z`)를 풀어 돌려준다. 없거나 못 풀면 파일 수정 시각.
+7. 그 밖의 첫 대화 줄(assistant 줄·일반 user 줄·`tool_result` user 줄)이면 없음.
+`interrupted_at(path)` 는 파일 끝 조각과 수정 시각을 읽어 위를 부르는 포장이다. 파일이 없거나 못 읽으면 없음.
 
 ## 4. 알림 패널 — `ClaudeBoard.exe --notify …` (`ClaudeNotifier.swift`)
 
@@ -213,9 +263,14 @@ crossterm 으로 같은 화면: 프로젝트 경로별 카드(`project_dir`, 없
 
 - 상태 보정: ended 가 아닌데 pid 가 죽었으면 `ended`.
 - `transcript = transcript_path` 또는 `~/.claude/projects/<cwd 의 영숫자 밖 문자를 - 로>/<sid>.jsonl`. ended 이고 (`updated` 가 2일 넘었거나 transcript 파일이 없으면) 세션 파일을 지우고 뺀다.
+- Claude Code 실시간 상태 덮기(§3.9): 위 종료 판정과 prune 뒤, 아래 셸·서브에이전트로 working 을 올리는 단계와 paused 판정 앞에서 적용한다(`Store.reload` 의 순서).
+  기록 상태가 working·waiting 일 때만 `live_state` 를 부르고, 덮이면 `state` 와 `since` 가 바뀐다. 세션 id 는 파일 이름으로 대신해도 된다.
+  중단 시각은 위 `transcript` 경로의 파일 끝에서 읽고, 파일 수정 시각과 크기가 같으면 이전 결과를 쓴다(`InterruptReader` 대응). Claude Code 의 `sessions\<pid>.json`(§2.3)도 pid 별로 수정 시각과 크기가 같으면 다시 읽지 않는다(`ClaudeNames` 대응). 두 캐시는 목록에서 사라진 항목을 버린다.
+  덮은 결과가 idle 이어도 아래 셸·서브에이전트 규칙은 그대로 적용되므로, 끊은 뒤에도 서브에이전트가 돌고 있으면 working 으로 보인다. paused 는 덮은 결과보다 우선한다.
 - 서브에이전트: ended 가 아니면 `subagents` 를 풀되 끝난 지 10초 넘은 것은 뺀다. 정렬: done 이 아닌 것 먼저, started 순. 각 `subagents/agent-<id>.jsonl` 에서 모델·effort(§5.2).
 - 백그라운드 셸 수: idle 일 때만, 그 Claude 프로세스의 자식 가운데 명령줄에 `shell-snapshots` 가 든 프로세스 수(3초마다 백그라운드에서 셈). idle 인데 셸이 있거나 끝나지 않은 서브에이전트가 있으면 `working` 으로 보인다.
 - `<sid>.paused` 가 있고 ended 가 아니면 `paused`. `<sid>.mute` 가 있으면 muted.
+- 세션 이름: ended 가 아니면 `sessions\<pid>.json` 의 `name`(§2.3)이 비어 있지 않을 때 그 값, 아니면 없음. ended 세션에는 이름을 붙이지 않는다.
 - ended 가 아니면 모델·effort: transcript 의 마지막 assistant 줄(§5.2). 상태줄 기록의 effort 가 신선하면 그것으로 덮는다.
 - 컨텍스트: §5.3. topic·last_message 에서 `#*\`` 기호를 지운다.
 - 정렬·묶기: `project_dir`(없거나 빈 문자열이면 `cwd`) 별 그룹 — 그룹 id·이름·경로가 이 값이다. 세션 하나의 `cwd`(와 그 이름)는 그대로 둔다. 그룹 안은 rank(waiting 0, working 1, paused·idle 2, ended 3) 오름차순, 같으면 since 최신 먼저.
@@ -323,6 +378,7 @@ interface Group { id: string /* project_dir, 없으면 cwd */; name: string; pat
 interface Session {
   id: string; cwd: string; state: State; since: number; updated: number; headless: boolean;
   title: string /* topic 또는 message 또는 "요청 전" */; topic: string; message: string;
+  name: string | null /* Claude Code 세션 이름(§2.3). 없거나 ended 면 null */;
   ctx: { used: number; size: number; pct: number } | null;
   brain: { model: string; effort: string; family: string; version: string; effortLevel: number } | null;
   subagents: Sub[]; shells: number; paused: boolean; muted: boolean; limitAt: number | null; canDrive: boolean;
@@ -358,7 +414,8 @@ props `{ groups: Group[]; limits: Limit[]; now: number; compact?: boolean; masco
 - 윗줄: 앱 아이콘 + "Claude Board" + 버전 캡슐, 아래 "활성 세션 n개 · Claude Code <v>", 오른쪽 캐릭터(§7.1). 둘째 줄: 상태 칩(승인 대기·작업 중·대기, 누르면 그 상태만 보기/다시 누르면 모두), 전체 알림 단추(꺼지면 붉은 "알림 꺼짐"), 업데이트 확인 ⟳, 모두 접기/펼치기(full 에서만), 위에 고정.
 - 사용 한도 카드(1479-1628): 계정 칩(메뉴: 계정 목록·체크·"다시 로그인 필요"·계정 추가…/추가 취소·저장한 계정 지우기 ▸·한도 자동 전환 체크), 간략/상세 단추, 한도 막대(색: <50 초록, <80 주황, 그 밖 빨강), 남은 시간 문구(`resetText`), 안내 문구.
 - 경로 카드(2221-2395): 접기 화살표, 폴더(접혀 있으면 대표 세션 상태 아이콘), 이름·경로(접히면 "<상태> · <하는 일>" +n), 별(상단 고정)·X(목록에서 지우기), 상태별 개수, 오른쪽 클릭 메뉴. 안: 터미널/백그라운드 구역 머리글(접기), 세션 줄, "종료된 세션 n개"(접기, 마우스 올리면 휴지통 "모두 지우기").
-- 세션 줄(1743-1913): 서브에이전트 접기 화살표, 상태 아이콘, 제목, 알림 스위치(전체 알림 꺼짐이면 잠김), … 메뉴(ended: 세션 다시 열기/재개, paused: 재개·중단, 그 밖: 일시중지(idle 이거나 canDrive 아니면 비활성)·중단), ended 면 ⓧ 지우기. 둘째 줄: 경과 시간(ended "HH:mm 종료", idle "<경과> 전"), 하위 작업 n(running/count), 셸 n개, 모델 라벨(계열 색 Opus `rgb(255,153,115)` Sonnet `rgb(122,179,255)` Haiku `rgb(140,224,204)` Fable `rgb(224,179,255)` + effort 막대 5칸), 컨텍스트 라벨(<30 초록, <70 노랑, 그 밖 빨강). 폭이 좁으면 3단계로 줄임. 승인 대기면 ✋ 메시지(2줄). 한 번 클릭 = activate, 더블 클릭 = ended 면 resume, 아니면 focus.
+- 세션 줄(1743-1913): 서브에이전트 접기 화살표, 상태 아이콘, 제목, 알림 스위치(전체 알림 꺼짐이면 잠김), … 메뉴(ended: 세션 다시 열기/재개, paused: 재개·중단, 그 밖: 일시중지(idle 이거나 canDrive 아니면 비활성)·중단), ended 면 ⓧ 지우기. 둘째 줄: 경과 시간(ended "HH:mm 종료", idle "<경과> 전"), 하위 작업 n(running/count), 셸 n개, 세션 이름 라벨(태그 아이콘 + 이름, 아래), 모델 라벨(계열 색 Opus `rgb(255,153,115)` Sonnet `rgb(122,179,255)` Haiku `rgb(140,224,204)` Fable `rgb(224,179,255)` + effort 막대 5칸), 컨텍스트 라벨(<30 초록, <70 노랑, 그 밖 빨강). 폭이 좁으면 3단계로 줄임(0·1단계에만 이름 라벨을 보이고 3번째 단계부터 뺀다).
+  세션 이름 라벨: `name` 이 있을 때만. 24 코드포인트를 넘으면 앞 11자 + `…` + 뒤 11자로 줄이고(코드포인트 기준), 마우스를 올리면 힌트 "세션 이름 <name>" 에 전체 이름이 나온다. 승인 대기면 ✋ 메시지(2줄). 한 번 클릭 = activate, 더블 클릭 = ended 면 resume, 아니면 focus.
 - 서브에이전트 줄(2144-2201): 트리 연결선, 작은 상태 아이콘, 설명(없으면 종류), 라벨 "서브에이전트"·종류·경과("<시간> 걸려 완료"/"승인 대기")·모델·🔧도구.
 - 아래로 가려진 카드가 있으면 "아래에 경로 n개 더[ · 승인 대기 있음]"(누르면 그 카드로 스크롤). 세션이 없으면 "아직 기록된 세션이 없습니다 / Claude Code 세션에서 요청을 보내면 여기에 나타납니다".
 - 힌트(설명 말풍선): 0.35초 뒤, 방금 떠 있었으면 바로. 누르거나 스크롤하면 사라짐. 모든 단추의 설명 문구는 macOS `.hint(…)` 문구를 그대로 쓴다.
@@ -407,9 +464,9 @@ setup.exe 메모(실기 확인): `/S` 로 같은 버전을 다시 설치하면 T
 
 ## 10. 이 Mac 에서 확인할 수 있는 것과 없는 것
 
-확인 가능: core·hook 단위 테스트(macOS 에서 `cargo test`), Windows 대상 `cargo check`(링크 전까지), 프론트엔드 빌드, Tauri 앱을 macOS 에서 띄워 가짜 세션 파일로 화면 확인.
+확인 가능: core·hook 단위 테스트(macOS 에서 `cargo test` — 중단 시각·status 변화·상태 덮기·인자 중복 제거·since 규칙 포함), Windows 대상 `cargo check`(링크 전까지), 프론트엔드 빌드, Tauri 앱을 macOS 에서 띄워 가짜 세션 파일로 화면 확인.
 Windows CI 러너에서 실기로 확인: `#[cfg(windows)]` 시험(콘솔 제목·입력·터미널 창 찾기·headless, 프로세스 표·생성 시각·명령줄·종료, hook 이 `claude.exe` 를 조상으로 찾기, DPAPI, 새 콘솔 실행의 인자 전달)과 smoke 작업(§8.3)의 설치·화면 확인.
-사람이 Windows 에서 확인해야 함: Windows Terminal 탭 고르기, 세션 창 앞으로 가져오기, 트레이·전역 단축키·Mica, 소리, 실제 Claude Code 의 `.credentials.json` 형식·계정 전환, 실제 Claude Code 세션의 일시중지·재개·중단, 로그인 자동 실행, 배율이 큰 모니터의 패널 위치.
+사람이 Windows 에서 확인해야 함: Windows Terminal 탭 고르기, 세션 창 앞으로 가져오기, 트레이·전역 단축키·Mica, 소리, 실제 Claude Code 의 `.credentials.json` 형식·계정 전환, 실제 Claude Code 세션의 일시중지·재개·중단, 실제 세션에서 Esc 로 끊은 뒤 보드·TUI 가 대기로 바꾸는지와 승인 뒤 바로 작업 중으로 바꾸는지, hook 이 기록하는 pid 와 `~/.claude/sessions/<pid>.json` 의 pid 가 같은지(§2.3), 세션 이름 라벨, 로그인 자동 실행, 배율이 큰 모니터의 패널 위치.
 
 ## 11. 재구현 의무 대응표
 
@@ -420,6 +477,7 @@ Windows CI 러너에서 실기로 확인: `#[cfg(windows)]` 시험(콘솔 제목
 | H3 | carry_args·resume_cmd(Windows 인용) | state.py:57-97 | crates/core `state` | 단위 테스트 |
 | H4 | prune | state.py:113-135 | crates/core | 단위 테스트 |
 | H5 | 프로세스 찾기·alive·headless·제목 | state.py:24-110 | crates/core `proc`·`console` | Windows 실기 시험(CI) |
+| H6 | 이어 열기 인자 중복 제거·새 요청의 since 갱신 | state.py:carry_args, state.py:update | crates/core `state` | 단위 테스트 |
 | N1 | 알림 거르기·본문 다듬기·요약 | notify.py | crates/core `notify` | 단위 테스트 |
 | N2 | 패널 띄우기(분리 프로세스) | notify.py:126-136 | crates/hook | smoke 화면 확인 |
 | N3 | 알림 패널 화면·위치·슬롯·소리·클릭 | ClaudeNotifier.swift | app `--notify` + notify.html | macOS 실행 화면, smoke 화면 확인(비활성·스타일) |
@@ -437,7 +495,9 @@ Windows CI 러너에서 실기로 확인: `#[cfg(windows)]` 시험(콘솔 제목
 | B9 | 창·트레이·단축키·단일 실행·자동 실행 | 4226-5204 | src-tauri `main` | macOS 실행(트레이), smoke 화면 확인(창·단일 실행) |
 | U1 | 보드 화면 전체(단계 3개) | 1247-4460 | app/src | macOS 실행 스크린샷 |
 | U2 | 캐릭터 8종·말풍선 | 2643-3388 | app/src/lib/mascot | 스크린샷 |
+| U3 | 세션 이름 라벨 | ClaudeBoard.swift:ClaudeNames | src-tauri `readers`·`store`, app/src `SessionRow.svelte` | 단위 테스트(이름 읽기·ended 숨김), macOS 실행 스크린샷, Windows 보드 화면(합성 세션 파일: 이름 라벨, 24자 넘는 이름 줄임) |
 | T1 | TUI | board-tui.py | crates/hook `tui` | macOS 실행 |
+| L1 | Esc 중단·Claude Code status 로 상태 덮기(알림 요약·TUI·보드) | notify.py·board-tui.py:interrupted_at·claude_status, ClaudeBoard.swift:InterruptReader·ClaudeNames, Store.reload | crates/core `claude_live`, `notify`, hook `tui`, src-tauri `store`·`readers` | 단위 테스트(가짜 대화 기록·가짜 claude 폴더), 합성 세션 파일로 보드 화면 확인(실제 세션 미확인) |
 | R1 | CI·자동 릴리스(Latest 금지) | release.sh | .github/workflows/windows.yml | 브랜치 push 후 CI |
 | D1 | 문서 | README.md, packaging/README.txt | windows/*.md, 최상위 README·CLAUDE.md | 검토 |
 
@@ -466,3 +526,9 @@ REA 를 쓴 곳: `import-reference-source`(원본 소스 목록), `capture-proce
 | T1 | 확인 | board-tui.py 와 화면 바이트 비교 |
 | R1 | 확인 | Windows CI build·release(dry run) 통과(실행 38903798305) — 자산 §8.1 과 같고, 만들 명령에 `--latest=false --target <커밋>`. main 병합 뒤 실행 38923609837 이 build·smoke·release 를 통과해 `windows-v2.12` 를 게시했다 — 자산 6개, zip SHA256 일치, Latest 는 macOS `v2.12` 그대로 |
 | D1 | 확인 | 문서 작성·검토 |
+
+2.13 추가분(H6·L1·U3)은 단위 시험과, Windows 11 에서 NSIS 로 빌드한 `ClaudeBoard.exe` 를 합성 세션 파일(`CLAUDE_BOARD_HOME` 격리 홈)로 띄운 화면 확인을 거쳤다. 실제 Claude Code 세션으로는 확인하지 않았다.
+
+| ID | 상태 | 근거 |
+|---|---|---|
+| H6·L1·U3 | 부분 확인 | 합성 세션 파일로 보드 화면 확인(Esc 로 끊긴 기록 → 대기와 끊은 때부터의 경과 시간, 승인 대기 + status busy → 작업 중, 24자 넘는 이름 줄임, 같은 `project_dir` 한 카드). 단위 시험 대상: 인자 중복 제거·새 요청의 since·중단 시각 파싱(CRLF·BOM·256,000 경계·tool_result·sidechain)·status 변화·상태 덮기 진리표·알림 요약(다른 세션만 덮음)·TUI 읽기·보드 읽기(중단→대기, 승인 뒤 working, 서브에이전트가 돌면 working, paused 우선, ended 면 이름 숨김). **untested:** 실제 Claude Code 세션에서 hook 이 기록하는 `pid`(`proc::find_claude`)가 `~\.claude\sessions\<pid>.json` 의 pid 와 같은지, Esc 로 끊은 실제 세션에서의 동작 |

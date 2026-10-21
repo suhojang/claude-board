@@ -36,6 +36,7 @@ function session(cwd: string, p: Partial<Session> & { id: string; state: State }
     title: topic || message || "요청 전",
     topic,
     message,
+    name: null,
     ctx: null,
     brain: null,
     subagents: [],
@@ -69,6 +70,7 @@ function initialGroups(): Group[] {
         updated: t0 - 5 * SEC,
         topic: "주문 취소 시 재고를 복구하는 로직 추가해줘",
         message: "Claude needs your permission to use Bash",
+        name: "shop-api-3c",
         brain: opus(),
         ctx: ctx(312_000),
       }),
@@ -89,6 +91,7 @@ function initialGroups(): Group[] {
         since: t0 - (4 * MIN + 27 * SEC),
         updated: t0 - 2 * SEC,
         topic: "매출 차트를 주간·월간으로 바꿀 수 있게 해줘",
+        name: "frontend-dashboard-redesign-v2",
         brain: opus(),
         ctx: ctx(455_000),
         subagents: [
@@ -126,6 +129,7 @@ function initialGroups(): Group[] {
         since: t0 - 3 * HOUR,
         updated: t0 - 3 * HOUR,
         topic: "CI 캐시 키 정리",
+        name: "ci-cache-9d",
       }),
     ]),
   ];

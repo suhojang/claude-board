@@ -102,6 +102,8 @@ pub struct Session {
     pub title: String,
     pub topic: String,
     pub message: String,
+    /// Claude Code 세션 이름(`~/.claude/sessions/<pid>.json` 의 `name`, SPEC §2.3) — 없거나 종료된 세션이면 None
+    pub name: Option<String>,
     pub ctx: Option<Ctx>,
     pub brain: Option<Brain>,
     pub subagents: Vec<Sub>,

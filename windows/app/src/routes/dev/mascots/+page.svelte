@@ -37,6 +37,7 @@
     title: topic || "요청 전",
     topic,
     message: "",
+    name: null,
     ctx: null,
     brain: null,
     subagents: [],

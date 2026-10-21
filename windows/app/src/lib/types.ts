@@ -41,6 +41,7 @@ export interface Session {
   title: string;        // topic, 없으면 message, 둘 다 없으면 "요청 전"
   topic: string;
   message: string;
+  name: string | null;  // Claude Code 세션 이름(~/.claude/sessions/<pid>.json). 없거나 종료된 세션이면 null
   ctx: Ctx | null;
   brain: Brain | null;
   subagents: Sub[];
