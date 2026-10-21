@@ -6772,6 +6772,7 @@ struct TabBarNewWidth: PreferenceKey {
 
 struct TerminalTabBar: View {
     @ObservedObject var hub: TerminalHub
+    @ObservedObject var keys = Shortcuts.shared   // 안내 글자의 단축키
     @State private var newHover = false
     @State private var newWidth: CGFloat = 0   // "새 세션" 단추 폭(앞 여백 포함) — 탭 칸에 줄 폭을 셀 때
 
@@ -6832,7 +6833,7 @@ struct TerminalTabBar: View {
         Button { hub.newSessionSheet() } label: {
             HStack(spacing: 4) {
                 Image(systemName: "plus").font(.system(size: 10, weight: .bold))
-                Text("⌘T").boardFont(11, weight: .medium).opacity(0.75)
+                if let key = keys.label("newSession") { Text(key).boardFont(11, weight: .medium).opacity(0.75) }
             }
             .boardFont(12, weight: .semibold)
             .foregroundStyle(.primary.opacity(newHover ? 1 : 0.8))
@@ -6931,6 +6932,7 @@ struct WorkspaceButton: View {
 struct TerminalTabButton: View {
     static let minWidth: CGFloat = 120, maxWidth: CGFloat = 250   // 탭 폭 — 탭 줄이 넘칠지 셀 때도 쓴다
     @ObservedObject var tab: BoardTab
+    @ObservedObject var keys = Shortcuts.shared   // 안내 글자의 단축키
     let selected: Bool
     let background: NSColor
     let shortcut: Int?       // ⌘ 를 누르고 있는 동안 × 자리에 보일 ⌘번호
@@ -6951,18 +6953,18 @@ struct TerminalTabButton: View {
             if tab.zoomed {
                 Image(systemName: "arrow.up.left.and.arrow.down.right").font(.system(size: 10, weight: .bold))
                     .foregroundStyle(Palette.color("working"))
-                    .hint("화면 하나 크게 보는 중: ⇧⌘↩ 로 되돌립니다")
+                    .hint("화면 하나 크게 보는 중: \(keys.label("zoom").map { "\($0) 로 " } ?? "윈도우 > 화면 나누기에서 ")되돌립니다")
             }
             // ⌘ 를 누르고 있는 동안 고른 탭은 지금 하는 일 대신 이름 바꾸기 단축키
-            if commandHeld && selected {
-                Text("⇧⌘R 이름 바꾸기").boardFont(11).foregroundStyle(.secondary).lineLimit(1)
+            if commandHeld && selected, let key = keys.label("rename") {
+                Text("\(key) 이름 바꾸기").boardFont(11).foregroundStyle(.secondary).lineLimit(1)
             } else {
                 Text(tab.focused.session.map(doing) ?? tab.focused.title).boardFont(12).foregroundStyle(.secondary).lineLimit(1)
             }
             Spacer(minLength: 0)
-            if let n = shortcut {
+            if let n = shortcut, let key = keys.label("tab\(n)") {
                 // 폭은 × 와 같게 두어 탭 폭이 흔들리지 않게(글자는 넘쳐 그린다)
-                Text("⌘\(n)").boardFont(10, weight: .semibold).foregroundStyle(.secondary)
+                Text(key).boardFont(10, weight: .semibold).foregroundStyle(.secondary)
                     .fixedSize().frame(width: 16, height: 16)
             } else {
                 Button { TerminalHub.shared.requestClose(tab) } label: {
@@ -7368,6 +7370,7 @@ struct TerminalEmptyView: View {
 // 제목 막대의 "터미널" 단추 — 미니 제목 막대(폭 300)에는 자리가 없어 숨긴다
 struct TerminalToggleButton: View {
     @ObservedObject private var hub = TerminalHub.shared
+    @ObservedObject var keys = Shortcuts.shared   // 안내 글자의 단축키
     @State private var hover = false
     var body: some View {
         let on = hub.expanded
@@ -7375,9 +7378,11 @@ struct TerminalToggleButton: View {
             HStack(spacing: 5) {
                 Image(systemName: hub.boardOnLeft ? "rectangle.trailinghalf.inset.filled" : "rectangle.leadinghalf.inset.filled")
                 Text(on ? "터미널 펼침" : "터미널 접힘").fixedSize()
-                Text("⌃⌥T").font(.system(size: 10, weight: .medium))
-                    .padding(.horizontal, 4)
-                    .background(RoundedRectangle(cornerRadius: 4).fill(Color.white.opacity(0.08)))
+                if let key = keys.label("terminal") {
+                    Text(key).font(.system(size: 10, weight: .medium))
+                        .padding(.horizontal, 4)
+                        .background(RoundedRectangle(cornerRadius: 4).fill(Color.white.opacity(0.08)))
+                }
             }
             .font(.system(size: 11, weight: .semibold))
             .foregroundStyle(on ? Palette.color("working") : .primary.opacity(hover ? 1 : 0.8))
@@ -7390,8 +7395,8 @@ struct TerminalToggleButton: View {
         }
         .buttonStyle(.plain)
         .clickable($hover)
-        .hint(on ? "터미널 접기: 보드만 \(hub.boardOnLeft ? "왼쪽" : "오른쪽")에 남깁니다 (⌃⌥T)"
-                 : "터미널 펼치기: 보드에서 띄운 세션을 \(hub.boardOnLeft ? "오른쪽" : "왼쪽") 탭에서 봅니다 (⌃⌥T)")
+        .hint((on ? "터미널 접기: 보드만 \(hub.boardOnLeft ? "왼쪽" : "오른쪽")에 남깁니다"
+                  : "터미널 펼치기: 보드에서 띄운 세션을 \(hub.boardOnLeft ? "오른쪽" : "왼쪽") 탭에서 봅니다") + (keys.label("terminal").map { " (\($0))" } ?? ""))
         .fixedSize()
     }
 }
@@ -7689,6 +7694,7 @@ struct MiniRow: View {
 // 창 단추(닫기·최소화·확대) 바로 오른쪽에 붙는 "처음 크기로 오른쪽(왼쪽)에 붙이기" 단추 — 보드 위치에 따라 그림·설명이 바뀐다
 struct SnapButton: View {
     @ObservedObject private var hub = TerminalHub.shared
+    @ObservedObject var keys = Shortcuts.shared   // 안내 글자의 단축키
     @State private var hover = false
     var body: some View {
         Button(action: snapToSide) {
@@ -7705,35 +7711,401 @@ struct SnapButton: View {
         }
         .buttonStyle(.plain)
         .clickable($hover)
-        .hint("처음 크기로 되돌려 화면 \(hub.boardOnLeft ? "왼쪽" : "오른쪽")에 붙이기 (⌃⌥B)")
+        .hint("처음 크기로 되돌려 화면 \(hub.boardOnLeft ? "왼쪽" : "오른쪽")에 붙이기" + (keys.label("snap").map { " (\($0))" } ?? ""))
         .padding(.leading, 4)
     }
 }
 
-// 전역 단축키 — ⌃⌥B: 어느 앱에서든 보드를 처음 크기로 보드 쪽 끝(오른쪽·왼쪽)에 붙이고 앞으로 꺼낸다(포커스는 지금 앱에 남긴다).
-// ⌃⌥T: 터미널 펼치기·접기(toggleTerminal). Carbon 단축키는 손쉬운 사용 권한이 필요 없다
-func registerHotKeys() {
-    var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
-    InstallEventHandler(GetApplicationEventTarget(), { _, event, _ in
-        var key = EventHotKeyID()
-        GetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID), nil,
-                          MemoryLayout<EventHotKeyID>.size, nil, &key)
-        DispatchQueue.main.async {
-            if key.id == 2 {
-                toggleTerminal()
-            } else {
-                window.orderFrontRegardless()
-                snapToSide()
+// MARK: - 단축키
+
+// 키 하나 — 키 번호(자판 위치)와 수정키(⌘⌃⌥⇧ 만). 글자가 아니라 키 번호로 맞추므로 한글 입력기에서도 같은 키다
+struct KeyCombo: Equatable {
+    var code: UInt16
+    var mods: NSEvent.ModifierFlags
+
+    init(_ code: Int, _ mods: NSEvent.ModifierFlags) {
+        self.code = UInt16(code)
+        self.mods = mods.intersection([.command, .control, .option, .shift])
+    }
+    init(_ e: NSEvent) { self.init(Int(e.keyCode), e.modifierFlags) }
+
+    // 글자로 나오지 않는 키 — 화면에 보일 기호와 메뉴 keyEquivalent 글자
+    static let specialKeys: [Int: (label: String, key: String)] = {
+        func fk(_ v: Int) -> String { String(Character(UnicodeScalar(v)!)) }
+        var m: [Int: (label: String, key: String)] = [
+            36: ("↩", "\r"), 76: ("⌤", "\u{3}"), 48: ("⇥", "\t"), 49: ("Space", " "), 51: ("⌫", "\u{8}"),
+            117: ("⌦", fk(NSDeleteFunctionKey)), 115: ("↖", fk(NSHomeFunctionKey)), 119: ("↘", fk(NSEndFunctionKey)),
+            116: ("⇞", fk(NSPageUpFunctionKey)), 121: ("⇟", fk(NSPageDownFunctionKey)),
+            123: ("←", fk(NSLeftArrowFunctionKey)), 124: ("→", fk(NSRightArrowFunctionKey)),
+            125: ("↓", fk(NSDownArrowFunctionKey)), 126: ("↑", fk(NSUpArrowFunctionKey)),
+        ]
+        for (i, code) in functionKeys.enumerated() { m[code] = ("F\(i + 1)", fk(NSF1FunctionKey + i)) }
+        return m
+    }()
+    static let functionKeys = [122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111]   // F1~F12
+
+    // 화면에 보이는 키 — macOS 메뉴와 같은 순서(⌃⌥⇧⌘)
+    var label: String {
+        var s = ""
+        if mods.contains(.control) { s += "⌃" }
+        if mods.contains(.option) { s += "⌥" }
+        if mods.contains(.shift) { s += "⇧" }
+        if mods.contains(.command) { s += "⌘" }
+        return s + (KeyCombo.specialKeys[Int(code)]?.label ?? asciiKeyCharacters(code, shift: false)?.uppercased() ?? "#\(code)")
+    }
+
+    // 메뉴 항목의 keyEquivalent — 글자는 ASCII 자판에서 읽는다(Shift 기호는 Shift 글자 그대로 ⇧⌘[ = "{", 영문자는 소문자 + Shift).
+    // ⇧⇥ 는 AppKit 이 backtab 글자로 보낸다
+    var menuKey: String {
+        if code == 48, mods.contains(.shift) { return "\u{19}" }
+        if let k = KeyCombo.specialKeys[Int(code)] { return k.key }
+        return (asciiKeyCharacters(code, shift: mods.contains(.shift)) ?? "").lowercased()
+    }
+
+    var carbonMods: UInt32 {
+        var m = 0
+        if mods.contains(.command) { m |= cmdKey }
+        if mods.contains(.control) { m |= controlKey }
+        if mods.contains(.option) { m |= optionKey }
+        if mods.contains(.shift) { m |= shiftKey }
+        return UInt32(m)
+    }
+}
+
+// 바꿀 수 있는 동작 하나 — id 는 보드 설정 shortcuts 의 열쇠라 바꾸면 사용자가 바꾼 키가 사라진다
+struct ShortcutAction {
+    let id: String
+    let group: String
+    let title: String
+    let initial: KeyCombo?
+}
+
+// 보드 단축키 표 — 앱 메뉴 > 단축키…(⌘,)에서 바꾼다. 메뉴의 keyEquivalent·전역 단축키(Carbon)·화면의 안내 글자를 모두 여기서 만든다.
+// 바꾼 것만 보드 설정 shortcuts 에 [id: [키 번호, 수정키]] 로 남기고, 비운 것은 [] 다.
+// ⌘C·⌘Q 같은 macOS 표준 키와 ⌘W(엔진이 화면을 닫는다)는 표에 없고 고를 수도 없다(reserved)
+@MainActor final class Shortcuts: ObservableObject {
+    static let shared = Shortcuts()
+
+    static let actions: [ShortcutAction] = {
+        var a: [ShortcutAction] = []
+        func add(_ group: String, _ id: String, _ title: String, _ code: Int?, _ mods: NSEvent.ModifierFlags = []) {
+            a.append(ShortcutAction(id: id, group: group, title: title, initial: code.map { KeyCombo($0, mods) }))
+        }
+        let co: NSEvent.ModifierFlags = [.control, .option]
+        add("보드", "showBoard", "세션 보드 보기", 29, .command)
+        add("보드", "pin", "항상 위에 고정", 35, .command)
+        add("보드", "snap", "처음 크기로 붙이기 (어느 앱에서든)", 11, co)
+        add("보드", "terminal", "터미널 펼치기·접기 (어느 앱에서든)", 17, co)
+        add("터미널", "newSession", "새 세션…", 17, .command)
+        add("터미널", "rename", "탭 이름 바꾸기", 15, [.command, .shift])
+        for (n, code) in zip(1...9, [18, 19, 20, 21, 23, 22, 26, 28, 25]) { add("탭으로 가기", "tab\(n)", "탭 \(n)", code, .command) }
+        add("탭으로 가기", "prevTab", "이전 탭", 123, co)
+        add("탭으로 가기", "nextTab", "다음 탭", 124, co)
+        add("탭으로 가기", "prevTab2", "이전 탭 (보조)", 33, [.command, .shift])
+        add("탭으로 가기", "nextTab2", "다음 탭 (보조)", 30, [.command, .shift])
+        add("탭으로 가기", "prevTab3", "이전 탭 (보조 2)", 48, [.control, .shift])
+        add("탭으로 가기", "nextTab3", "다음 탭 (보조 2)", 48, .control)
+        add("탭으로 가기", "prevWorkspace", "이전 경로", 126, co)
+        add("탭으로 가기", "nextWorkspace", "다음 경로", 125, co)
+        add("화면 나누기", "splitRight", "오른쪽으로 나누기", 2, .command)
+        add("화면 나누기", "splitDown", "아래로 나누기", 2, [.command, .shift])
+        add("화면 나누기", "prevSurface", "이전 화면", 33, .command)
+        add("화면 나누기", "nextSurface", "다음 화면", 30, .command)
+        let arrows = [("Up", "위로", 126), ("Down", "아래로", 125), ("Left", "왼쪽으로", 123), ("Right", "오른쪽으로", 124)]
+        for (id, name, code) in arrows { add("화면 나누기", "focus\(id)", "\(name) 화면 고르기", code, [.command, .option]) }
+        for (id, name, code) in arrows { add("화면 나누기", "resize\(id)", "경계를 \(name) 옮기기", code, [.command, .control]) }
+        add("화면 나누기", "equalize", "크기 고르게", 24, [.command, .control])
+        add("화면 나누기", "zoom", "화면 하나 크게 보기", 36, [.command, .shift])
+        add("글자 크기", "terminalBigger", "터미널 글자 크게", 24, [.command, .shift])
+        add("글자 크기", "terminalBigger2", "터미널 글자 크게 (보조)", 24, .command)
+        add("글자 크기", "terminalSmaller", "터미널 글자 작게", 27, .command)
+        add("글자 크기", "terminalReset", "터미널 글자 원래 크기", nil)
+        add("글자 크기", "boardBigger", "보드 글자 크게", 24, [.command, .option, .shift])
+        add("글자 크기", "boardBigger2", "보드 글자 크게 (보조)", 24, [.command, .option])
+        add("글자 크기", "boardSmaller", "보드 글자 작게", 27, [.command, .option])
+        add("글자 크기", "boardReset", "보드 글자 원래 크기", 29, [.command, .option])
+        return a
+    }()
+
+    // 고를 수 없는 키 — macOS 표준 편집·창 키(⌘Q·⌘H·⌥⌘H·⌘M·⌘W·⌘C·⌘V·⌘X·⌘A·⌘Z·⇧⌘Z)와 이 창을 여는 ⌘,
+    static let reserved = [12, 4, 46, 13, 8, 9, 7, 0, 6, 43].map { KeyCombo($0, .command) }
+        + [KeyCombo(6, [.command, .shift]), KeyCombo(4, [.command, .option])]
+    static let settingsKey = KeyCombo(43, .command)
+
+    @Published private(set) var overrides = UserDefaults.standard.dictionary(forKey: "shortcuts") as? [String: [Int]] ?? [:]
+    @Published private(set) var hotKeyFailed: Set<String> = []   // 전역 단축키로 등록하지 못한 동작
+    private var items: [String: NSMenuItem] = [:]
+    private var hotKeyRefs: [EventHotKeyRef] = []
+    private var handlerInstalled = false
+
+    func action(_ id: String) -> ShortcutAction? { Self.actions.first { $0.id == id } }
+
+    func combo(_ id: String) -> KeyCombo? {
+        guard let v = overrides[id] else { return action(id)?.initial }
+        return v.count == 2 ? KeyCombo(v[0], NSEvent.ModifierFlags(rawValue: UInt(v[1]))) : nil
+    }
+
+    func label(_ id: String) -> String? { combo(id)?.label }
+
+    // 기본값과 같은 키로 돌아오면 남긴 것을 지운다. nil 은 비우기
+    func set(_ id: String, _ c: KeyCombo?) {
+        if c == action(id)?.initial { overrides[id] = nil } else { overrides[id] = c.map { [Int($0.code), Int($0.mods.rawValue)] } ?? [] }
+        save()
+    }
+
+    func resetAll() {
+        overrides = [:]
+        save()
+    }
+
+    // 메뉴를 다시 만들고 전역 단축키를 다시 등록한다 — 화면의 안내 글자는 @Published 로 따라 바뀐다
+    private func save() {
+        UserDefaults.standard.set(overrides, forKey: "shortcuts")
+        (NSApp.delegate as? AppDelegate)?.buildMainMenu()
+        registerHotKeys()
+    }
+
+    // 메뉴 항목에 그 동작의 키를 단다. 앱 안 키 감시(handle)도 이 항목의 동작을 부른다
+    func bind(_ item: NSMenuItem, _ id: String) {
+        let c = combo(id)
+        item.keyEquivalent = c?.menuKey ?? ""
+        item.keyEquivalentModifierMask = c?.mods ?? []
+        items[id] = item
+    }
+
+    // 같은 키를 쓰는 다른 동작 — 메뉴는 앞의 것만 받는다
+    func conflicts(_ id: String) -> [String] {
+        guard let c = combo(id) else { return [] }
+        return Self.actions.filter { $0.id != id && combo($0.id) == c }.map(\.id)
+    }
+
+    // 앱 안 키 감시 — 표의 키를 키 번호로 맞춰 그 메뉴 동작을 바로 부른다. 그래서 한글 입력기에서 ⌃⌥ + 글자 키가 메뉴에 맞지 않는 일도,
+    // 터미널에 포커스가 있을 때 엔진이 사용자가 고른 키를 먼저 가져가는 일도 없다(엔진의 unbind 목록을 사용자 키마다 늘리지 않는다).
+    // 단축키 창이 키를 받는 중이면 그쪽으로. 모달 창(NSAlert 등)이 떠 있거나 글자 칸에서 한글을 조합하는 중이면 그대로 둔다
+    func handle(_ e: NSEvent) -> NSEvent? {
+        if ShortcutSettings.shared.recording != nil { return ShortcutSettings.shared.record(e) }
+        guard NSApp.modalWindow == nil, (e.window?.firstResponder as? NSTextView)?.hasMarkedText() != true else { return e }
+        let c = KeyCombo(e)
+        // ⌘, 는 엔진 기본값(open_config)이 먼저 가져가므로 여기서 받는다
+        if c == Self.settingsKey { ShortcutSettings.shared.open(); return nil }
+        guard let id = Self.actions.first(where: { combo($0.id) == c })?.id, let item = items[id], let sel = item.action else { return e }
+        NSApp.sendAction(sel, to: item.target, from: item)
+        return nil
+    }
+
+    // 전역 단축키 — 처음 크기로 붙이기(기본 ⌃⌥B): 어느 앱에서든 보드를 처음 크기로 보드 쪽 끝(오른쪽·왼쪽)에 붙이고 앞으로 꺼낸다(포커스는
+    // 지금 앱에 남긴다). 터미널 펼치기·접기(기본 ⌃⌥T). Carbon 단축키는 손쉬운 사용 권한이 필요 없다.
+    // 표가 바뀔 때마다 다시 등록하고, 단축키 창이 키를 받는 동안은 풀어 둔다(paused — 누른 키가 동작하지 않고 창에 들어가게)
+    func registerHotKeys(paused: Bool = false) {
+        if !handlerInstalled {
+            handlerInstalled = true
+            var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+            InstallEventHandler(GetApplicationEventTarget(), { _, event, _ in
+                var key = EventHotKeyID()
+                GetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID), nil,
+                                  MemoryLayout<EventHotKeyID>.size, nil, &key)
+                DispatchQueue.main.async {
+                    if key.id == 2 {
+                        toggleTerminal()
+                    } else {
+                        window.orderFrontRegardless()
+                        snapToSide()
+                    }
+                }
+                return noErr
+            }, 1, &spec, nil, nil)
+        }
+        hotKeyRefs.forEach { UnregisterEventHotKey($0) }
+        hotKeyRefs = []
+        guard !paused else { return }
+        var failed: Set<String> = []
+        for (n, id) in [(UInt32(1), "snap"), (UInt32(2), "terminal")] {
+            guard let c = combo(id) else { continue }
+            var ref: EventHotKeyRef?
+            let hid = EventHotKeyID(signature: OSType(0x43424F44), id: n)   // 'CBOD'
+            let status = RegisterEventHotKey(UInt32(c.code), c.carbonMods, hid, GetApplicationEventTarget(), 0, &ref)
+            // 다른 앱이 먼저 잡은 단축키면 등록에 실패한다 — 보드는 그대로 동작하고 로그를 남기고 단축키 창에 알린다
+            if status == noErr, let ref { hotKeyRefs.append(ref) } else {
+                failed.insert(id)
+                boardLog("전역 단축키 \(c.label) 등록 실패 (\(status))")
             }
         }
-        return noErr
-    }, 1, &spec, nil, nil)
-    for (code, n, name) in [(kVK_ANSI_B, UInt32(1), "⌃⌥B"), (kVK_ANSI_T, UInt32(2), "⌃⌥T")] {
-        var ref: EventHotKeyRef?
-        let id = EventHotKeyID(signature: OSType(0x43424F44), id: n)   // 'CBOD'
-        let status = RegisterEventHotKey(UInt32(code), UInt32(controlKey | optionKey), id, GetApplicationEventTarget(), 0, &ref)
-        // 다른 앱이 먼저 잡은 단축키면 등록에 실패한다 — 보드는 그대로 동작하고 로그만 남긴다
-        if status != noErr { boardLog("전역 단축키 \(name) 등록 실패 (\(status))") }
+        hotKeyFailed = failed
+    }
+}
+
+// macOS 시스템 단축키(시스템 설정 > 키보드 > 키보드 단축키 가운데 켜 둔 것) — [키 번호, Carbon 수정키]. 다른 앱이 잡은 키는 알 길이 없다
+func systemHotKeys() -> [[Int]] {
+    var ref: Unmanaged<CFArray>?
+    guard CopySymbolicHotKeys(&ref) == noErr, let list = ref?.takeRetainedValue() as? [[String: Any]] else { return [] }
+    let mask = cmdKey | shiftKey | optionKey | controlKey
+    return list.compactMap { d in
+        guard (d[kHISymbolicHotKeyEnabled as String] as? Bool) == true, let code = d[kHISymbolicHotKeyCode as String] as? Int,
+              let mods = d[kHISymbolicHotKeyModifiers as String] as? Int else { return nil }
+        return [code, mods & mask]
+    }
+}
+
+// 단축키 창(앱 메뉴 > 단축키…, ⌘,) — 표의 동작을 묶음별로 보이고, 줄의 키를 누르면 새 키를 받는다(Esc 취소, ⌫ 비우기).
+// 바꾸면 바로 메뉴·전역 단축키·화면 안내 글자에 반영된다. 보드 안에서 겹치면 받아 두고 상대를 비울지 그 줄에서 묻고,
+// 시스템 단축키와 겹치면 알린다. 한 번에 하나만(열려 있으면 앞으로)
+@MainActor final class ShortcutSettings: ObservableObject {
+    static let shared = ShortcutSettings()
+    @Published var query = ""
+    @Published private(set) var recording: String?   // 새 키를 받는 중인 동작
+    @Published private(set) var refused: String?     // 받지 않은 키 안내
+    private(set) var systemKeys: [[Int]] = []         // 열 때 읽는다
+    private var win: NSWindow?
+    private var observer: NSObjectProtocol?
+
+    func open() {
+        if let win { win.makeKeyAndOrderFront(nil); return }
+        query = ""
+        refused = nil
+        systemKeys = systemHotKeys()
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 620), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        w.title = "단축키"
+        w.appearance = NSAppearance(named: .darkAqua)
+        w.level = window.level   // 위에 고정한 보드(.floating)에 가리지 않게
+        w.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        w.isReleasedWhenClosed = false
+        w.contentViewController = NSHostingController(rootView: ShortcutSettingsView(model: self))
+        w.setContentSize(NSSize(width: 480, height: 620))   // ThemePicker 와 같은 까닭 — 붙이는 순간 0 으로 줄어든다
+        let f = window.frame
+        w.setFrameOrigin(NSPoint(x: TerminalHub.shared.boardOnLeft ? f.minX + 20 : f.maxX - w.frame.width - 20, y: f.midY - w.frame.height / 2))
+        win = w
+        observer = NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: w, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.closed() }
+        }
+        w.makeKeyAndOrderFront(nil)
+    }
+
+    func close() { win?.close() }
+
+    func systemTaken(_ c: KeyCombo) -> Bool { systemKeys.contains([Int(c.code), Int(c.carbonMods)]) }
+
+    func startRecording(_ id: String) {
+        recording = id
+        refused = nil
+        Shortcuts.shared.registerHotKeys(paused: true)
+    }
+
+    func stopRecording() {
+        recording = nil
+        Shortcuts.shared.registerHotKeys()
+    }
+
+    // 받는 중에 누른 키 — Esc 취소, ⌫·⌦ 비우기. ⌘·⌃·⌥ 가 없는 키(F1~F12 는 된다)와 고를 수 없는 키는 받지 않고 알린다
+    func record(_ e: NSEvent) -> NSEvent? {
+        guard e.type == .keyDown, let id = recording else { return e }
+        let c = KeyCombo(e)
+        if c.mods.isEmpty, c.code == 53 { stopRecording(); return nil }
+        if c.mods.isEmpty, c.code == 51 || c.code == 117 { stopRecording(); Shortcuts.shared.set(id, nil); return nil }
+        if c.mods.subtracting(.shift).isEmpty, !KeyCombo.functionKeys.contains(Int(c.code)) {
+            refused = "⌘·⌃·⌥ 가운데 하나를 함께 눌러 주세요"
+            return nil
+        }
+        if Shortcuts.reserved.contains(c) {
+            refused = "\(c.label): macOS 기본 키라 쓸 수 없습니다"
+            return nil
+        }
+        refused = nil
+        recording = nil
+        Shortcuts.shared.set(id, c)   // 전역 단축키도 여기서 다시 등록된다
+        return nil
+    }
+
+    private func closed() {
+        if recording != nil { stopRecording() }
+        if let observer { NotificationCenter.default.removeObserver(observer) }
+        observer = nil
+        win = nil
+        if NSApp.isActive, window.isVisible { window.makeKey() }
+    }
+}
+
+struct ShortcutSettingsView: View {
+    @ObservedObject var model: ShortcutSettings
+    @ObservedObject private var keys = Shortcuts.shared
+
+    private var visible: [ShortcutAction] {
+        let q = model.query.trimmingCharacters(in: .whitespaces)
+        return q.isEmpty ? Shortcuts.actions : Shortcuts.actions.filter { $0.title.localizedCaseInsensitiveContains(q) }
+    }
+
+    var body: some View {
+        let list = visible
+        let groups = list.map(\.group).reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }
+        VStack(alignment: .leading, spacing: 10) {
+            TextField("동작 이름 검색", text: $model.query).textFieldStyle(.roundedBorder)
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 1) {
+                    ForEach(groups, id: \.self) { g in
+                        Text(g).boardFont(11, weight: .semibold).foregroundStyle(.secondary).padding(.top, 8).padding(.leading, 8)
+                        ForEach(list.filter { $0.group == g }, id: \.id) { row($0) }
+                    }
+                }
+                .padding(4)
+            }
+            .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.04)))
+            if let r = model.refused { Text(r).boardFont(11).foregroundStyle(.orange) }
+            HStack {
+                Button("모두 기본값으로") { keys.resetAll() }.disabled(keys.overrides.isEmpty)
+                Spacer()
+                Text("키를 누르고 새 키 입력 · Esc 취소 · ⌫ 비우기").boardFont(11).foregroundStyle(.secondary)
+                Button("닫기") { model.close() }
+            }
+        }
+        .padding(14)
+        .frame(width: 480, height: 620)
+        .background(Color(red: 0.11, green: 0.11, blue: 0.17))
+        .preferredColorScheme(.dark)
+        .boardFont(13)
+    }
+
+    // 이름 · (바꿨으면 되돌리기) · 키 단추. 아래에 겹침·시스템 단축키·전역 등록 실패 안내
+    private func row(_ a: ShortcutAction) -> some View {
+        let listening = model.recording == a.id
+        let changed = keys.overrides[a.id] != nil
+        let accent = Palette.color("working")
+        return VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 8) {
+                Text(a.title).lineLimit(1)
+                Spacer(minLength: 8)
+                if changed {
+                    Button { keys.set(a.id, a.initial) } label: {
+                        Image(systemName: "arrow.uturn.backward").font(.system(size: 10, weight: .bold)).foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .hint("기본값(\(a.initial?.label ?? "없음"))으로 되돌리기")
+                }
+                Button { listening ? model.stopRecording() : model.startRecording(a.id) } label: {
+                    Text(listening ? "새 키를 누르세요…" : keys.label(a.id) ?? "없음")
+                        .font(.system(size: 12, weight: .medium, design: .monospaced))
+                        .foregroundStyle(listening ? accent : changed ? Color.yellow : keys.combo(a.id) == nil ? .secondary : .primary)
+                        .padding(.horizontal, 8)
+                        .frame(minWidth: 76, minHeight: 22)
+                        .background(RoundedRectangle(cornerRadius: 5).fill(Color.white.opacity(0.08)))
+                        .overlay(RoundedRectangle(cornerRadius: 5).stroke(listening ? accent : Color.white.opacity(0.15), lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+            }
+            ForEach(keys.conflicts(a.id), id: \.self) { other in
+                HStack(spacing: 6) {
+                    Text("⚠ \"\(keys.action(other)?.title ?? other)\" 항목과 같은 키입니다").foregroundStyle(.orange)
+                    Button("그쪽 비우기") { keys.set(other, nil) }.buttonStyle(.link)
+                }
+                .boardFont(11)
+            }
+            if let c = keys.combo(a.id), model.systemTaken(c) {
+                Text("⚠ macOS 시스템 단축키와 겹칩니다 (시스템 설정 > 키보드 > 키보드 단축키)").boardFont(11).foregroundStyle(.orange)
+            }
+            if keys.hotKeyFailed.contains(a.id) {
+                Text("⚠ 전역 단축키로 등록하지 못했습니다. 다른 앱이 먼저 잡았을 수 있습니다").boardFont(11).foregroundStyle(.orange)
+            }
+        }
+        .padding(.horizontal, 8).padding(.vertical, 5)
+        .background(RoundedRectangle(cornerRadius: 7).fill(listening ? accent.opacity(0.14) : .clear))
     }
 }
 
@@ -8331,7 +8703,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         nc.addObserver(forName: NSWindow.didEndLiveResizeNotification, object: window, queue: .main) { _ in
             MainActor.assumeIsolated { if BoardFit.shared.tier != .mini, !TerminalHub.shared.expanded { saveRestoreFrame() } }
         }
-        registerHotKeys()
+        Shortcuts.shared.registerHotKeys()
+        // 보드 단축키는 메뉴보다 먼저 키 번호로 맞춘다(Shortcuts.handle)
+        NSEvent.addLocalMonitorForEvents(matching: .keyDown) { e in Shortcuts.shared.handle(e) }
         applyPin(UserDefaults.standard.bool(forKey: "pinned"))
         WindowOpacity.shared.apply()
         buildMainMenu()
@@ -8354,13 +8728,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     }
 
     // 상단 앱 메뉴: 보드 보기 · 항상 위에 고정 · 종료
-    func buildMainMenu() {
+    @MainActor func buildMainMenu() {
         let main = NSMenu()
         let appItem = NSMenuItem()
         main.addItem(appItem)
         let appMenu = NSMenu()
-        appMenu.addItem(withTitle: "세션 보드 보기", action: #selector(showBoardAction), keyEquivalent: "0")
-        appMenu.addItem(withTitle: "항상 위에 고정", action: #selector(togglePin), keyEquivalent: "p")
+        let keys = Shortcuts.shared
+        keys.bind(appMenu.addItem(withTitle: "세션 보드 보기", action: #selector(showBoardAction), keyEquivalent: ""), "showBoard")
+        keys.bind(appMenu.addItem(withTitle: "항상 위에 고정", action: #selector(togglePin), keyEquivalent: ""), "pin")
         // 제목 오른쪽 캐릭터 고르기 — 캐릭터를 오른쪽 클릭해도 같은 목록이 나온다. 체크 표시는 validateMenuItem 이 단다
         let mascotMenu = NSMenu(title: "캐릭터")   // 하위 메뉴를 달면 항목 이름이 하위 메뉴 제목을 따른다
         for m in Mascot.allCases {
@@ -8374,6 +8749,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             positionMenu.addItem(withTitle: name, action: #selector(pickNotifyPosition(_:)), keyEquivalent: "").representedObject = value
         }
         appMenu.addItem(withTitle: "알림 위치", action: nil, keyEquivalent: "").submenu = positionMenu
+        // 보드 단축키를 바꾸는 창 — ⌘, 는 표에 없고 바꿀 수 없다(엔진이 먼저 가져가는 키라 Shortcuts.handle 이 받는다)
+        let settings = ActionItem("단축키…") { ShortcutSettings.shared.open() }
+        settings.keyEquivalent = ","
+        appMenu.addItem(settings)
         appMenu.addItem(withTitle: "업데이트 확인…", action: #selector(checkForUpdates), keyEquivalent: "")
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Claude Board 가리기", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
@@ -8407,16 +8786,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         windowMenu.addItem(withTitle: "최소화", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
         windowMenu.addItem(.separator())
         // 단축키 표시용 — 실제 동작은 전역 단축키(registerSnapHotKey)가 받는다. 제목(오른쪽·왼쪽)은 validateMenuItem 이 보드 위치에 맞춘다
-        let snap = NSMenuItem(title: "처음 크기로 오른쪽에 붙이기", action: #selector(snapAction), keyEquivalent: "b")
-        snap.keyEquivalentModifierMask = [.control, .option]
+        let snap = NSMenuItem(title: "처음 크기로 오른쪽에 붙이기", action: #selector(snapAction), keyEquivalent: "")
+        keys.bind(snap, "snap")
         windowMenu.addItem(snap)
         let term = ActionItem("터미널 펼치기·접기") { toggleTerminal() }
-        term.keyEquivalent = "t"
-        term.keyEquivalentModifierMask = [.control, .option]
+        keys.bind(term, "terminal")
         windowMenu.addItem(term)
         // 탭 줄의 "+ 새 세션" 과 같다(접혀 있으면 펼친다). 터미널에 포커스가 있어도 오도록 엔진의 ⌘T(new_tab)는 풀어 두었다
         let newSession = ActionItem("새 세션…") { TerminalHub.shared.newSessionSheet() }
-        newSession.keyEquivalent = "t"
+        keys.bind(newSession, "newSession")
         windowMenu.addItem(newSession)
         // ⌘1~⌘9 — 탭 줄(지금 경로의 탭) 순서대로 그 탭으로(접혀 있으면 펼친다). 그 자리에 탭이 없으면 그대로. 엔진의 ⌘1~⌘9(goto_tab·last_tab)는 풀어 두었다
         let tabMenu = NSMenu(title: "탭으로 가기")
@@ -8425,81 +8803,77 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                 let hub = TerminalHub.shared, list = hub.tabs(in: hub.workspace)
                 if list.indices.contains(n - 1) { hub.reveal(list[n - 1].id) }
             }
-            item.keyEquivalent = "\(n)"
+            keys.bind(item, "tab\(n)")
             tabMenu.addItem(item)
         }
         tabMenu.addItem(.separator())
-        func arrow(_ key: Int) -> String { String(Character(UnicodeScalar(key)!)) }
-        func keyItem(_ menu: NSMenu, _ title: String, _ key: String, _ mods: NSEvent.ModifierFlags, hidden: Bool = false,
-                     run: @escaping @MainActor () -> Void) {
+        // 키는 단축키 표(id)에서 — 숨긴 항목은 메뉴에 보이지 않는 보조 키
+        func keyItem(_ menu: NSMenu, _ title: String, _ id: String, hidden: Bool = false, run: @escaping @MainActor () -> Void) {
             let item = ActionItem(title, run: run)
-            item.keyEquivalent = key
-            item.keyEquivalentModifierMask = mods
+            keys.bind(item, id)
             item.isHidden = hidden
             item.allowsKeyEquivalentWhenHidden = hidden
             menu.addItem(item)
         }
         // ⌃⌥←·⌃⌥→ — 탭 줄에서 왼쪽·오른쪽 탭으로(지금 경로 안에서, 끝에서는 반대쪽 끝으로, 접혀 있으면 펼친다). Ghostty 의 탭 키
         // ⇧⌘[·⇧⌘]·⌃⇧⇥·⌃⇥ 도 숨긴 항목으로 받는다(엔진의 같은 키 previous_tab·next_tab 은 풀어 두었다)
-        keyItem(tabMenu, "이전 탭", arrow(NSLeftArrowFunctionKey), [.control, .option]) { TerminalHub.shared.stepTab(-1) }
-        keyItem(tabMenu, "다음 탭", arrow(NSRightArrowFunctionKey), [.control, .option]) { TerminalHub.shared.stepTab(1) }
-        keyItem(tabMenu, "이전 탭", "{", [.command, .shift], hidden: true) { TerminalHub.shared.stepTab(-1) }
-        keyItem(tabMenu, "다음 탭", "}", [.command, .shift], hidden: true) { TerminalHub.shared.stepTab(1) }
-        keyItem(tabMenu, "이전 탭", "\u{19}", [.control, .shift], hidden: true) { TerminalHub.shared.stepTab(-1) }
-        keyItem(tabMenu, "다음 탭", "\t", [.control], hidden: true) { TerminalHub.shared.stepTab(1) }
+        keyItem(tabMenu, "이전 탭", "prevTab") { TerminalHub.shared.stepTab(-1) }
+        keyItem(tabMenu, "다음 탭", "nextTab") { TerminalHub.shared.stepTab(1) }
+        keyItem(tabMenu, "이전 탭", "prevTab2", hidden: true) { TerminalHub.shared.stepTab(-1) }
+        keyItem(tabMenu, "다음 탭", "nextTab2", hidden: true) { TerminalHub.shared.stepTab(1) }
+        keyItem(tabMenu, "이전 탭", "prevTab3", hidden: true) { TerminalHub.shared.stepTab(-1) }
+        keyItem(tabMenu, "다음 탭", "nextTab3", hidden: true) { TerminalHub.shared.stepTab(1) }
         tabMenu.addItem(.separator())
         // ⌃⌥↑·⌃⌥↓ — 경로 줄에서 앞·뒤 경로로(그 경로에서 마지막에 고른 탭, 끝에서는 반대쪽 끝으로, 접혀 있으면 펼친다)
-        keyItem(tabMenu, "이전 경로", arrow(NSUpArrowFunctionKey), [.control, .option]) { TerminalHub.shared.stepWorkspace(-1) }
-        keyItem(tabMenu, "다음 경로", arrow(NSDownArrowFunctionKey), [.control, .option]) { TerminalHub.shared.stepWorkspace(1) }
+        keyItem(tabMenu, "이전 경로", "prevWorkspace") { TerminalHub.shared.stepWorkspace(-1) }
+        keyItem(tabMenu, "다음 경로", "nextWorkspace") { TerminalHub.shared.stepWorkspace(1) }
         windowMenu.addItem(withTitle: "탭으로 가기", action: nil, keyEquivalent: "").submenu = tabMenu
         // 화면 나누기 — Ghostty 와 같은 키. 보드가 탭마다 화면 트리를 쥐고, 엔진의 같은 키는 풀어 두었다(⌘W 는 엔진이 그 화면을 닫는다)
         let splitMenu = NSMenu(title: "화면 나누기")
-        keyItem(splitMenu, "오른쪽으로 나누기", "d", [.command]) { TerminalHub.shared.split(right: true) }
-        keyItem(splitMenu, "아래로 나누기", "d", [.command, .shift]) { TerminalHub.shared.split(right: false) }
+        keyItem(splitMenu, "오른쪽으로 나누기", "splitRight") { TerminalHub.shared.split(right: true) }
+        keyItem(splitMenu, "아래로 나누기", "splitDown") { TerminalHub.shared.split(right: false) }
         splitMenu.addItem(.separator())
-        keyItem(splitMenu, "이전 화면", "[", [.command]) { TerminalHub.shared.focusSurface(step: -1) }
-        keyItem(splitMenu, "다음 화면", "]", [.command]) { TerminalHub.shared.focusSurface(step: 1) }
-        let directions: [(String, Int, SplitDirection)] = [("위로", NSUpArrowFunctionKey, .up), ("아래로", NSDownArrowFunctionKey, .down),
-                                                          ("왼쪽으로", NSLeftArrowFunctionKey, .left), ("오른쪽으로", NSRightArrowFunctionKey, .right)]
-        for (name, key, d) in directions {
-            keyItem(splitMenu, "\(name) 화면 고르기", arrow(key), [.command, .option]) { TerminalHub.shared.focusSurface(d) }
+        keyItem(splitMenu, "이전 화면", "prevSurface") { TerminalHub.shared.focusSurface(step: -1) }
+        keyItem(splitMenu, "다음 화면", "nextSurface") { TerminalHub.shared.focusSurface(step: 1) }
+        let directions: [(String, String, SplitDirection)] = [("위로", "Up", .up), ("아래로", "Down", .down),
+                                                             ("왼쪽으로", "Left", .left), ("오른쪽으로", "Right", .right)]
+        for (name, id, d) in directions {
+            keyItem(splitMenu, "\(name) 화면 고르기", "focus\(id)") { TerminalHub.shared.focusSurface(d) }
         }
         splitMenu.addItem(.separator())
-        for (name, key, d) in directions {
-            keyItem(splitMenu, "경계를 \(name) 옮기기", arrow(key), [.command, .control]) { TerminalHub.shared.resizeSplit(d) }
+        for (name, id, d) in directions {
+            keyItem(splitMenu, "경계를 \(name) 옮기기", "resize\(id)") { TerminalHub.shared.resizeSplit(d) }
         }
-        keyItem(splitMenu, "크기 고르게", "=", [.command, .control]) { TerminalHub.shared.equalizeSplits() }
+        keyItem(splitMenu, "크기 고르게", "equalize") { TerminalHub.shared.equalizeSplits() }
         splitMenu.addItem(.separator())
-        keyItem(splitMenu, "화면 하나 크게 보기", "\r", [.command, .shift]) { TerminalHub.shared.toggleZoom() }
+        keyItem(splitMenu, "화면 하나 크게 보기", "zoom") { TerminalHub.shared.toggleZoom() }
         windowMenu.addItem(withTitle: "화면 나누기", action: nil, keyEquivalent: "").submenu = splitMenu
         // ⇧⌘R — 고른 탭의 이름을 탭 안에서 고친다(접혀 있으면 펼친다). 탭이 없으면 그대로. 엔진 기본값은 이 키를 묶지 않는다
         let rename = ActionItem("탭 이름 바꾸기") { TerminalHub.shared.beginRename() }
-        rename.keyEquivalent = "r"
-        rename.keyEquivalentModifierMask = [.command, .shift]
+        keys.bind(rename, "rename")
         windowMenu.addItem(rename)
         // 글자 크기 — 터미널(모든 탭, 1pt씩)과 보드(10%씩)를 따로 정한다. 둘 다 다시 켜도 남는다. 엔진의 ⌘+·⌘=·⌘-·⌘0 은 풀어 두어
         // 터미널 포커스에서도 여기로 온다. ⌘0 은 이미 "세션 보드 보기" 라 터미널 원래 크기는 단축키가 없다
         let fontMenu = NSMenu(title: "글자 크기")
         // 보이는 항목은 +, 같은 키의 = (Shift 없이)는 숨긴 항목으로 받는다
-        func sizeItem(_ title: String, _ key: String, _ mods: NSEvent.ModifierFlags, hidden: Bool = false, run: @escaping @MainActor () -> Void) {
+        func sizeItem(_ title: String, _ id: String, hidden: Bool = false, run: @escaping @MainActor () -> Void) {
             let item = ActionItem(title, run: run)
-            item.keyEquivalent = key
-            item.keyEquivalentModifierMask = mods
+            keys.bind(item, id)
             item.isHidden = hidden
             item.allowsKeyEquivalentWhenHidden = hidden
             fontMenu.addItem(item)
         }
-        sizeItem("터미널 글자 크게", "+", [.command]) { TerminalHub.shared.changeTerminalFont(1) }
-        sizeItem("터미널 글자 크게", "=", [.command], hidden: true) { TerminalHub.shared.changeTerminalFont(1) }
-        sizeItem("터미널 글자 작게", "-", [.command]) { TerminalHub.shared.changeTerminalFont(-1) }
-        sizeItem("터미널 글자 원래 크기", "", []) { TerminalHub.shared.changeTerminalFont(nil) }
+        // + 는 Shift 까지 넣은 키(⇧⌘=)다 — 예전처럼 ⌘ 만 넣은 "+" 는 AppKit 이 ⌥⇧⌘= 에서 ⌥ 를 빼고 터미널 쪽으로 보냈다(실측).
+        // 지금은 Shortcuts.handle 이 키 번호로 먼저 맞춰 메뉴까지 가지 않는다
+        sizeItem("터미널 글자 크게", "terminalBigger") { TerminalHub.shared.changeTerminalFont(1) }
+        sizeItem("터미널 글자 크게", "terminalBigger2", hidden: true) { TerminalHub.shared.changeTerminalFont(1) }
+        sizeItem("터미널 글자 작게", "terminalSmaller") { TerminalHub.shared.changeTerminalFont(-1) }
+        sizeItem("터미널 글자 원래 크기", "terminalReset") { TerminalHub.shared.changeTerminalFont(nil) }
         fontMenu.addItem(.separator())
-        sizeItem("보드 글자 크게", "+", [.command, .option]) { BoardFontScale.shared.change(1) }
-        sizeItem("보드 글자 크게", "=", [.command, .option], hidden: true) { BoardFontScale.shared.change(1) }
-        // ⌥⇧⌘= 는 Shift 까지 넣은 항목에만 맞는다 — 없으면 AppKit 이 ⌥ 를 빼고 "터미널 글자 크게"(⌘+)로 보냈다(실측)
-        sizeItem("보드 글자 크게", "+", [.command, .option, .shift], hidden: true) { BoardFontScale.shared.change(1) }
-        sizeItem("보드 글자 작게", "-", [.command, .option]) { BoardFontScale.shared.change(-1) }
-        sizeItem("보드 글자 원래 크기", "0", [.command, .option]) { BoardFontScale.shared.change(nil) }
+        sizeItem("보드 글자 크게", "boardBigger") { BoardFontScale.shared.change(1) }
+        sizeItem("보드 글자 크게", "boardBigger2", hidden: true) { BoardFontScale.shared.change(1) }
+        sizeItem("보드 글자 작게", "boardSmaller") { BoardFontScale.shared.change(-1) }
+        sizeItem("보드 글자 원래 크기", "boardReset") { BoardFontScale.shared.change(nil) }
         windowMenu.addItem(withTitle: "글자 크기", action: nil, keyEquivalent: "").submenu = fontMenu
         // 터미널 테마 — 엔진에 든 테마를 고르는 창(보드 설정 terminalTheme, 고르지 않았으면 Ghostty 설정의 theme). 단축키 없음
         windowMenu.addItem(ActionItem("터미널 테마…") { ThemePicker.shared.open() })
