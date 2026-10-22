@@ -86,7 +86,7 @@ Claude Code hook ──> state.py  ──> ~/.claude/notifier/sessions/<session_
   `confirmShutdown`(업데이트·종료 전 확인, 끊기는 탭의 주 세션에 `.paused`), `driveSession`(보드 탭은 탭에 직접, Ghostty 는 AppleScript),
   `mdRenderDir`·`mdRenderCommand`(md-render 를 `~/.claude/notifier/plugins/` 로 옮기고 `--plugin-dir` 을 한 번만 붙임, 끈 세션은 `mdRenderOff`). 보드 쪽 문제는 `~/.claude/notifier/board.log`.
   설계·결정·실측은 `docs/내장 터미널/설계.md`(11장 단계별 메모) — 이 기능을 바꿀 때 먼저 본다.
-- `ClaudeAutopilot.swift` — 자율주행 엔진 `claude-autopilot`(`start`·`run`·`control`·`status`·`records import`). 보드 앱 밖에서 LaunchAgent(KeepAlive)로 돌고, 출발 때 실행 폴더 `pinned/` 에 고정한 자기 사본과 설정(`frozen.json`, 해시는 LaunchAgent 인자)으로 돈다. 모델 세션은 Claude Code 샌드박스(`--settings`)·고른 환경 변수·`--setting-sources project,local` 로 띄운다. 앱 `Contents/MacOS/` 에 build-board.sh·make-dmg.sh 가 함께 싣는다. 설계·실측은 `docs/자율주행/설계.md`·`진행 상황.md`.
+- `ClaudeAutopilot.swift` — 자율주행 엔진 `claude-autopilot`(`start`·`run`·`control`·`status`·`records import`·`prerun`·`finish`). 보드 앱 밖에서 LaunchAgent(KeepAlive)로 돌고, 출발 때 실행 폴더 `pinned/` 에 고정한 자기 사본과 설정(`frozen.json`, 해시는 LaunchAgent 인자)으로 돈다. 모델 세션은 Claude Code 샌드박스(`--settings`)·고른 환경 변수·`--setting-sources project,local` 로 띄운다. 앱 `Contents/MacOS/` 에 build-board.sh·make-dmg.sh 가 함께 싣는다. 설계·실측은 `docs/자율주행/설계.md`·`진행 상황.md`.
 - `ClaudeNotifier.swift` — 알림 패널. 인자는 파일 머리 주석 참고. 여러 패널이 동시에 뜨면 슬롯 파일로 자리를 나눈다. `--session` 을 받으면 누를 때 보드에 `focus` 동작을 알린다.
 - `board-tui.py` — 터미널판 보드(`claude-board-tui`).
 - `AppIcon.swift` — 앱 아이콘 PNG(iconset 이름 규칙)를 인자로 준 폴더에 그린다. 결과 `AppIcon.icns` 는 저장소에 커밋되어 있다.

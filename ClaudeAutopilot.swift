@@ -8,6 +8,9 @@
 //        claude-autopilot status <실행 폴더> [--dev]                  사람이 읽는 한 화면 요약
 //        claude-autopilot records import [--dev|--db <파일>] [--project <이름>] [--unit-key <칸 경로>] <원본…>
 //                                                                   실행 기록 저장소(SQLite)에 실행 폴더·일반 꼴 대기열을 옮겨 담기
+//        claude-autopilot prerun <실행 폴더> [--dev]                  출발 전 판정 미리 돌리기(prerun.json)
+//        claude-autopilot finish <실행 폴더> merge --into <가지> [--story <키>] | promote <가지> --into <가지> | discard [--story <키>]
+//                                                                   끝난 실행의 가지 승격(사람이 부른다. 엔진이 스스로 부르지 않는다)
 import Foundation
 import Darwin
 import CryptoKit
@@ -126,14 +129,14 @@ func isDir(_ p: String) -> Bool { var d: ObjCBool = false; return fm.fileExists(
 
 // 짧은 명령(ps·git·launchctl·security)을 돌려 표준 출력을 받는다
 @discardableResult
-func runTool(_ path: String, _ args: [String], cwd: String? = nil, timeout: Double = 30) -> (code: Int32, out: String) {
+func runTool(_ path: String, _ args: [String], cwd: String? = nil, timeout: Double = 30, withErr: Bool = false) -> (code: Int32, out: String) {
     let p = Process()
     p.executableURL = URL(fileURLWithPath: path)
     p.arguments = args
     if let cwd { p.currentDirectoryURL = URL(fileURLWithPath: cwd) }
     let pipe = Pipe()
     p.standardOutput = pipe
-    p.standardError = FileHandle.nullDevice
+    p.standardError = withErr ? pipe : FileHandle.nullDevice
     p.standardInput = FileHandle.nullDevice
     guard (try? p.run()) != nil else { return (-1, "") }
     var data = Data()
@@ -165,6 +168,27 @@ func safeGit(_ args: [String], cwd: String) -> String {
     runTool("/usr/bin/env", ["GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "/usr/bin/git", "--no-optional-locks",
                              "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"] + args, cwd: cwd).out
 }
+// 엔진이 가지를 바꾸는 git(만들기·바꾸기·병합 커밋·ref 올리기): safeGit 과 같은 보호에 종료 코드와 오류 출력까지 돌려준다.
+// 전역 설정을 읽지 않으므로 엔진이 만드는 커밋에는 사용자 신원을 명령줄로 붙인다(없으면 "Please tell me who you are")
+func gitRun(_ args: [String], cwd: String, commit: Bool = false) -> (code: Int32, out: String) {
+    var a = ["GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "/usr/bin/git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"]
+    if commit { let i = gitIdentity(cwd); a += ["-c", "user.name=\(i.name)", "-c", "user.email=\(i.email)"] }
+    let r = runTool("/usr/bin/env", a + args, cwd: cwd, timeout: 120, withErr: true)
+    return (r.code, r.out.trimmingCharacters(in: .whitespacesAndNewlines))
+}
+// 사용자 git 신원(값만 읽는다 — git config --get 은 아무것도 실행하지 않는다). 없으면 엔진 이름
+func gitIdentity(_ cwd: String) -> (name: String, email: String) {
+    func get(_ k: String) -> String? {
+        let v = runTool("/usr/bin/git", ["config", "--get", k], cwd: cwd).out.trimmingCharacters(in: .whitespacesAndNewlines)
+        return v.isEmpty ? nil : v
+    }
+    return (get("user.name") ?? "Claude Board autopilot", get("user.email") ?? "autopilot@claude-board.invalid")
+}
+func gitOut(_ args: [String], cwd: String) -> String? {   // 성공했을 때의 출력(한 줄이면 그 줄)
+    let r = gitRun(args, cwd: cwd)
+    return r.code == 0 ? r.out : nil
+}
+func firstLine(_ s: String) -> String { short(s, 160) }
 func plistPath(_ label: String) -> String { home + "/Library/LaunchAgents/\(label).plist" }
 func launchdLoaded(_ label: String) -> Bool { runTool("/bin/launchctl", ["print", "gui/\(uid())/\(label)"]).code == 0 }
 func commandOf(_ pid: pid_t) -> String { runTool("/bin/ps", ["-o", "command=", "-p", String(pid)]).out.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -438,6 +462,7 @@ let systemPromptText = """
 - 사람이 읽는 글(답, Bash 도구의 description, result.json)은 모두 쉬운 한국어로 쓴다.
 - 홈 폴더 전체를 뒤지는 검색(grep -r ~, find ~ 등)은 하지 않는다. 근거는 단위 글이 적은 경로와 작업 폴더에서 찾는다.
 - 백그라운드로 띄운 명령은 턴을 끝내기 전에 끝낸다. 결과를 보낸 뒤 백그라운드 작업만 남아 오래 조용하면 엔진이 그 작업을 끝내고 넘어간다.
+- 커밋은 엔진이 걸어 둔 지금 작업 가지에만 하고, 한 일은 턴을 끝내기 전에 그 가지에 커밋해 둔다. 다른 가지로 바꾸거나(switch·checkout·rebase) 다른 가지를 옮기거나 지우거나 맞추지(branch -f·update-ref·merge·reset) 않는다. 다른 가지 맞추기는 끝난 뒤 사람이 바뀐 줄을 보고 보드에서 하는 일이라서다(샌드박스도 그런 쓰기를 막는다). 프로젝트 규칙이 dev·live·master 같은 가지에 커밋·병합하거나 가지를 맞추라고 하면, 일은 지금 작업 가지에 커밋하고 맞추기는 하지 않은 채 result.json 의 next_start 에 무엇을 어느 가지로 맞추려 했는지 적는다.
 - 일을 마치면 $CLAUDE_BOARD_UNIT_DIR/result.json 을 쓰고 턴을 끝낸다.
 """
 
@@ -496,8 +521,45 @@ let harnessEntries = ["CLAUDE.md", ".mcp.json", ".claude/CLAUDE.md", ".claude/se
 let harnessNames: Set<String> = ["CLAUDE.md", "CLAUDE.local.md", ".mcp.json"]
 let harnessWalkSkip: Set<String> = [".git", "node_modules", "build", ".gradle", "target", "dist", "out", ".idea", ".build", "DerivedData", "Pods", ".venv"]
 
+// 하네스 파일 하나 읽기(엔진은 샌드박스 밖에서 돈다). 모델이 하위 CLAUDE.md·.claude/ 안에 FIFO·장치 파일 링크(/dev/zero)를 두면
+// 따라가 읽다가 멈추거나 메모리를 다 쓴다(보안 검토) — 링크를 따라가지 않고(O_NOFOLLOW) 보통 파일만, 상한 안에서만 읽는다
+let harnessFileCap = 1 << 20        // 파일 하나 1 MiB
+let harnessTotalCap = 32 << 20      // 한 번 훑을 때 합계 32 MiB
+enum HarnessRead { case data(Data), large(Int), other(String) }   // other: 종류(link:<대상>·fifo·socket·device·dir·other)
+func readHarnessFile(_ p: String, budget: Int) -> HarnessRead? {
+    var st = stat()
+    guard lstat(p, &st) == 0 else { return nil }
+    func kind(_ m: mode_t) -> String {
+        switch m & S_IFMT {
+        case S_IFLNK: return "link:" + ((try? fm.destinationOfSymbolicLink(atPath: p)) ?? "")
+        case S_IFIFO: return "fifo"
+        case S_IFSOCK: return "socket"
+        case S_IFCHR, S_IFBLK: return "device"
+        case S_IFDIR: return "dir"
+        default: return "other"
+        }
+    }
+    guard st.st_mode & S_IFMT == S_IFREG else { return .other(kind(st.st_mode)) }
+    // lstat 과 open 사이에 바꿔치기해도 FIFO 에서 멈추지 않게 O_NONBLOCK, 열고 나서 다시 본다
+    let fd = open(p, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
+    guard fd >= 0 else { return errno == ELOOP ? .other(kind(S_IFLNK)) : nil }
+    defer { close(fd) }
+    guard fstat(fd, &st) == 0 else { return nil }
+    guard st.st_mode & S_IFMT == S_IFREG else { return .other(kind(st.st_mode)) }
+    let size = Int(st.st_size)
+    guard size <= min(harnessFileCap, budget) else { return .large(size) }
+    var d = Data(), buf = [UInt8](repeating: 0, count: 65536)
+    while d.count <= size {
+        let n = read(fd, &buf, buf.count)
+        if n < 0, errno == EINTR { continue }
+        if n <= 0 { break }
+        d.append(contentsOf: buf[0..<n])
+    }
+    return d.count > min(harnessFileCap, budget) ? .large(d.count) : .data(d)   // 읽는 동안 커졌으면 크기만
+}
+
 struct HarnessScan {
-    var files: [[String: Any]] = []     // [{folder, path, sha256, size}] — path 는 폴더 안 상대 경로
+    var files: [[String: Any]] = []     // [{folder, path, sha256, size}] — path 는 폴더 안 상대 경로. 보통 파일이 아니면 sha256 자리에 종류
     var claudeDirs: [String] = []       // 있는 .claude 폴더(절대 경로)
     var ccWrites: [String] = []         // 있는 .claude/.cc-writes 폴더(절대 경로)
     var base: String {                  // 지문 전체의 sha256(경로·sha256·크기 줄을 차례로)
@@ -508,10 +570,17 @@ struct HarnessScan {
 // 폴더마다 깊이 4 까지 내려가며 하네스 파일을 모은다. `.claude/` 는 안을 모두 담되 worktrees/(작업 트리)·.cc-writes/(claude 의 임시 자리)는 뺀다
 func scanHarness(_ folders: [String]) -> HarnessScan {
     var s = HarnessScan()
+    var budget = harnessTotalCap
+    // 보통 파일은 1차와 같은 지문 줄(sha256·크기). 상한을 넘으면 크기만("large"), 링크·FIFO·소켓·장치는 내용 없이 종류만 — 끝 검사에서 "바뀜"으로 잡힌다
     func add(_ folder: String, _ rel: String) {
-        let p = folder + "/" + rel
-        guard let d = fm.contents(atPath: p) else { return }
-        s.files.append(["folder": folder, "path": rel, "sha256": sha256(d), "size": d.count])
+        switch readHarnessFile(folder + "/" + rel, budget: budget) {
+        case .data(let d)?:
+            budget -= d.count
+            s.files.append(["folder": folder, "path": rel, "sha256": sha256(d), "size": d.count])
+        case .large(let n)?: s.files.append(["folder": folder, "path": rel, "sha256": "large", "size": n])
+        case .other(let k)? where k != "dir": s.files.append(["folder": folder, "path": rel, "sha256": k, "size": 0])
+        default: break
+        }
     }
     for folder in folders {
         var level = [""], depth = 0
@@ -524,8 +593,8 @@ func scanHarness(_ folders: [String]) -> HarnessScan {
                     let p = folder + "/" + r
                     if name == ".claude", isDir(p), !isLink(p) {
                         s.claudeDirs.append(p)
-                        if isDir(p + "/.cc-writes") { s.ccWrites.append(p + "/.cc-writes") }
-                        // worktrees/ 안은 프로젝트 흐름이 만든 git 작업 트리(빌드 결과까지)일 수 있어 내려가지 않는다
+                        if isDir(p + "/.cc-writes"), !isLink(p + "/.cc-writes") { s.ccWrites.append(p + "/.cc-writes") }
+                        // worktrees/ 안은 프로젝트 흐름이 만든 git 작업 트리(빌드 결과까지)일 수 있어 내려가지 않는다. enumerator 는 링크 폴더로 내려가지 않는다(실측)
                         var inner: [String] = []
                         if let en = fm.enumerator(atPath: p) {
                             while let x = en.nextObject() as? String {
@@ -533,8 +602,9 @@ func scanHarness(_ folders: [String]) -> HarnessScan {
                                 inner.append(x)
                             }
                         }
-                        for f in inner.sorted() where !isDir(p + "/" + f) { add(folder, r + "/" + f) }
-                    } else if harnessNames.contains(name), !isDir(p) {
+                        // 폴더만 빼고 모두 add 에 넘긴다(isDir 은 링크를 따라가므로 쓰지 않는다 — 폴더를 가리키는 링크도 종류로 남는다)
+                        for f in inner.sorted() where !(isDir(p + "/" + f) && !isLink(p + "/" + f)) { add(folder, r + "/" + f) }
+                    } else if harnessNames.contains(name), isLink(p) || !isDir(p) {
                         add(folder, r)
                     } else if isDir(p), !isLink(p), !harnessWalkSkip.contains(name) {
                         next.append(r)
@@ -563,11 +633,14 @@ func harnessSnapshot(_ folders: [String], to dir: String) -> [String: Any] {
     try? fm.removeItem(atPath: dir)
     mkdirPrivate(dir)
     let s = scanHarness(folders)
+    var budget = harnessTotalCap
     for f in s.files {
         guard let folder = f["folder"] as? String, let rel = f["path"] as? String, let i = folders.firstIndex(of: folder) else { continue }
+        guard case .data(let d)? = readHarnessFile(folder + "/" + rel, budget: budget) else { continue }   // 보통 파일만 사본을 뜬다
+        budget -= d.count
         let dst = dir + "/\(i + 1)/" + rel
         try? fm.createDirectory(atPath: (dst as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
-        if let d = fm.contents(atPath: folder + "/" + rel) { writePrivate(dst, d) }
+        writePrivate(dst, d)
     }
     let manifest: [String: Any] = ["folders": folders, "files": s.files, "claude_dirs": s.claudeDirs, "cc_writes": s.ccWrites,
                                    "base": s.base, "at": r3(now())]
@@ -597,6 +670,97 @@ func harnessCheck(manifestDir dir: String) -> [String: Any]? {
     }
     for k in after.keys.sorted() where before[k] == nil { changed.append(["path": k, "change": "added"]) }
     return ["same": changed.isEmpty, "changed": changed, "checked": r3(now()), "cleaned": cleaned, "end_base": s.base]
+}
+
+// MARK: - 가지 (설계 2장 끝 "어디서 도는가"·"Jira 연결 프로젝트의 티켓과 가지")
+
+// 원래 작업 트리 모드: 저장소마다 고른 출발 가지 머리에서 autopilot/<실행 id> 를 만들어 원래 작업 트리를 그 가지로 바꾸고(git switch -c),
+// 끝에 깨끗하면 출발 때 가지로 되돌린다. 엔진이 스스로 움직이는 가지는 이 실행이 만든 autopilot/<실행 id> 와 Jira 스토리·작업 가지뿐이다.
+// 따로 작업 트리(단일 저장소)는 다음 차례라 아직 없다
+
+// 단위 작업 폴더·쓰기 범위가 든 git 저장소의 뿌리(같은 저장소는 한 번만). 저장소가 아닌 폴더(~/.gradle 등)는 뺀다
+func gitRepos(_ paths: [String]) -> [String] {
+    var out: [String] = []
+    for p in paths {
+        guard let top = gitOut(["rev-parse", "--show-toplevel"], cwd: p), top.hasPrefix("/") else { continue }
+        let c = canonical(top)
+        if !out.contains(c) { out.append(c) }
+    }
+    return out
+}
+// 가지 이름 → 머리 커밋(refname:short 는 같은 이름의 태그가 있으면 heads/ 를 붙이므로 전체 이름에서 뗀다)
+func branchHeads(_ repo: String) -> [String: String] {
+    var m: [String: String] = [:]
+    for line in (gitOut(["for-each-ref", "--format=%(refname)\t%(objectname)", "refs/heads/"], cwd: repo) ?? "").split(separator: "\n") {
+        let f = line.split(separator: "\t")
+        if f.count == 2, f[0].hasPrefix("refs/heads/") { m[String(f[0].dropFirst(11))] = String(f[1]) }
+    }
+    return m
+}
+func currentBranch(_ repo: String) -> String? { gitOut(["symbolic-ref", "-q", "--short", "HEAD"], cwd: repo).flatMap { $0.isEmpty ? nil : $0 } }
+func headOf(_ repo: String, _ ref: String) -> String? { gitOut(["rev-parse", "-q", "--verify", ref + "^{commit}"], cwd: repo).flatMap { $0.isEmpty ? nil : $0 } }
+func branchExists(_ repo: String, _ b: String) -> Bool { headOf(repo, "refs/heads/" + b) != nil }
+func isAncestor(_ repo: String, _ a: String, _ b: String) -> Bool { gitRun(["merge-base", "--is-ancestor", a, b], cwd: repo).code == 0 }
+// 작업 트리 상태 줄(추적 안 하는 파일 포함, 무시 파일 제외). 색인을 고쳐 쓰지 않게 --no-optional-locks
+func porcelain(_ repo: String) -> [String] {
+    (gitOut(["--no-optional-locks", "status", "--porcelain"], cwd: repo) ?? "").split(separator: "\n").map(String.init)
+}
+// 가지가 걸려 있는 작업 트리(가지 이름 → 작업 트리 경로)
+func checkedOut(_ repo: String) -> [String: String] {
+    var m: [String: String] = [:], wt = ""
+    for line in (gitOut(["worktree", "list", "--porcelain"], cwd: repo) ?? "").split(separator: "\n") {
+        if line.hasPrefix("worktree ") { wt = String(line.dropFirst(9)) }
+        if line.hasPrefix("branch refs/heads/") { m[String(line.dropFirst(18))] = wt }
+    }
+    return m
+}
+func repoName(_ r: String) -> String { (r as NSString).lastPathComponent }
+// Jira 가지 이름 꼴(프로젝트 설정 tickets.branch_names, 예 features/parent/{story}·features/{task})
+func renderBranch(_ pattern: String, _ key: String, _ ph: String) -> String { pattern.replacingOccurrences(of: "{\(ph)}", with: key) }
+func validBranch(_ b: String, cwd: String) -> Bool { gitRun(["check-ref-format", "--branch", b], cwd: cwd).code == 0 }
+// 프로젝트 설정(설계 5장 5절 projects/<프로젝트>.json): 승격 차례 promotion, 티켓·가지 규칙 tickets
+func projectSettings(_ name: String, dev: Bool) -> [String: Any]? { readJSON(autopilotRoot(dev: dev) + "/projects/\(name).json") as? [String: Any] }
+let defaultStoryPattern = "features/parent/{story}", defaultTaskPattern = "features/{task}"
+
+// 고정 설정의 출발 가지(run.json base_branch: 가지 이름 하나 또는 {저장소 경로: 가지}). 없으면 지금 걸린 가지
+func baseBranch(_ f: [String: Any], _ repo: String) -> String? {
+    if let s = f["base_branch"] as? String { return s }
+    if let m = f["base_branch"] as? [String: Any], let s = m[repo] as? String { return s }
+    return currentBranch(repo)
+}
+
+// 출발 때: 저장소마다 출발 가지에서 autopilot/<실행 id> 를 만들어 바꾼다. 하나라도 실패하면 바꾼 저장소를 되돌리고 까닭을 돌려준다
+func startBranches(_ f: [String: Any], id: String) -> (branches: [String: Any], error: String?) {
+    let work = "autopilot/" + id
+    var info: [String: Any] = [:], start: [String: Any] = [:]
+    for r in f["repos"] as? [String] ?? [] {
+        let original = currentBranch(r)
+        let base = baseBranch(f, r) ?? ""
+        let gitDir = gitOut(["rev-parse", "--absolute-git-dir"], cwd: r) ?? r + "/.git"
+        var common = gitOut(["rev-parse", "--git-common-dir"], cwd: r) ?? gitDir
+        if !common.hasPrefix("/") { common = canonical(r + "/" + common) }
+        let one: [String: Any] = [
+            "base": ["branch": base, "head": headOf(r, "refs/heads/" + base) ?? ""], "work": work,
+            "original": original ?? NSNull(), "original_head": headOf(r, "HEAD") ?? "", "restored": NSNull(),
+            "git_dir": canonical(gitDir), "common_dir": canonical(common), "dirty_start": porcelain(r), "on": work, "made": [work]]
+        start[r] = branchHeads(r)
+        let sw = gitRun(["switch", "-c", work, base], cwd: r)
+        guard sw.code == 0 else {
+            rollbackBranches(["repos": info])
+            return (["repos": info], "\(r) 를 출발 가지 \(base) 에서 만든 \(work) 로 바꾸지 못했습니다: \(firstLine(sw.out))")
+        }
+        info[r] = one
+    }
+    return (["repos": info, "start": start, "stories": [:] as [String: Any]], nil)
+}
+// 출발이 끝까지 가지 못했을 때: 바꾼 저장소를 출발 때 가지로 되돌리고 만든 가지를 지운다
+func rollbackBranches(_ b: [String: Any]) {
+    for (r, v) in b["repos"] as? [String: Any] ?? [:] {
+        guard let i = v as? [String: Any], let work = i["work"] as? String else { continue }
+        if let o = i["original"] as? String { _ = gitRun(["switch", o], cwd: r) }
+        else if let h = i["original_head"] as? String, !h.isEmpty { _ = gitRun(["switch", "--detach", h], cwd: r) }
+        _ = gitRun(["branch", "-D", work], cwd: r)
+    }
 }
 
 // MARK: - 실행 기록 저장소 (SQLite, 설계 5장 7절)
@@ -879,13 +1043,17 @@ extension RecordsDB {
             written += try run("""
                 INSERT INTO units(run_id,n,unit_id,title,kind,source_key,story_key,task_key,branch,status,merged,est_min,est_basis,active_sec,cost_usd,
                   weekly_pp,turns,tries,check_exit,denials,result,model,started,ended)
-                VALUES(?,?,?,?,?,?,NULL,NULL,NULL,?,NULL,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(run_id,n) DO UPDATE SET unit_id=excluded.unit_id, title=excluded.title, kind=COALESCE(excluded.kind, units.kind),
-                  source_key=COALESCE(excluded.source_key, units.source_key), status=excluded.status, est_min=COALESCE(excluded.est_min, units.est_min),
+                  source_key=COALESCE(excluded.source_key, units.source_key), story_key=excluded.story_key, task_key=excluded.task_key,
+                  branch=excluded.branch, status=excluded.status, merged=excluded.merged, est_min=COALESCE(excluded.est_min, units.est_min),
                   est_basis=COALESCE(excluded.est_basis, units.est_basis), active_sec=excluded.active_sec, cost_usd=excluded.cost_usd,
                   weekly_pp=excluded.weekly_pp, turns=excluded.turns, tries=excluded.tries, check_exit=excluded.check_exit, denials=excluded.denials,
                   result=excluded.result, model=excluded.model, started=excluded.started, ended=excluded.ended
-                """, [runId, n, d["id"] as? String ?? qq["id"] as? String, d["title"] as? String ?? qq["title"] as? String, kind, key, status, est, basis,
+                """, [runId, n, d["id"] as? String ?? qq["id"] as? String, d["title"] as? String ?? qq["title"] as? String, kind, key,
+                      // Jira 작업: 스토리 키, 작업 키(tickets 의 첫 번호), 작업 가지, 스토리로 합쳤는지(merged·nothing·not_merged)
+                      d["story"] as? String, d["story"] == nil ? nil : (d["tickets"] as? [Any])?.first.map { "\($0)" },
+                      e["branch"] as? String ?? d["branch"] as? String, status, (e["merge"] as? [String: Any])?["state"] as? String, est, basis,
                       num(e["active_sec"]), num(e["cost_usd"]), num(e["weekly_pp"]), inum(e["turns"]), inum(e["try"]),
                       inum(checks.last?["exit"]), (e["denials"] as? [Any]).map { jsonText($0) }, resText[n], model,
                       num(e["started"]), num(e["ended"])])
@@ -989,7 +1157,7 @@ enum WaitEnd { case elapsed, paused, stopped }
 let stateLabel = ["starting": "준비 중", "running": "진행 중", "waiting_limit": "한도 대기", "waiting_stopline": "멈출 선 대기",
                   "waiting_precheck": "시험 환경 대기",
                   "paused": "일시정지", "stopped": "중단됨", "done": "끝남", "error": "엔진 오류로 멈춤"]
-let unitLabel = ["pending": "대기", "running": "진행 중", "done": "통과", "failed": "미통과", "capped": "상한에서 멈춤", "stopped": "중단"]
+let unitLabel = ["pending": "대기", "running": "진행 중", "done": "통과", "failed": "미통과", "capped": "상한에서 멈춤", "stopped": "중단", "skipped": "건너뜀"]
 let capLabel = ["minutes": "시간", "usd": "비용", "weekly": "주간 사용률"]
 
 final class Engine {
@@ -1032,9 +1200,9 @@ final class Engine {
     // run.json·queue.json 의 설정 칸을 고정 값으로 되돌려 쓴다 — 누가 바꿔 놓았어도 보드가 그리는 값이 엔진이 쓰는 값과 같게
     static let settingKeys = ["title", "model", "effort", "stopline", "caps", "check_timeout_min", "check_retries", "precheck_retry_min", "background_quiet_sec",
                               "allowed_tools", "disallowed_tools", "write_roots", "network_allow", "local_binding", "env_pass", "unix_sockets",
-                              "read_deny", "sandbox_exclude", "claude_args", "claude_path", "project", "project_root"]
+                              "read_deny", "sandbox_exclude", "claude_args", "claude_path", "project", "project_root", "base_branch"]
     static let unitKeys = ["id", "title", "prompt", "check", "precheck", "action", "context", "cwd", "caps", "check_timeout_min", "action_timeout_min",
-                           "tickets", "review", "source_key", "kind", "est_min", "est_basis"]
+                           "tickets", "review", "source_key", "kind", "est_min", "est_basis", "story", "branch", "depends", "prerun"]
     func syncFromFrozen() {
         for k in Engine.settingKeys { run[k] = cfg[k] }
         run["set"] = setSummary(cfg)
@@ -1163,20 +1331,8 @@ final class Engine {
                 finish("error", "엔진 오류로 멈춤: 10분 안에 세 번 비정상으로 다시 떴습니다.")
             }
         }
-        shell = loginShell()
-        if let e = captureLoginEnv(shell) { loginEnv = e } else {
-            loginEnv = ["HOME": home, "SHELL": shell, "LANG": "ko_KR.UTF-8",
-                        "USER": NSUserName(), "LOGNAME": NSUserName(), "TMPDIR": NSTemporaryDirectory(),
-                        "PATH": "\(home)/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"]
-            event("engine", "로그인 셸 환경을 읽지 못해 기본 환경으로 띄웁니다.")
-        }
+        if !setupEnv() { event("engine", "로그인 셸 환경을 읽지 못해 기본 환경으로 띄웁니다.") }
         // claude_path 는 시험용(한도 거절을 흉내 내는 가짜 claude 등) — --dev 로 출발한 실행만 고정 설정에 들어 있다
-        // 샌드박스 안에서는 /usr/bin/java 가 JDK 를 못 찾는다("Unable to locate a Java Runtime", 실측) — JAVA_HOME 이 없으면 밖에서 찾아 넣는다
-        if loginEnv["JAVA_HOME"] == nil {
-            let jh = runTool("/usr/libexec/java_home", [], timeout: 10)
-            let p = jh.out.trimmingCharacters(in: .whitespacesAndNewlines)
-            if jh.code == 0, isDir(p) { loginEnv["JAVA_HOME"] = p }
-        }
         guard let c = (cfg["claude_path"] as? String).flatMap({ access($0, X_OK) == 0 ? $0 : nil }) ?? findExecutable("claude", loginEnv) else {
             event("engine", "claude 를 찾지 못해 멈춥니다(로그인 셸의 PATH 에 없음).")
             finish("error", "claude 를 찾지 못했습니다.")
@@ -1197,6 +1353,10 @@ final class Engine {
             if let h = run["harness"] as? [String: Any] {
                 event("engine", "하네스 사본과 지문을 남겼습니다(저장소 \((h["folders"] as? [Any])?.count ?? 0)곳, 파일 \(h["files"] ?? 0)개). 끝에 다시 재어 같은지 봅니다.")
             }
+            for r in repos {
+                let i = repoInfo(r), base = (i["base"] as? [String: Any])?["branch"] as? String ?? "?"
+                event("engine", "\(repoName(r)): 출발 가지 \(base) 에서 만든 \(i["work"] ?? "?") 로 원래 작업 트리를 바꿔 돕니다. 끝나면 깨끗할 때 \((i["original"] as? String) ?? "출발 때 자리") 로 되돌립니다.")
+            }
             setState("running", "단위를 시작하는 중입니다.")
             record("출발")
         } else if prev == "paused" {
@@ -1212,15 +1372,32 @@ final class Engine {
             guard let n = queue.firstIndex(where: { $0["status"] as? String == "running" }).map({ $0 + 1 })
                     ?? queue.firstIndex(where: { ($0["status"] as? String ?? "pending") == "pending" }).map({ $0 + 1 }) else {
                 let c = { (s: String) in self.queue.filter { $0["status"] as? String == s }.count }
-                event("engine", "자율주행을 마쳤습니다. 통과 \(c("done")), 미통과 \(c("failed")), 상한에서 멈춤 \(c("capped")).")
+                event("engine", "자율주행을 마쳤습니다. 통과 \(c("done")), 미통과 \(c("failed")), 상한에서 멈춤 \(c("capped"))\(c("skipped") > 0 ? ", 건너뜀 \(c("skipped"))" : "").")
                 finish("done", "대기열을 모두 마쳤습니다.")
             }
             if queue[n - 1]["status"] as? String != "running" {
-                guard stoplineGate(), precheckGate(n) else { continue }
+                guard stoplineGate(), unitBranchGate(n), precheckGate(n) else { continue }   // 건너뛸 단위는 시험 환경을 기다리지 않는다
                 beginUnit(n)
             }
             runUnit(n)
         }
+    }
+
+    // 로그인 셸 환경을 한 번 읽는다(못 읽으면 기본 환경, false). 샌드박스 안에서는 /usr/bin/java 가 JDK 를 못 찾는다("Unable to locate a Java Runtime", 실측) —
+    // JAVA_HOME 이 없으면 밖에서 찾아 넣는다. 엔진 본체와 판정 미리 돌리기가 같이 쓴다
+    @discardableResult
+    func setupEnv() -> Bool {
+        shell = loginShell()
+        let got = captureLoginEnv(shell)
+        loginEnv = got ?? ["HOME": home, "SHELL": shell, "LANG": "ko_KR.UTF-8",
+                           "USER": NSUserName(), "LOGNAME": NSUserName(), "TMPDIR": NSTemporaryDirectory(),
+                           "PATH": "\(home)/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"]
+        if loginEnv["JAVA_HOME"] == nil {
+            let jh = runTool("/usr/libexec/java_home", [], timeout: 10)
+            let p = jh.out.trimmingCharacters(in: .whitespacesAndNewlines)
+            if jh.code == 0, isDir(p) { loginEnv["JAVA_HOME"] = p }
+        }
+        return got != nil
     }
 
     // 고정 설정이 출발 때와 다르다(해시가 다르거나 파일이 없음): 실행 중에 누가 바꿨다. 설정을 믿을 수 없으니 아무것도 띄우지 않고 멈춘다
@@ -1242,8 +1419,10 @@ final class Engine {
 
     // 끝(완료·중단·오류)의 정리: 하네스를 다시 재어 출발 때와 같은지 적고, 출발 때 없던 빈 .claude/.cc-writes 를 치우고, 기록 저장소에 끝을 쓴다.
     // 출발 때 남긴 지문(manifest.json)만 읽으므로 고정 설정을 못 읽은 오류 끝에서도 돈다
+    // 차례(설계 4장 시작과 끝): 하네스 끝 검사·빈 자리 치우기 → 가지 끝 머리 → 기록 저장소 → 출발 때 가지로 되돌리기 → 한 번 더 기록 → wrapped.
+    // 되돌리기가 맨 뒤인 것은 switch 가 하네스 파일을 바꿔 "하네스가 바뀜"으로 잡히지 않게. 정리 중 끊겨 다시 돌아도 이미 한 단계는 건너뛴다
     func wrapUp() {
-        if var h = run["harness"] as? [String: Any] {
+        if var h = run["harness"] as? [String: Any], h["checked"] == nil {
             if let c = harnessCheck(manifestDir: enginePrivate + "/harness") {
                 for (k, v) in c { h[k] = v }
                 run["harness"] = h
@@ -1263,9 +1442,12 @@ final class Engine {
                 event("engine", "출발 때 남긴 하네스 지문을 찾지 못해 끝 검사를 하지 못했습니다.")
             }
         }
-        run["wrapped"] = r3(now())
+        if !repos.isEmpty, br["end"] == nil { endBranches() }
         saveRun()
         record("끝")
+        if restoreBranches() { record("되돌린 뒤") }
+        run["wrapped"] = r3(now())
+        saveRun()
     }
 
     // 서브에이전트에 주는 규칙. --append-system-prompt 는 Agent 도구의 서브에이전트에 닿지 않아(실측) 고정 플러그인의 SubagentStart hook 이
@@ -1468,6 +1650,249 @@ final class Engine {
         return false
     }
 
+    // MARK: 가지
+
+    var br: [String: Any] { get { run["branches"] as? [String: Any] ?? [:] } set { run["branches"] = newValue } }
+    var repos: [String] { (br["repos"] as? [String: Any] ?? [:]).keys.sorted() }
+    func repoInfo(_ r: String) -> [String: Any] { (br["repos"] as? [String: Any])?[r] as? [String: Any] ?? [:] }
+    func setRepoInfo(_ r: String, _ i: [String: Any]) {
+        var b = br, rs = b["repos"] as? [String: Any] ?? [:]
+        rs[r] = i; b["repos"] = rs; br = b
+    }
+    func repoOf(_ path: String) -> String? { repos.filter { path == $0 || path.hasPrefix($0 + "/") }.max { $0.count < $1.count } }
+    func story(_ k: String) -> [String: Any] { (br["stories"] as? [String: Any])?[k] as? [String: Any] ?? [:] }
+    func setStory(_ k: String, _ s: [String: Any]) {
+        var b = br, ss = b["stories"] as? [String: Any] ?? [:]
+        ss[k] = s; b["stories"] = ss; br = b
+    }
+    func addMade(_ r: String, _ b: String) {
+        var i = repoInfo(r)
+        let m = i["made"] as? [String] ?? []
+        if !m.contains(b) { i["made"] = m + [b]; setRepoInfo(r, i) }
+    }
+
+    // 모델 쪽 가지 보호(샌드박스 denyWrite, 2026-10-22 실측): 출발 때 있던 가지와 엔진이 만든 가지 가운데 지금 작업 가지를 뺀 ref 파일과 그 .lock,
+    // HEAD(가지 바꾸기), packed-refs(압축된 가지 옮기기·지우기), config. HEAD.lock·packed-refs.lock 은 막지 않는다 — 막으면 커밋이 안 되거나(HEAD.lock)
+    // 커밋마다 오류 줄이 찍힌다(packed-refs.lock). 거부한 폴더 안을 글자 그대로 다시 열 수는 없어(실측) 가지는 하나씩 막고, Jira 스토리 가지 꼴의
+    // 앞 폴더(예 features/parent)는 통째로 막는다. 모델이 새로 만든 가지는 막지 않는다(끝의 가지 머리 비교로 created 에 남는다)
+    func protectDeny() -> [String] {
+        var out: [String] = []
+        let start = br["start"] as? [String: Any] ?? [:]
+        for r in repos {
+            let i = repoInfo(r)
+            guard let g = i["git_dir"] as? String, let c = i["common_dir"] as? String else { continue }
+            let on = i["on"] as? String ?? ""
+            var names = Set((start[r] as? [String: Any] ?? [:]).keys)
+            names.formUnion(i["made"] as? [String] ?? [])
+            names.remove(on)
+            for b in names.sorted() { out += [c + "/refs/heads/" + b, c + "/refs/heads/" + b + ".lock"] }
+            out += [g + "/HEAD", c + "/packed-refs", c + "/config"]
+            if let d = storyDir, !on.hasPrefix(d + "/") { out.append(c + "/refs/heads/" + d) }
+        }
+        return out
+    }
+    // 스토리 가지 꼴의 앞 폴더: "features/parent/{story}" → "features/parent"
+    var storyDir: String? {
+        guard let p = ((cfg["tickets"] as? [String: Any])?["branch_names"] as? [String: Any])?["story"] as? String,
+              let x = p.range(of: "{story}"), let slash = p[..<x.lowerBound].lastIndex(of: "/") else { return nil }
+        let d = String(p[..<slash])
+        return d.isEmpty ? nil : d
+    }
+
+    // 단위를 시작하기 전의 가지(설계 2장 끝): 기대는 앞 단위(depends)가 통과하지 않았으면(Jira 단위면 스토리 가지에 합쳐지지 않았으면) 건너뛴다.
+    // Jira 단위(story 칸)는 스토리 가지(없으면 출발 가지 머리에서)와 작업 가지(스토리 가지 머리에서)를 만들고 그 저장소를 작업 가지로 바꾼다.
+    // 다른 저장소와 Jira 가 아닌 단위는 autopilot/<실행 id> 에 둔다. 못 하면 그 단위를 건너뛰고 false
+    func unitBranchGate(_ n: Int) -> Bool {
+        for d in def(n)["depends"] as? [String] ?? [] {
+            guard let i = defs.firstIndex(where: { $0["id"] as? String == d }) else { continue }
+            let st = queue[i]["status"] as? String ?? "pending"
+            let m = (loadUnit(i + 1)["merge"] as? [String: Any])?["state"] as? String
+            guard st == "done", defs[i]["story"] == nil || m == "merged" || m == "nothing" else {
+                skipUnit(n, "기대는 앞 단위 「\(title(i + 1))」\(st == "done" ? " 이 스토리 가지에 합쳐지지 않아" : " 가 통과하지 못해") 시작하지 않습니다.")
+                return false
+            }
+        }
+        let target = def(n)["story"] == nil ? nil : repoOf(cwd(n))
+        for r in repos {
+            var want = repoInfo(r)["work"] as? String ?? ""
+            if r == target, let k = def(n)["story"] as? String, let sb = def(n)["story_branch"] as? String, let task = def(n)["branch"] as? String {
+                if let why = ensureBranch(r, sb, from: (repoInfo(r)["base"] as? [String: Any])?["head"] as? String ?? "", story: k)
+                    ?? ensureBranch(r, task, from: sb, story: nil) {
+                    skipUnit(n, why); return false
+                }
+                want = task
+            }
+            if let why = switchTo(r, want) { skipUnit(n, why); return false }
+        }
+        return true
+    }
+
+    // 이 실행이 만드는 가지(스토리·작업): 없으면 만들고 made 에 적는다. 이미 있는데 이 실행이 만든 것이 아니면 움직이지 않는다(까닭을 돌려줌)
+    func ensureBranch(_ r: String, _ b: String, from: String, story k: String?) -> String? {
+        let made = repoInfo(r)["made"] as? [String] ?? []
+        if branchExists(r, b) { return made.contains(b) ? nil : "\(repoName(r)) 에 \(b) 가지가 이미 있어(이 실행이 만든 것이 아님) 쓰지 않습니다" }
+        addMade(r, b); saveRun()   // 만들기 전에 적는다 — 만든 뒤 끊겨 다시 떠도 이 실행의 가지로 안다
+        let c = gitRun(["branch", b, from], cwd: r)
+        guard c.code == 0 else { return "\(repoName(r)) 에 \(b) 가지를 만들지 못했습니다: \(firstLine(c.out))" }
+        if let k {
+            let h = headOf(r, "refs/heads/" + b) ?? ""
+            setStory(k, ["repo": r, "branch": b, "base": h, "head": h, "merged": [] as [Any], "unmerged": [] as [Any]])
+            event("board", "스토리 가지 \(b) 를 출발 가지 머리에서 만들었습니다(\(repoName(r))).")
+        } else {
+            event("board", "작업 가지 \(b) 를 스토리 가지 \(from) 머리에서 만들었습니다(\(repoName(r))).")
+        }
+        saveRun()
+        return nil
+    }
+
+    // 원래 작업 트리를 want 가지로 바꾼다. 앞 단위가 커밋하지 않고 남긴 변경은 그 가지(이 실행이 만든 가지)에 엔진이 커밋해 남긴다 —
+    // 다음 작업 가지에 섞이지 않게. 출발 때부터 더러웠거나 실행 중에 누가 가지를 바꿨으면 바꾸지 않는다(까닭을 돌려줌)
+    func switchTo(_ r: String, _ want: String) -> String? {
+        var i = repoInfo(r)
+        let on = i["on"] as? String ?? "", cur = currentBranch(r) ?? ""
+        if on == want, cur == want { return nil }
+        if cur != on { return "\(repoName(r)) 의 가지가 실행 중에 바뀌어(지금 \(cur.isEmpty ? "가지 없음" : cur)) \(want) 로 바꾸지 않았습니다" }
+        let dirty = porcelain(r), dirtyStart = i["dirty_start"] as? [String] ?? []
+        if dirty != dirtyStart {
+            guard dirtyStart.isEmpty, (i["made"] as? [String] ?? []).contains(on) else {
+                return "\(repoName(r)) 에 커밋하지 않은 변경 \(dirty.count)개가 있어 \(want) 로 바꾸지 않았습니다"
+            }
+            let a = gitRun(["add", "-A"], cwd: r)
+            let c = a.code == 0 ? gitRun(["commit", "-q", "--no-verify", "-m", "자율주행 \(id): \(on) 에 커밋하지 않고 남은 변경(다음 단위로 가지를 바꾸기 전에 엔진이 남김)"], cwd: r, commit: true) : a
+            guard c.code == 0 else { return "\(repoName(r)) 에 남은 변경을 \(on) 에 커밋하지 못해 \(want) 로 바꾸지 않았습니다: \(firstLine(c.out))" }
+            event("board", "앞 단위가 커밋하지 않고 남긴 변경 \(dirty.count)개를 그 가지(\(on))에 커밋해 두었습니다.")
+        }
+        let sw = gitRun(["switch", want], cwd: r)
+        guard sw.code == 0 else { return "\(repoName(r)) 를 \(want) 로 바꾸지 못했습니다: \(firstLine(sw.out))" }
+        i = repoInfo(r); i["on"] = want; setRepoInfo(r, i); saveRun()
+        return nil
+    }
+
+    // 단위를 시작하지 않고 넘긴다(기대는 앞 단위가 통과하지 않음, 가지를 바꾸지 못함). 대기열 항목은 남아 다음 출발에서 다시 고른다
+    func skipUnit(_ n: Int, _ why: String) {
+        try? fm.createDirectory(atPath: unitDir(n), withIntermediateDirectories: true)
+        let t = r3(now())
+        var u: [String: Any] = ["unit": n, "id": def(n)["id"] as? String ?? "u\(n)", "title": title(n), "status": "skipped", "phase": "end",
+                                "reason": why, "started": t, "ended": t, "active_sec": 0, "cost_usd": 0, "turns": 0, "checks": [] as [Any]]
+        if let task = def(n)["branch"] as? String { u["branch"] = task }
+        saveUnit(n, u)
+        queue[n - 1]["status"] = "skipped"; saveQueue()
+        noteUnmerged(n, "건너뜀: " + why)
+        event("board", "단위 \(n)/\(total) 건너뜀: \(why)")
+        record("단위 \(n) 건너뜀")
+    }
+
+    // 판정을 통과한 Jira 작업 가지를 스토리 가지로 합친다(사용자 결정: 판정 통과 때 엔진이 바로). 체크아웃 없이 한다 — 순차 실행이라 스토리 머리가
+    // 작업 머리의 조상이면 작업 머리의 tree 로 병합 커밋(부모 = 스토리 머리 + 작업 머리)을 만들어 스토리 ref 만 old 값을 준 update-ref 로 올린다.
+    // 조상이 아니면(그 사이 누가 스토리 가지를 움직임) 합치지 않고 사람 몫으로 남긴다. 작업 트리는 작업 가지에 그대로 둔다(같은 tree 라 흔들리지 않음)
+    func mergeTask(_ n: Int) -> [String: Any] {
+        var u = loadUnit(n)
+        if let m = u["merge"] as? [String: Any], m["state"] as? String == "merged" { return m }   // 합친 뒤 끊겨 판정을 다시 했다
+        guard let k = def(n)["story"] as? String, let task = def(n)["branch"] as? String, let sb = def(n)["story_branch"] as? String,
+              let r = repoOf(cwd(n)) else { return [:] }
+        var m: [String: Any] = ["story": k, "task": task, "branch": sb, "at": r3(now())]
+        let th = headOf(r, "refs/heads/" + task), sh = headOf(r, "refs/heads/" + sb)
+        func no(_ why: String) { m["state"] = "not_merged"; m["why"] = why }
+        if th == nil || sh == nil { no("작업 가지나 스토리 가지를 찾지 못했습니다") }
+        else if th == sh { m["state"] = "nothing"; m["why"] = "작업 가지에 새 커밋이 없어 합칠 것이 없습니다" }
+        else if isAncestor(r, th!, sh!) { m["state"] = "merged"; m["head"] = sh! }   // 이미 들어 있음
+        else if !isAncestor(r, sh!, th!) { no("스토리 가지 머리가 작업 가지의 조상이 아니라(그 사이 스토리 가지가 움직임) 합치지 않았습니다. 사람이 합칩니다") }
+        else {
+            var head = th!
+            let ff = (cfg["tickets"] as? [String: Any])?["merge"] as? String == "ff"
+            if !ff {
+                let c = gitOut(["rev-parse", th! + "^{tree}"], cwd: r).map {
+                    gitRun(["commit-tree", $0, "-p", sh!, "-p", th!, "-m", "Merge branch '\(task)' into \(sb)\n\n자율주행 \(id) 단위 \(n): \(title(n))"], cwd: r, commit: true)
+                }
+                if let c, c.code == 0 { head = c.out } else { head = "" ; no("병합 커밋을 만들지 못했습니다: \(firstLine(c?.out ?? ""))") }
+            }
+            if !head.isEmpty {
+                let up = gitRun(["update-ref", "-m", "autopilot \(id): merge \(task)", "refs/heads/" + sb, head, sh!], cwd: r)
+                if up.code == 0 { m["state"] = "merged"; m["head"] = head; m["how"] = ff ? "ff" : "merge" }
+                else { no("스토리 가지를 올리지 못했습니다(그 사이 움직였을 수 있음): \(firstLine(up.out))") }
+            }
+        }
+        var s = story(k)
+        if let h = headOf(r, "refs/heads/" + sb) { s["head"] = h }
+        if m["state"] as? String == "not_merged" {
+            s["unmerged"] = (s["unmerged"] as? [Any] ?? []) + [["task": task, "why": m["why"] ?? ""]]
+        } else if !(s["merged"] as? [String] ?? []).contains(task) {
+            s["merged"] = (s["merged"] as? [String] ?? []) + [task]
+        }
+        setStory(k, s); saveRun()
+        u["merge"] = m; saveUnit(n, u)
+        switch m["state"] as? String {
+        case "merged": event("board", "작업 가지 \(task) 를 스토리 가지 \(sb) 에 \(m["how"] as? String == "ff" ? "앞으로 감기로" : "병합 커밋으로") 합쳤습니다.")
+        case "nothing": event("board", "작업 가지 \(task) 에 새 커밋이 없어 스토리 가지 \(sb) 는 그대로입니다.")
+        default: event("board", "작업 가지 \(task) 를 스토리 가지에 합치지 않았습니다: \(m["why"] ?? "")")
+        }
+        return m
+    }
+
+    // 통과하지 못한 Jira 작업(미통과·상한·중단·건너뜀): 합치지 않고 작업 가지만 남긴다
+    func noteUnmerged(_ n: Int, _ why: String) {
+        guard let k = def(n)["story"] as? String, let task = def(n)["branch"] as? String else { return }
+        var u = loadUnit(n)
+        if u["merge"] == nil { u["merge"] = ["story": k, "task": task, "state": "not_merged", "why": why, "at": r3(now())]; saveUnit(n, u) }
+        var s = story(k)
+        if s.isEmpty { s = ["repo": repoOf(cwd(n)) ?? "", "branch": def(n)["story_branch"] ?? "", "merged": [] as [Any]] }
+        s["unmerged"] = (s["unmerged"] as? [Any] ?? []) + [["task": task, "why": why]]
+        setStory(k, s); saveRun()
+    }
+
+    // 끝: 저장소마다 가지 머리를 다시 재어 출발 때와 견준다. 움직인 기존 가지는 0 이어야 한다(되돌리지 않고 보여만 준다)
+    func endBranches() {
+        var b = br
+        let start = b["start"] as? [String: Any] ?? [:]
+        var end: [String: Any] = [:], moved: [[String: Any]] = [], created: [[String: Any]] = []
+        for r in repos {
+            let h = branchHeads(r), s = start[r] as? [String: Any] ?? [:]
+            let made = repoInfo(r)["made"] as? [String] ?? []
+            end[r] = h
+            for (k, v) in s.sorted(by: { $0.key < $1.key }) where h[k] != v as? String {
+                moved.append(["repo": r, "branch": k, "from": v, "to": h[k] ?? NSNull()])
+            }
+            for (k, v) in h.sorted(by: { $0.key < $1.key }) where s[k] == nil {
+                created.append(["repo": r, "branch": k, "head": v, "by": made.contains(k) ? "engine" : "other"])
+            }
+        }
+        b["end"] = end; b["moved"] = moved; b["created"] = created; br = b
+        let other = created.filter { $0["by"] as? String == "other" }.compactMap { $0["branch"] as? String }
+        if moved.isEmpty {
+            event("engine", "출발 때 있던 가지는 하나도 움직이지 않았습니다. 이 실행이 만든 가지 \(created.count - other.count)개\(other.isEmpty ? "" : ", 그 밖에 새로 생긴 가지 \(other.count)개(\(other.prefix(3).joined(separator: ", ")))").")
+        } else {
+            let some = moved.prefix(3).map { "\(repoName($0["repo"] as? String ?? "")) \($0["branch"] ?? "")" }
+            event("engine", "출발 때 있던 가지 \(moved.count)개가 움직였습니다(\(some.joined(separator: ", "))\(moved.count > 3 ? " 등" : "")). 되돌리지 않았습니다. 사람이 확인하세요.")
+        }
+    }
+
+    // 끝: 원래 작업 트리를 출발 때 걸려 있던 가지로 되돌린다. 엔진이 마지막에 걸어 둔 가지에 그대로 있고 작업 트리가 출발 때와 같은 상태(보통 깨끗함)일
+    // 때만. 아니면 되돌리지 않고 까닭을 적는다. 이미 되돌렸으면(정리 중 끊겨 다시 돎) 건너뛴다. 바뀐 것이 있으면 true
+    func restoreBranches() -> Bool {
+        var changed = false
+        for r in repos {
+            var i = repoInfo(r)
+            guard i["restored"] == nil || i["restored"] is NSNull else { continue }
+            let original = i["original"] as? String, on = i["on"] as? String ?? "", cur = currentBranch(r)
+            var ok = false, note: String
+            if let o = original, cur == o { ok = true; note = "이미 출발 때 가지(\(o))에 있습니다" }
+            else if (cur ?? "") != on { note = "실행 중에 가지가 바뀌어(지금 \(cur ?? "가지 없음")) 출발 때 가지로 되돌리지 않았습니다" }
+            else if porcelain(r) != (i["dirty_start"] as? [String] ?? []) {
+                note = "커밋하지 않은 변경 \(porcelain(r).count)개가 있어 출발 때 가지로 되돌리지 않았습니다(작업 트리는 \(on) 에 있습니다)"
+            } else {
+                let sw = original.map { gitRun(["switch", $0], cwd: r) } ?? gitRun(["switch", "--detach", i["original_head"] as? String ?? "HEAD"], cwd: r)
+                if sw.code == 0 { ok = true; note = "원래 작업 트리를 출발 때 가지(\(original ?? "가지 없는 자리"))로 되돌렸습니다" }
+                else { note = "출발 때 가지로 되돌리지 못했습니다: \(firstLine(sw.out))" }
+            }
+            i["restored"] = ok; i["restore_note"] = note
+            if ok { i["on"] = original ?? "" }
+            setRepoInfo(r, i); changed = true
+            event("engine", "\(repoName(r)): \(note).")
+        }
+        if changed { saveRun() }
+        return changed
+    }
+
     // MARK: 단위
 
     func firstMessage(_ n: Int) -> String {
@@ -1491,6 +1916,13 @@ final class Engine {
             if set["spec"] is String { s += "- 명세(요구사항과 수용 기준, 읽기 전용): `\(dir)/pinned/set/spec.md`\n" }
         }
         s += "- 쓰기는 작업 폴더\(writeRoots.isEmpty ? "" : "와 " + writeRoots.joined(separator: ", ")), 단위 폴더, 임시 폴더만 됩니다(샌드박스). 네트워크는 허용한 곳만 나갑니다.\n"
+        if !repos.isEmpty {
+            let on = repos.map { "\(repoName($0)) `\(repoInfo($0)["on"] as? String ?? "?")`" }
+            s += "- 작업 가지: \(on.joined(separator: ", ")). 커밋은 이 가지에만 합니다. 가지를 바꾸거나 다른 가지를 옮기지 않습니다(다른 가지 맞추기는 끝난 뒤 사람이 보드에서 합니다).\n"
+        }
+        if let k = def(n)["story"] as? String {
+            s += "- 이 작업은 스토리 \(k) 의 작업입니다. 판정을 통과하면 엔진이 이 작업 가지를 스토리 가지(`\(def(n)["story_branch"] ?? "")`)에 합칩니다. 직접 합치지 않습니다.\n"
+        }
         if unitDir(n).hasPrefix(home + "/.claude/") {
             // ~/.claude 아래는 Claude Code 의 보호 경로라 Write·Edit 도구가 묻지 않는 모드에서 거부된다. 샌드박스 Bash 는 쓸 수 있다(실측)
             s += "- 단위 폴더(`\(unitDir(n))`)는 Write·Edit 도구로 쓸 수 없습니다. result.json 과 작업 파일은 Bash 로 쓰세요(예: `cat > \"$CLAUDE_BOARD_UNIT_DIR/result.json\" <<'EOF'` … `EOF`).\n"
@@ -1534,9 +1966,11 @@ final class Engine {
         }
         let ok = readJSON(unitDir(n) + "/result.json") is [String: Any]
         u["result_ok"] = ok
+        if let task = def(n)["branch"] as? String { u["branch"] = task }
         saveUnit(n, u)
         queue[n - 1]["status"] = status
         saveQueue()
+        if status != "done" { noteUnmerged(n, unitLabel[status] ?? status) }   // Jira 작업: 합치지 않고 작업 가지만 남긴다
         let spent = "\(dur(num(u["active_sec"]) ?? 0)), \(usd(num(u["cost_usd"]) ?? 0)) USD"
         event("board", "단위 \(n)/\(total) \(unitLabel[status] ?? status): \(reason) (\(spent))")
         if !ok, status != "stopped" { event("board", "모델이 결과 기록(result.json)을 남기지 않았습니다.") }
@@ -1605,7 +2039,12 @@ final class Engine {
             case "check":
                 switch check(n, &u) {
                 case .passed:
-                    endUnit(n, "done", "판정 명령을 통과했습니다."); return
+                    var why = "판정 명령을 통과했습니다."
+                    if def(n)["story"] != nil {   // Jira 작업: 판정 통과 때 엔진이 바로 스토리 가지로 합친다
+                        let m = mergeTask(n)
+                        why += m["state"] as? String == "merged" ? " 스토리 가지에 합쳤습니다." : m["state"] as? String == "nothing" ? " 합칠 커밋이 없었습니다." : " 스토리 가지에는 합치지 않았습니다."
+                    }
+                    endUnit(n, "done", why); return
                 case .failed(let code, let tail):
                     let k = Int(num(u["try"]) ?? 0)
                     if k >= retries {
@@ -1665,6 +2104,8 @@ final class Engine {
         denied += (1...total).filter { $0 != n }.map { "Edit(/\(unitDir($0))/**)" }
         // 엔진 전용 폴더(복원 전 백업 등)와 read_deny 는 파일 도구로도 읽지 못하게(샌드박스 denyRead 는 Read 도구를 막지 않는다)
         for p in engineDeny + readDenyPaths { denied += ["Read(/\(p)/**)", "Read(/\(p))", "Edit(/\(p)/**)"] }
+        // 가지 보호는 파일 도구에도(Write 로 ref 파일을 고쳐 쓰는 길). 폴더 자리(스토리 가지 꼴)는 안까지
+        for p in protectDeny() { denied += ["Edit(/\(p))"] + (isDir(p) && !isLink(p) ? ["Edit(/\(p)/**)"] : []) }
         // 사용자 settings 는 읽지 않는다(--setting-sources project,local): 사용자 hook(알림 패널)·플러그인 hook 은 샌드박스 밖에서 돌고,
         // 사용자 허용 규칙의 WebFetch(domain:…) 는 샌드박스 네트워크 허용 목록에 합쳐져 고정한 목록을 넓힌다. ~/.claude/CLAUDE.md 도 함께 빠진다(실측)
         a += ["--setting-sources", "project,local"]
@@ -1684,6 +2125,7 @@ final class Engine {
     func sandboxSettings(_ n: Int) -> String {
         var deny = harnessDeny([cwd(n)] + writeRoots)
         deny += ["engine.json", "stream.jsonl", "stderr.log", "evidence", "context"].map { unitDir(n) + "/" + $0 }
+        deny += protectDeny()   // 지금 작업 가지 밖의 가지·HEAD·packed-refs(단위마다, 엔진이 가지를 바꾼 뒤 다시 계산)
         let readDeny = engineDeny + readDenyPaths
         let s: [String: Any] = ["sandbox": [
             "enabled": true, "failIfUnavailable": true, "allowUnsandboxedCommands": false, "autoAllowBashIfSandboxed": true,
@@ -1716,7 +2158,7 @@ final class Engine {
                 for d in level {
                     let names = (try? fm.contentsOfDirectory(atPath: d)) ?? []
                     if d == root || names.contains("CLAUDE.md") || names.contains(".claude") || names.contains(".git") { found.append(d) }
-                    for name in names where !skip.contains(name) && isDir(d + "/" + name) { next.append(d + "/" + name) }
+                    for name in names where !skip.contains(name) && isDir(d + "/" + name) && !isLink(d + "/" + name) { next.append(d + "/" + name) }
                 }
                 level = next; depth += 1
             }
@@ -2118,6 +2560,22 @@ final class Engine {
         return (code, tail, interrupt, timedOut, files, now() - start)
     }
 
+    // 판정 미리 돌리기(출발 전)용 고정 명령 하나: 단위 상태·control 없이, 로그인 셸·작업 폴더·고른 환경 + $CLAUDE_BOARD_EVIDENCE_DIR. 출력은 ev/output.log
+    func plainCommand(_ n: Int, _ cmd: String, ev: String, limit: Double) -> (code: Int32, tail: String, sec: Double, timedOut: Bool) {
+        try? fm.createDirectory(atPath: ev, withIntermediateDirectories: true)
+        let log = ev + "/output.log"
+        var env = commandEnv(n)
+        env["CLAUDE_BOARD_EVIDENCE_DIR"] = ev
+        guard let c = Child(shell, ["-l", "-c", cmd], env: env, cwd: cwd(n), outFile: log, newGroup: true) else { return (-1, "명령을 띄우지 못했습니다", 0, false) }
+        let start = now()
+        let finished = c.wait(limit)
+        killGroup(c.pid)   // 끝났어도 뒤에 남긴 프로세스까지
+        _ = c.wait(3)
+        let tail = String(decoding: (fm.contents(atPath: log) ?? Data()).suffix(4000), as: UTF8.self)
+            .split(separator: "\n", omittingEmptySubsequences: false).suffix(40).joined(separator: "\n")
+        return (finished ? (c.code ?? -1) : -1, tail, now() - start, !finished)
+    }
+
     func check(_ n: Int, _ u: inout [String: Any]) -> CheckEnd {
         let k = Int(num(u["try"]) ?? 0)
         let cmd = def(n)["check"] as? String ?? "false"
@@ -2152,6 +2610,12 @@ func usage() -> Never {
            claude-autopilot status <실행 폴더> [--dev]
            claude-autopilot records import [--dev | --db <파일>] [--project <이름>] [--unit-key <칸 경로>] <원본…>
              원본: 실행 폴더(run.json·queue.json 이 있는 폴더) 또는 일반 꼴 대기열 파일(format "claude-board-queue")
+           claude-autopilot prerun <실행 폴더> [--dev]
+             출발 전: 판정을 한 번씩 미리 돌려 일하기 전부터 통과하는 단위를 prerun.json 에(출발 카드 감)
+           claude-autopilot finish <실행 폴더> merge --into <가지> [--story <키>]
+           claude-autopilot finish <실행 폴더> promote <가지> --into <가지>
+           claude-autopilot finish <실행 폴더> discard [--story <키>]
+             끝난 실행의 가지 승격(사람이 부름): 자율주행 가지(Jira 실행은 스토리 가지)를 합치기·기존 가지 올리기·합치기 전에 버리기
     """)
 }
 
@@ -2272,8 +2736,74 @@ func prepare(_ dir: String, dev: Bool) -> (problems: [String], frozen: [String: 
             if let v = q[k] { if v is String { d[k] = v } else { problems.append("단위 \(n) 의 \(k) 는 글자여야 합니다") } }
         }
         if let v = q["est_min"] { if num(v) != nil, !(v is String) { d["est_min"] = v } else { problems.append("단위 \(n) 의 est_min 은 수여야 합니다") } }
+        // 가지 칸: Jira 단위의 스토리 키·작업 가지, 기대는 앞 단위(id), 판정 미리 돌리기에 넣을지(기본 true)
+        for k in ["story", "branch"] {
+            if let v = q[k] { if let s = v as? String, !s.isEmpty { d[k] = s } else { problems.append("단위 \(n) 의 \(k) 는 글자여야 합니다") } }
+        }
+        if let v = q["depends"] {
+            if let a = v as? [String] {
+                let earlier = units.compactMap { $0["id"] as? String }
+                for x in a where !earlier.contains(x) { problems.append("단위 \(n) 의 depends 에 적은 \(x) 는 앞선 단위의 id 가 아닙니다") }
+                d["depends"] = a
+            } else { problems.append("단위 \(n) 의 depends 는 앞선 단위 id 의 배열이어야 합니다") }
+        }
+        if let v = q["prerun"] { if v is Bool { d["prerun"] = v } else { problems.append("단위 \(n) 의 prerun 은 true/false 입니다") } }
+        if d["branch"] != nil, d["story"] == nil { problems.append("단위 \(n) 의 branch 는 story 와 함께 씁니다(Jira 연결 프로젝트의 작업 가지)") }
         units.append(d)
         queue[i]["id"] = d["id"]; queue[i]["tickets"] = d["tickets"]; queue[i]["status"] = "pending"
+    }
+    // 가지(설계 2장 끝): 단위 작업 폴더·쓰기 범위가 든 저장소마다 출발 가지에서 autopilot/<실행 id> 를 만든다. 출발 가지는 run.json base_branch
+    // (가지 이름 하나 또는 {저장소 경로: 가지}), 없으면 지금 걸린 가지
+    let repos = gitRepos(units.compactMap { $0["cwd"] as? String } + roots)
+    f["repos"] = repos
+    if let b = run["base_branch"] {
+        if let s = b as? String, !s.isEmpty { f["base_branch"] = s }
+        else if let m = b as? [String: Any], m.values.allSatisfy({ $0 is String }) {
+            var mm: [String: Any] = [:]
+            for (k, v) in m {
+                let c = canonical(k)
+                if repos.contains(c) { mm[c] = v } else { problems.append("base_branch 에 적은 \(k) 는 이 실행의 저장소가 아닙니다") }
+            }
+            f["base_branch"] = mm
+        } else { problems.append("run.json 의 base_branch 는 가지 이름 하나 또는 {저장소 경로: 가지 이름} 입니다") }
+    }
+    let work = "autopilot/" + id
+    for r in repos {
+        guard let base = baseBranch(f, r) else {
+            problems.append("\(r) 가 가지에 걸려 있지 않습니다(detached HEAD). run.json 의 base_branch 로 출발 가지를 고르세요"); continue
+        }
+        if !branchExists(r, base) { problems.append("\(r) 에 출발 가지 \(base) 가 없습니다") }
+        if branchExists(r, work) { problems.append("\(r) 에 이미 \(work) 가지가 있습니다(같은 실행 id 를 다시 썼습니다)") }
+    }
+    // Jira 연결 프로젝트의 단위(story 칸): 스토리 가지·작업 가지 이름을 프로젝트 설정의 꼴로 정해 고정한다. 둘 다 이 실행이 새로 만들 가지여야 한다
+    // (엔진이 스스로 움직이는 가지는 이 실행이 만든 것뿐 — 이미 있는 가지면 출발하지 않는다)
+    if units.contains(where: { $0["story"] != nil }) {
+        let t = (f["project"] as? String).flatMap { projectSettings($0, dev: dev)?["tickets"] as? [String: Any] } ?? [:]
+        let names = t["branch_names"] as? [String: Any] ?? [:]
+        let sp = names["story"] as? String ?? defaultStoryPattern, tp = names["task"] as? String ?? defaultTaskPattern
+        let how = t["merge"] as? String ?? "merge"
+        if !sp.contains("{story}") || !tp.contains("{task}") { problems.append("프로젝트 설정 tickets.branch_names 의 꼴에 {story}·{task} 가 있어야 합니다") }
+        if !["merge", "ff"].contains(how) { problems.append("프로젝트 설정 tickets.merge 는 merge(병합 커밋) 또는 ff(앞으로 감기)입니다") }
+        f["tickets"] = ["branch_names": ["story": sp, "task": tp], "merge": how]
+        var seen = Set<String>()
+        for i in units.indices {
+            guard let story = units[i]["story"] as? String else { continue }
+            let n = i + 1, cwd = units[i]["cwd"] as? String ?? ""
+            guard let r = repos.filter({ cwd == $0 || cwd.hasPrefix($0 + "/") }).max(by: { $0.count < $1.count }) else {
+                problems.append("단위 \(n) 은 story 가 있는데 작업 폴더가 git 저장소 안이 아닙니다"); continue
+            }
+            let key = (units[i]["tickets"] as? [Any])?.first.map { "\($0)" }
+            guard let task = units[i]["branch"] as? String ?? key.map({ renderBranch(tp, $0, "task") }) else {
+                problems.append("단위 \(n) 은 story 가 있는데 tickets 에 작업 키도 branch 도 없습니다"); continue
+            }
+            let sb = renderBranch(sp, story, "story")
+            units[i]["branch"] = task; units[i]["story_branch"] = sb
+            queue[i]["branch"] = task
+            for b in [sb, task] where !validBranch(b, cwd: r) { problems.append("단위 \(n) 의 가지 이름 \(b) 가 git 가지 이름 꼴이 아닙니다") }
+            if branchExists(r, sb) { problems.append("\(repoName(r)) 에 스토리 가지 \(sb) 가 이미 있습니다(엔진은 이 실행이 만든 가지만 움직입니다)") }
+            if branchExists(r, task) { problems.append("\(repoName(r)) 에 작업 가지 \(task) 가 이미 있습니다") }
+            if !seen.insert(task).inserted { problems.append("작업 가지 \(task) 를 두 단위가 함께 씁니다") }
+        }
     }
     f["units"] = units
     return (problems, f, queue)
@@ -2327,6 +2857,17 @@ func cmdStart(_ args: [String]) -> Never {
         if let t = set["spec"] as? String { writePrivate(dir + "/pinned/set/spec.md", Data(t.utf8)) }
         if let st = set["stack"] { writePrivate(dir + "/pinned/set/stack.json", Data((jsonText(st, pretty: true) + "\n").utf8)) }
     }
+    // 가지: 저장소마다 출발 가지에서 autopilot/<실행 id> 를 만들어 원래 작업 트리를 그 가지로 바꾼다. 하네스 사본은 바꾼 뒤에 뜬다
+    // (끝 검사도 작업 가지 위에서 재고, 출발 때 가지로 되돌리기는 끝 검사·기록 뒤에 한다 — 되돌리기가 하네스 파일을 바꿔 "바뀜"으로 잡히지 않게)
+    let (branches, branchError) = startBranches(frozen, id: id)
+    if let branchError { fail("출발하지 않았습니다: \(branchError)") }
+    if !(branches["repos"] as? [String: Any] ?? [:]).isEmpty {
+        run["branches"] = branches
+        let rs = frozen["repos"] as? [String] ?? []
+        run["worktree"] = ["mode": "in_place", "repos": rs, "branch": "autopilot/" + id,
+                           "base": (branches["repos"] as? [String: Any] ?? [:]).mapValues { (($0 as? [String: Any])?["base"] as? [String: Any])?["head"] ?? "" },
+                           "reason": "따로 작업 트리는 엔진에 아직 없어(다음 차례) 원래 작업 트리에서 돕니다" + (rs.count > 1 ? ". 저장소 묶음(\(rs.count)곳)" : "")]
+    }
     // 하네스 사본과 지문: 단위 작업 폴더들의 저장소 뿌리마다, 엔진 전용 폴더(모델은 읽지 못함)에 둔다. 끝에 다시 재어 같은지 적는다
     let ep = privateRoot(dev: dev) + "/" + id
     mkdirPrivate(privateRoot(dev: dev)); mkdirPrivate(ep)
@@ -2347,13 +2888,19 @@ func cmdStart(_ args: [String]) -> Never {
         "StandardOutPath": dir + "/engine.log", "StandardErrorPath": dir + "/engine.log"]
     try? fm.createDirectory(atPath: home + "/Library/LaunchAgents", withIntermediateDirectories: true)
     guard let data = try? PropertyListSerialization.data(fromPropertyList: job, format: .xml, options: 0),
-          (try? data.write(to: URL(fileURLWithPath: plist))) != nil else { fail("LaunchAgent 파일을 쓰지 못했습니다: \(plist)") }
+          (try? data.write(to: URL(fileURLWithPath: plist))) != nil else {
+        rollbackBranches(branches)
+        run["state"] = "error"; run["reason"] = "LaunchAgent 파일을 쓰지 못했습니다."; run["wrapped"] = r3(now())
+        writeJSON(dir + "/run.json", run)
+        fail("LaunchAgent 파일을 쓰지 못했습니다: \(plist) (가지는 출발 때로 되돌렸습니다)")
+    }
     let r = runTool("/bin/launchctl", ["bootstrap", "gui/\(uid())", plist])
     guard r.code == 0 else {
         try? fm.removeItem(atPath: plist)
-        run["state"] = "error"; run["reason"] = "launchd 에 올리지 못했습니다."
+        rollbackBranches(branches)
+        run["state"] = "error"; run["reason"] = "launchd 에 올리지 못했습니다."; run["wrapped"] = r3(now())
         writeJSON(dir + "/run.json", run)
-        fail("launchctl bootstrap 이 실패했습니다(코드 \(r.code))")
+        fail("launchctl bootstrap 이 실패했습니다(코드 \(r.code)). 가지는 출발 때로 되돌렸습니다")
     }
     print("출발했습니다: \(label)\n상태 보기: \(pinned) status \(dir)")
     exit(0)
@@ -2403,6 +2950,18 @@ func statusBeforeStart(_ dir: String, _ run: [String: Any], dev devFlag: Bool) -
     out += "쓰기 범위: 단위마다 작업 폴더 + \((f["write_roots"] as? [String] ?? []).joined(separator: ", ").ifEmpty("(더 없음)")) + 단위 폴더 + 임시 폴더\n"
     out += "네트워크: \((f["network_allow"] as? [String] ?? defaultNetwork).joined(separator: ", ").ifEmpty("(없음)"))\((f["local_binding"] as? Bool ?? false) ? " · localhost 모든 포트 열림" : "")\n"
     out += "읽기 금지: \((f["read_deny"] as? [String] ?? []).count)곳 + 엔진 전용 뿌리(실제·시험 판), 모든 실행의 engine 폴더, 옛 뿌리(~/.claude/notifier/autopilot)\n"
+    // 어디서와 가지: 원래 작업 트리를 출발 가지에서 만든 autopilot/<실행 id> 로 바꿔 돈다(따로 작업 트리는 다음 차례)
+    let id = (dir as NSString).lastPathComponent
+    for r in f["repos"] as? [String] ?? [] {
+        let cur = currentBranch(r), base = baseBranch(f, r) ?? "?"
+        let dirty = porcelain(r)
+        out += "가지: \(r) · 출발 가지 \(base)\(headOf(r, "refs/heads/" + base).map { "(\($0.prefix(7)))" } ?? "") 에서 autopilot/\(id) 를 만들어 원래 작업 트리를 바꿈 · 지금 \(cur ?? "가지 없음"), 끝나면 깨끗할 때 되돌림\n"
+        if !dirty.isEmpty { out += "  커밋 안 한 변경 \(dirty.count)개: 가지가 바뀌어도 이 변경은 작업 트리에 남고, 모델이 함께 커밋할 수 있습니다\n" }
+        if let b = baseBranch(f, r), let c = cur, b != c { out += "  지금 걸린 가지(\(c))가 출발 가지(\(b))와 다릅니다. 판정 미리 돌리기는 지금 자리에서 돌므로 결과가 다를 수 있습니다\n" }
+    }
+    if let t = f["tickets"] as? [String: Any], let names = t["branch_names"] as? [String: Any] {
+        out += "Jira 가지: 스토리 \(names["story"] ?? "?") · 작업 \(names["task"] ?? "?") · 작업 → 스토리는 판정 통과 때 엔진이 \(t["merge"] as? String == "ff" ? "앞으로 감기로" : "병합 커밋으로")\n"
+    }
     if let e = f["env_pass"] as? [String], !e.isEmpty { out += "더 넘길 환경 변수: \(e.joined(separator: ", "))\n" }
     if let x = f["sandbox_exclude"] as? [String], !x.isEmpty { out += "샌드박스 밖에서 돌 명령: \(x.joined(separator: ", "))\n" }
     if let set = f["set"] as? [String: Any] {
@@ -2429,6 +2988,13 @@ func statusBeforeStart(_ dir: String, _ run: [String: Any], dev devFlag: Bool) -
             out += "     근거 묶음(읽기 전용으로 넘김): \(p) (파일 \(k)개)\n"
         }
         out += "     판정: \(short(d["check"] as? String ?? "", 160))" + ((d["check_timeout_min"]).map { " (\(num($0).map { String(Int($0)) } ?? "?")분 상한)" } ?? "") + "\n"
+        if let k = d["story"] as? String { out += "     스토리 \(k): 작업 가지 \(d["branch"] ?? "?") ← 스토리 가지 \(d["story_branch"] ?? "?")\n" }
+        if let a = d["depends"] as? [String], !a.isEmpty { out += "     기대는 앞 단위: \(a.joined(separator: ", ")) (통과하지 않으면 건너뜀)\n" }
+        if d["prerun"] as? Bool == false { out += "     판정 미리 돌리기: 넣지 않음(prerun: false)\n" }
+    }
+    if let p = readJSON(dir + "/prerun.json") as? [String: Any] {
+        let pass = p["already_passing"] as? [Any] ?? []
+        out += "판정 미리 돌리기(\(num(p["at"]).map { when($0) } ?? "?")): 일하기 전부터 통과 \(pass.count)개\(pass.isEmpty ? "" : "(단위 " + pass.map { "\($0)" }.joined(separator: ", ") + ")")\n"
     }
     out += "출발: \"\(selfPath())\" start \"\(dir)\"\(dev ? " --dev" : "")\n"
     print(out, terminator: "")
@@ -2454,6 +3020,20 @@ func cmdStatus(_ args: [String]) -> Never {
     if let u = run["usage"] as? [String: Any] {
         let p = { (k: String) in num(u[k]).map { "\(Int(($0 * 100).rounded()))%" } ?? "?" }
         out += "계정 사용률: 5시간 \(p("five_hour")) · 주간 \(p("seven_day"))\n"
+    }
+    if let b = run["branches"] as? [String: Any] {
+        for (r, v) in (b["repos"] as? [String: Any] ?? [:]).sorted(by: { $0.key < $1.key }) {
+            let i = v as? [String: Any] ?? [:]
+            let restored = i["restored"] as? Bool
+            out += "가지: \(repoName(r)) · 출발 \((i["base"] as? [String: Any])?["branch"] ?? "?") → \(i["work"] ?? "?") · 지금 \(i["on"] ?? "?")"
+                + (restored == nil ? "" : restored! ? " · 출발 때 가지로 되돌림" : " · 되돌리지 않음(\(i["restore_note"] ?? ""))") + "\n"
+        }
+        for (k, v) in (b["stories"] as? [String: Any] ?? [:]).sorted(by: { $0.key < $1.key }) {
+            let s = v as? [String: Any] ?? [:]
+            out += "스토리 \(k): \(s["branch"] ?? "?") · 합침 \((s["merged"] as? [Any])?.count ?? 0) · 합치지 않음 \((s["unmerged"] as? [Any])?.count ?? 0)\n"
+        }
+        if let m = b["moved"] as? [Any] { out += "움직인 기존 가지: \(m.count)개\n" }
+        for p in b["promoted"] as? [[String: Any]] ?? [] { out += "합침: \(p["branch"] ?? "?") → \(p["into"] ?? "?") (\(repoName(p["repo"] as? String ?? "")), \(p["how"] ?? ""))\n" }
     }
     for (i, q) in queue.enumerated() {
         let n = i + 1
@@ -2554,6 +3134,204 @@ func cmdRecords(_ args: [String]) -> Never {
     exit(bad == 0 ? 0 : 1)
 }
 
+// 판정 미리 돌리기(설계 2장, 4장 prerun): 출발 전에 고정 단계가 없고 prerun 이 참인 단위의 판정을 한 번씩 돌려, 일하기 전부터 통과하는 단위를
+// 출발 카드 감(빼기·판정 고치기·그대로)으로 prerun.json 에 남긴다. 원래 작업 트리 모드라 지금 자리에서 돈다(출발 가지와 다르면 알림만, 작업 트리를 바꾸지 않음)
+func cmdPrerun(_ args: [String]) -> Never {
+    let dir = runDir(args.first { !$0.hasPrefix("--") })
+    guard let run = readJSON(dir + "/run.json") as? [String: Any] else { fail("run.json 을 읽지 못했습니다") }
+    guard run["state"] == nil else { fail("이미 출발한 실행입니다. 판정 미리 돌리기는 출발 전에만 합니다.") }
+    let dev = args.contains("--dev") || run["claude_args"] != nil || run["claude_path"] != nil
+    let (problems, f, queue) = prepare(dir, dev: dev)
+    guard problems.isEmpty else { fail("출발 준비 확인에 고칠 것이 있어 돌리지 않았습니다:\n" + problems.map { "  - " + $0 }.joined(separator: "\n")) }
+    let e = Engine(dir)
+    e.cfg = f; e.defs = f["units"] as? [[String: Any]] ?? []; e.queue = queue
+    e.setupEnv()
+    var whereNotes: [[String: Any]] = []
+    for r in f["repos"] as? [String] ?? [] {
+        let cur = currentBranch(r), base = baseBranch(f, r)
+        let same = base != nil && cur == base && headOf(r, "HEAD") == headOf(r, "refs/heads/" + (base ?? ""))
+        var w: [String: Any] = ["repo": r, "on": cur ?? NSNull(), "base": base ?? NSNull(), "same": same]
+        if !same { w["note"] = "지금 걸린 가지(\(cur ?? "가지 없음"))에서 돌렸습니다. 출발 가지(\(base ?? "?"))와 다르면 결과가 다를 수 있습니다" }
+        whereNotes.append(w)
+    }
+    let out = dir + "/prerun"
+    try? fm.removeItem(atPath: out)
+    var units: [[String: Any]] = [], passing: [Int] = [], cards: [[String: Any]] = []
+    print("판정 미리 돌리기: 실행 \((dir as NSString).lastPathComponent), 단위 \(e.defs.count)개")
+    for w in whereNotes where w["note"] != nil { print("  알림: \(repoName(w["repo"] as? String ?? "")): \(w["note"]!)") }
+    for (i, d) in e.defs.enumerated() {
+        let n = i + 1, t = d["title"] as? String ?? "단위 \(n)"
+        var o: [String: Any] = ["n": n, "id": d["id"] ?? "u\(n)", "title": t, "ran": false]
+        func say(_ s: String) { print("  \(n). \(t): \(s)") }
+        if d["prerun"] as? Bool == false { o["skipped"] = "부작용이 있는 판정이라 미리 돌리지 않습니다(prerun: false)"; say(o["skipped"] as! String); units.append(o); continue }
+        if !(d["action"] as? String ?? "").isEmpty { o["skipped"] = "고정 단계가 있는 단위라 미리 돌리지 않습니다"; say(o["skipped"] as! String); units.append(o); continue }
+        let ev = out + "/\(n)"
+        if let pc = d["precheck"] as? String, !pc.isEmpty {
+            let r = e.plainCommand(n, pc, ev: ev + "/precheck", limit: 120)
+            if r.code != 0 {
+                o["skipped"] = "시험 환경 확인이 실패해(종료 코드 \(r.code)) 판정을 돌리지 않았습니다"; say(o["skipped"] as! String); units.append(o); continue
+            }
+        }
+        let limit = (num(d["check_timeout_min"]) ?? num(f["check_timeout_min"]) ?? 10) * 60
+        let r = e.plainCommand(n, d["check"] as? String ?? "false", ev: ev, limit: limit)
+        o["ran"] = true; o["exit"] = Int(r.code); o["sec"] = r3(r.sec); o["tail"] = r.tail; o["passed"] = r.code == 0; o["evidence"] = "prerun/\(n)"
+        if r.timedOut { o["timed_out"] = true }
+        units.append(o)
+        if r.code == 0 {
+            passing.append(n)
+            cards.append(["id": "prerun-\(d["id"] ?? "u\(n)")", "unit": n, "kind": "prerun",
+                          "title": "「\(t)」 의 판정이 일하기 전부터 통과합니다",
+                          "why": "이미 끝난 일이거나 판정이 약하다는 뜻입니다. 그대로 두면 모델이 일하지 않아도 통과로 기록됩니다.",
+                          "options": [["key": "drop", "label": "빼기"], ["key": "fix_check", "label": "판정 고치기"], ["key": "keep", "label": "그대로"]],
+                          "recommended": "drop"])
+            say("일하기 전부터 통과합니다(\(dur(r.sec))). 출발 카드 감: 빼기(추천) · 판정 고치기 · 그대로")
+        } else {
+            say("실패(종료 코드 \(r.code)\(r.timedOut ? ", 시간 상한" : ""), \(dur(r.sec))). 일하기 전이라 맞습니다")
+        }
+    }
+    writeJSON(dir + "/prerun.json", ["at": r3(now()), "where": whereNotes, "units": units, "already_passing": passing, "cards": cards])
+    print("결과: \(dir)/prerun.json (일하기 전부터 통과 \(passing.count)개)")
+    exit(0)
+}
+
+// 끝난 실행의 가지 승격(설계 2장 끝 "승격", 4장 finish). 사람이 명령으로만 부른다 — 엔진이 스스로 부르는 길은 없다.
+//   merge --into <가지> [--story <키>]   자율주행 가지(Jira 실행이면 --story 의 스토리 가지)를 <가지>로
+//   promote <가지> --into <가지>         기존 가지를 다음 가지로(live → master). 프로젝트 설정의 승격 차례가 있어야 한다
+//   discard [--story <키>]               어느 단계도 합치기 전에만 자율주행 가지(또는 그 스토리의 스토리·작업 가지)를 지운다
+// 합치기는 받는 가지가 그대로면 앞으로 감기, 앞서 나갔으면 병합 커밋(merge-tree 로 체크아웃 없이), 충돌이면 하지 않는다. 받는 가지가 어느 작업 트리에
+// 걸려 있으면 그 작업 트리가 깨끗할 때만 그 자리에서 앞으로 감기(ff-only)로 올리고, 아니면 하지 않는다
+func cmdFinish(_ args: [String]) -> Never {
+    guard args.count >= 2 else { usage() }
+    let dir = runDir(args[0])
+    var rest = Array(args.dropFirst())
+    let op = rest.removeFirst()
+    func opt(_ k: String) -> String? {
+        guard let i = rest.firstIndex(of: k), i + 1 < rest.count else { return nil }
+        let v = rest[i + 1]; rest.removeSubrange(i...(i + 1)); return v
+    }
+    let into = opt("--into"), storyKey = opt("--story")
+    guard var run = readJSON(dir + "/run.json") as? [String: Any] else { fail("run.json 을 읽지 못했습니다") }
+    let state = run["state"] as? String ?? ""
+    guard ["done", "stopped", "error"].contains(state), run["wrapped"] != nil else {
+        fail("실행이 아직 끝나지 않았습니다(\(stateLabel[state] ?? state)). 끝난 뒤에 합치거나 버립니다.")
+    }
+    var b = run["branches"] as? [String: Any] ?? [:]
+    let info = b["repos"] as? [String: Any] ?? [:]
+    guard !info.isEmpty else { fail("이 실행에는 엔진이 만든 가지가 없습니다(git 저장소에서 돌지 않았거나 가지 기능 전의 실행).") }
+    var promoted = b["promoted"] as? [[String: Any]] ?? []
+    // 합칠 쪽: 자율주행 가지(저장소마다) 또는 스토리 가지
+    var label = "autopilot", refs: [(repo: String, branch: String)] = []
+    if let k = storyKey {
+        guard let s = (b["stories"] as? [String: Any])?[k] as? [String: Any], let r = s["repo"] as? String, let sb = s["branch"] as? String else {
+            fail("이 실행에 스토리 \(k) 가 없습니다.")
+        }
+        label = "story:" + k; refs = [(r, sb)]
+    } else {
+        refs = info.keys.sorted().compactMap { r in ((info[r] as? [String: Any])?["work"] as? String).map { (r, $0) } }
+    }
+    let steps = (run["project"] as? String).flatMap { projectSettings($0, dev: run["dev"] as? Bool ?? false)?["promotion"] as? [[String: Any]] }
+    func done(_ src: String?, _ into: String) -> Bool { promoted.contains { ($0["into"] as? String) == into && (src == nil || $0["source"] as? String == src) } }
+    func step(_ from: String, _ into: String) -> [String: Any] {
+        guard let steps else { return [:] }
+        guard let s = steps.first(where: { $0["from"] as? String == from && $0["into"] as? String == into }) else {
+            let list = steps.map { "\(($0["from"] as? String) == "autopilot" ? "자율주행 가지" : ($0["from"] as? String ?? "?")) → \($0["into"] ?? "?")" }
+            fail("프로젝트 설정의 승격 차례에 \(from == "autopilot" ? "자율주행 가지" : from) → \(into) 단계가 없습니다(차례: \(list.joined(separator: ", "))).")
+        }
+        return s
+    }
+    let id = (dir as NSString).lastPathComponent
+    switch op {
+    case "merge":
+        guard let into, rest.isEmpty else { usage() }
+        if let after = step("autopilot", into)["after"] as? String, !done(label, after) {
+            fail("\(after) 에 먼저 합쳐야 \(into) 에 합칠 수 있습니다(승격 차례).")
+        }
+        promoted += mergeRefs(label, refs, into, id: id)
+    case "promote":
+        guard let into, rest.count == 1 else { usage() }
+        let from = rest[0]
+        guard steps != nil else { fail("프로젝트 설정에 승격 차례(promotion)가 없어 기존 가지끼리는 합치지 않습니다. 보드에서 차례를 정한 뒤 다시 하세요.") }
+        if let after = step(from, into)["after"] as? String, !done(nil, after) {
+            fail("\(after) 에 먼저 합쳐야 \(from) 을 \(into) 에 합칠 수 있습니다(승격 차례).")
+        }
+        promoted += mergeRefs("branch:" + from, info.keys.sorted().map { ($0, from) }, into, id: id)
+    case "discard":
+        guard rest.isEmpty, into == nil else { usage() }
+        if let p = promoted.first(where: { $0["source"] as? String == label }) { fail("이미 \(p["into"] ?? "?") 에 합친 단계가 있어 버리지 않습니다. 버리기는 합치기 전에만 합니다.") }
+        var del = refs
+        if let k = storyKey, let r = refs.first?.repo {   // 스토리 단위: 그 스토리의 작업 가지도 함께
+            let defs = (readJSON(dir + "/pinned/frozen.json") as? [String: Any])?["units"] as? [[String: Any]] ?? []
+            for d in defs where d["story"] as? String == k { if let t = d["branch"] as? String, branchExists(r, t) { del.append((r, t)) } }
+        }
+        var bad: [String] = []
+        for (r, x) in del { if let wt = checkedOut(r)[x] { bad.append("\(x) 가 작업 트리(\(wt))에 걸려 있습니다. 다른 가지로 바꾼 뒤 다시 하세요") } }
+        if !bad.isEmpty { fail("버리지 않았습니다:\n" + bad.map { "  - " + $0 }.joined(separator: "\n")) }
+        var gone: [[String: Any]] = []
+        if !del.contains(where: { branchExists($0.repo, $0.branch) }) { print("  지울 가지가 없습니다(이미 버렸거나 지워짐).") }
+        for (r, x) in del where branchExists(r, x) {
+            let h = headOf(r, "refs/heads/" + x) ?? ""
+            let c = gitRun(["branch", "-D", x], cwd: r)
+            print(c.code == 0 ? "  지움: \(repoName(r)) \(x) (\(h.prefix(7)))" : "  지우지 못함: \(repoName(r)) \(x): \(firstLine(c.out))")
+            if c.code == 0 { gone.append(["source": label, "repo": r, "branch": x, "head": h, "at": r3(now())]) }
+        }
+        b["discarded"] = (b["discarded"] as? [Any] ?? []) + gone
+    default: usage()
+    }
+    b["promoted"] = promoted
+    run["branches"] = b; run["updated"] = r3(now())
+    writeJSON(dir + "/run.json", run)
+    // 기록 저장소의 runs.branches 도 새로(실패해도 run.json 은 이미 썼다)
+    if let db = try? RecordsDB(recordsPath(dev: run["dev"] as? Bool ?? false)) {
+        do { try db.transaction { _ = try db.syncRun(RunSource(dir: dir, origin: "engine", frozen: nil)) } }
+        catch { print("  실행 기록 저장소에 쓰지 못했습니다: \(error)") }
+        db.close()
+    }
+    exit(0)
+}
+
+// 합치기 하나(저장소마다): 모든 저장소를 먼저 계획하고, 하나라도 충돌·거부면 아무것도 하지 않는다. 한 것을 promoted 줄로 돌려준다
+func mergeRefs(_ label: String, _ refs: [(repo: String, branch: String)], _ into: String, id: String) -> [[String: Any]] {
+    struct Plan { var repo, src, srcHead, intoHead, how: String; var tree: String?; var wt: String? }
+    var plans: [Plan] = [], bad: [String] = []
+    for (r, s) in refs {
+        guard let sh = headOf(r, "refs/heads/" + s) else { bad.append("\(repoName(r)) 에 \(s) 가지가 없습니다(버렸거나 지워짐)"); continue }
+        guard let ih = headOf(r, "refs/heads/" + into) else { print("  건너뜀: \(repoName(r)) 에 \(into) 가지가 없습니다"); continue }
+        var p = Plan(repo: r, src: s, srcHead: sh, intoHead: ih, how: "same", tree: nil, wt: checkedOut(r)[into])
+        if isAncestor(r, sh, ih) { p.how = "same" }
+        else if isAncestor(r, ih, sh) { p.how = "ff" }
+        else {
+            let m = gitRun(["merge-tree", "--write-tree", "--name-only", "--no-messages", ih, sh], cwd: r)
+            let lines = m.out.split(separator: "\n").map(String.init)
+            if m.code == 0, let t = lines.first { p.how = "merge"; p.tree = t }
+            else if m.code == 1 { bad.append("\(repoName(r)): \(s) 를 \(into) 에 합치면 충돌합니다(\(lines.dropFirst().prefix(5).joined(separator: ", "))). 보드 탭에서 직접 합치세요") }
+            else { bad.append("\(repoName(r)): 합칠 tree 를 만들지 못했습니다: \(firstLine(m.out))") }
+        }
+        if p.how != "same", let wt = p.wt, !(gitOut(["--no-optional-locks", "status", "--porcelain", "--untracked-files=no"], cwd: wt) ?? "x").isEmpty {
+            bad.append("\(repoName(r)): \(into) 가 걸린 작업 트리(\(wt))에 커밋하지 않은 변경이 있어 합치지 않습니다")
+        }
+        plans.append(p)
+    }
+    if !bad.isEmpty { fail("합치지 않았습니다(아무것도 바꾸지 않음):\n" + bad.map { "  - " + $0 }.joined(separator: "\n")) }
+    var out: [[String: Any]] = []
+    for p in plans {
+        var head = p.srcHead
+        if p.how == "same" { print("  그대로: \(repoName(p.repo)) \(into) 에 \(p.src) 가 이미 들어 있습니다") }
+        if p.how == "merge", let t = p.tree {
+            let c = gitRun(["commit-tree", t, "-p", p.intoHead, "-p", p.srcHead, "-m", "Merge branch '\(p.src)' into \(into)\n\n자율주행 \(id) 승격(보드 finish)"], cwd: p.repo, commit: true)
+            guard c.code == 0 else { print("  하지 못함: \(repoName(p.repo)) 병합 커밋: \(firstLine(c.out))"); continue }
+            head = c.out
+        }
+        if p.how != "same" {
+            let up = p.wt.map { gitRun(["merge", "--ff-only", "-q", head], cwd: $0) }
+                ?? gitRun(["update-ref", "-m", "autopilot \(id): finish \(p.src) into \(into)", "refs/heads/" + into, head, p.intoHead], cwd: p.repo)
+            guard up.code == 0 else { print("  하지 못함: \(repoName(p.repo)) \(into) 올리기: \(firstLine(up.out))"); continue }
+            print("  합침: \(repoName(p.repo)) \(p.src) → \(into) (\(p.how == "ff" ? "앞으로 감기" : "병합 커밋") \(p.intoHead.prefix(7)) → \(head.prefix(7))\(p.wt == nil ? "" : ", 작업 트리도 함께"))")
+        }
+        out.append(["source": label, "repo": p.repo, "branch": p.src, "into": into, "how": p.how, "from": p.intoHead, "to": head, "at": r3(now())])
+    }
+    return out
+}
+
 let argv = Array(CommandLine.arguments.dropFirst())
 switch argv.first {
 case "start": cmdStart(Array(argv.dropFirst()))
@@ -2561,5 +3339,7 @@ case "run": cmdRun(Array(argv.dropFirst()))
 case "control": cmdControl(Array(argv.dropFirst()))
 case "status": cmdStatus(Array(argv.dropFirst()))
 case "records": cmdRecords(Array(argv.dropFirst()))
+case "prerun": cmdPrerun(Array(argv.dropFirst()))
+case "finish": cmdFinish(Array(argv.dropFirst()))
 default: usage()
 }
