@@ -21,6 +21,20 @@ function Install-ClaudeBoard {
   $Notifier = Join-Path $env:USERPROFILE '.claude\notifier'
   $Settings = Join-Path $env:USERPROFILE '.claude\settings.json'
 
+  # 실제 빌드 번호 — 레지스트리를 먼저 본다. [Environment]::OSVersion 은 호환 매니페스트가 없는 프로세스에 6.2 같은 거짓 버전을 준다.
+  # 못 읽으면 0 (검사하지 않고 넘어간다)
+  function Get-OsBuild {
+    $n = 0
+    try {
+      $s = (Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -Name CurrentBuildNumber -ErrorAction Stop).CurrentBuildNumber
+      if (-not [int]::TryParse("$s", [ref]$n)) { $n = 0 }
+    } catch { $n = 0 }
+    if ($n -le 0) { try { $n = [Environment]::OSVersion.Version.Build } catch { $n = 0 } }
+    return [int]$n
+  }
+  # 17763 = Windows 10 1809, ConPTY(CreatePseudoConsole)가 들어간 첫 빌드
+  function Test-OsBuild([int]$Build) { return ($Build -ge 17763) }
+
   # 출력은 UTF-8 로 — 보드의 업데이트 단추는 이 출력을 notifier\update.log 로 받는다. 끝나면 원래대로 돌린다
   $prevEncoding = $null
   try { $prevEncoding = [Console]::OutputEncoding; [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false } catch { }
@@ -30,6 +44,11 @@ function Install-ClaudeBoard {
 
     Write-Host '== Claude Board for Windows 설치 =='
     if (-not [Environment]::Is64BitOperatingSystem) { throw '64비트(x64) Windows 가 필요합니다.' }
+    # 보드는 CreatePseudoConsole(ConPTY)을 정적으로 가져다 쓴다 — Windows 10 1809(빌드 17763) 미만은 실행 시 진입점 오류로 뜨지 않는다
+    $build = Get-OsBuild
+    if ($build -gt 0 -and -not (Test-OsBuild $build)) {
+      throw "Windows 10 1809(빌드 17763) 이상이 필요합니다. 이 PC 는 빌드 $build 입니다. Windows 업데이트 후 다시 실행하세요."
+    }
 
     # 처음 설치(hook 이 아직 없음)일 때만 묻는다 — hook 명령에 들어가는 표시(.claude/notifier/)로 판단한다
     $first = $true

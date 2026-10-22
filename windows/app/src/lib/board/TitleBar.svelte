@@ -1,14 +1,18 @@
 <script lang="ts">
   // 직접 그린 제목 막대(SPEC §5.10) — 끌기 영역, 왼쪽에 "처음 크기로 오른쪽에 붙이기", 오른쪽에 최대축소(↘↖)/원래 크기(⤢)·최소화·닫기.
-  // 미니에서는 상태별 세션 수를 함께 보인다(자리가 모자라면 글자를 빼고 수만)
-  import type { State } from "$lib/types";
-  import { enterMini, hideBoard, leaveMini, minimizeBoard, snapRight } from "$lib/backend";
+  // 미니에서는 상태별 세션 수를 함께 보인다(자리가 모자라면 글자를 빼고 수만).
+  // 터미널을 접은 동안은 snap 단추 오른쪽에 터미널 펼침 캡슐이 있다. 펼친 동안은 캡슐이 터미널 제목 띠에 있고,
+  // 보드가 왼쪽이면 최소화·닫기도 터미널 제목 띠(창의 오른쪽 끝)로 간다
+  import type { BoardSide, State } from "$lib/types";
+  import { enterMini, leaveMini, snapRight } from "$lib/backend";
+  import TerminalToggle from "$lib/terminal/TerminalToggle.svelte";
+  import WinButtons from "$lib/terminal/WinButtons.svelte";
   import Fit from "./Fit.svelte";
   import Icon from "./Icon.svelte";
   import { stateName, stateRgb } from "./format";
   import { hint } from "./hint.svelte";
 
-  let { mini, counts, rows }: { mini: boolean; counts: Record<State, number>; rows: number } = $props();
+  let { mini, counts, rows, expanded, side }: { mini: boolean; counts: Record<State, number>; rows: number; expanded: boolean; side: BoardSide } = $props();
 
   const short: Record<string, string> = { waiting: "승인", working: "작업", idle: "대기" };
   const chips = $derived((["waiting", "working", "idle"] as const).filter((st) => counts[st] > 0));
@@ -18,6 +22,9 @@
   <button class="snap" onclick={snapRight} use:hint={"처음 크기로 되돌려 화면 오른쪽에 붙이기 (Ctrl+Alt+B)"}>
     <span class="cap"><Icon name="snap-right" size={11} /></span>
   </button>
+  {#if !expanded && !mini}
+    <TerminalToggle expanded={false} {side} />
+  {/if}
   {#if mini}
     <Fit count={2} class="chips" data-tauri-drag-region>
       {#snippet content(level)}
@@ -41,10 +48,9 @@
   >
     <Icon name={mini ? "grow" : "shrink"} size={10} />
   </button>
-  <button class="win" onclick={minimizeBoard} use:hint={"최소화"} aria-label="최소화"><Icon name="win-min" size={10} /></button>
-  <button class="win close" onclick={hideBoard} use:hint={"닫기 — 보드는 알림 영역 아이콘에 남습니다"} aria-label="닫기">
-    <Icon name="win-close" size={10} />
-  </button>
+  {#if !(expanded && side === "left")}
+    <WinButtons round={!expanded} />
+  {/if}
 </div>
 
 <style>
@@ -126,24 +132,5 @@
   .tier:hover {
     color: var(--fg);
     background: rgb(255 255 255 / 0.16);
-  }
-  .win {
-    flex: none;
-    width: 40px;
-    height: 32px;
-    display: grid;
-    place-items: center;
-    color: rgb(255 255 255 / 0.75);
-    transition: background 0.12s;
-  }
-  .win:hover {
-    color: #fff;
-    background: rgb(255 255 255 / 0.1);
-  }
-  .win.close {
-    border-top-right-radius: 10px;
-  }
-  .win.close:hover {
-    background: #c42b1c;
   }
 </style>

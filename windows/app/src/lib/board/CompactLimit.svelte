@@ -46,7 +46,7 @@
     background: rgb(var(--c));
   }
   .pct {
-    font-size: 12px;
+    font-size: 13px;
     font-weight: 700;
     color: rgb(var(--c));
   }

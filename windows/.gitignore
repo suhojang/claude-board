@@ -9,3 +9,6 @@
 /app/src-tauri/binaries/
 /dist/
 .DS_Store
+
+# 화면 대조용 시나리오(로컬 전용)
+app/src/lib/mock-scenarios.ts

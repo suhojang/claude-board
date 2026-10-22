@@ -20,7 +20,8 @@
   use:hint={sub.background ? "백그라운드로 실행된 서브에이전트" : "세션이 결과를 기다리는 서브에이전트"}
 >
   <span class="branch" class:last></span>
-  <StateIcon state={subState(sub)} scale={0.8} />
+  <!-- SwiftUI scaleEffect 는 칸 크기를 그대로 두고 그림만 줄인다 — 18 칸 안에서 0.8 배 -->
+  <span class="ico"><StateIcon state={subState(sub)} scale={0.8} /></span>
   <div class="col">
     <div class="desc">{sub.desc || sub.type}</div>
     <Fit count={3} class="meta">
@@ -35,7 +36,7 @@
           {#if sub.brain}<ModelLabel brain={sub.brain} {level} />{/if}
           {#if !done && sub.tool}
             <span>·</span>
-            <span class="tool" use:hint={sub.tool}><Icon name="wrench" size={10} />{#if level < 2}{sub.tool}{/if}</span>
+            <span class="tool" use:hint={sub.tool}><Icon name="wrench" size={15} pad={-1.25} />{#if level < 2}{sub.tool}{/if}</span>
           {/if}
         </span>
       {/snippet}
@@ -85,6 +86,13 @@
   }
   .branch.last::after {
     display: none;
+  }
+  .ico {
+    flex: none;
+    display: grid;
+    place-items: center;
+    width: 18px;
+    height: 18px;
   }
   .col {
     flex: 1;

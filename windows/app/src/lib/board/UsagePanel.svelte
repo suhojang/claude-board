@@ -33,7 +33,7 @@
     onclick={() => setUsageCompact(!setting)}
     use:hint={setting ? "자세히 보기 — 한도마다 막대와 초기화 시각" : "간략히 보기 — 한 줄로"}
   >
-    <Icon name={setting ? "expand" : "compress"} size={11} />
+    <Icon name={setting ? "expand" : "compress"} size={15} />
   </button>
 {/snippet}
 

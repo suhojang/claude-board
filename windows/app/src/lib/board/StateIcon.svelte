@@ -48,10 +48,11 @@
     place-items: center;
     animation: appear 0.25s ease-out;
   }
+  /* SwiftUI 원은 선이 테두리 중앙에 놓여 18 칸 밖으로 1.25 씩 나온다 — 바깥 지름 20.5 */
   .track,
   .spin {
     position: absolute;
-    inset: 0;
+    inset: -1.25px;
     border-radius: 50%;
   }
   .track {
@@ -65,8 +66,8 @@
     position: absolute;
     width: 2.5px;
     height: 2.5px;
-    left: calc(1.39px - 1.25px);
-    top: calc(10.48px - 1.25px);
+    left: calc(1.41px - 1.25px);
+    top: calc(11.97px - 1.25px);
     border-radius: 50%;
     background: rgb(var(--c));
   }

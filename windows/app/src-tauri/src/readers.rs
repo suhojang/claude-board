@@ -1,10 +1,11 @@
-//! 대화 기록에서 모델·effort(SPEC §5.2)와 컨텍스트 사용량(§5.3)을 읽는다 — `ClaudeBoard.swift:97-246`.
+//! 대화 기록에서 모델·effort(SPEC §5.2)와 컨텍스트 사용량(§5.3), Esc 중단 표시(§3.9)와 Claude Code 세션 파일(§2.3)을 읽는다 — `ClaudeBoard.swift:97-246`.
 
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
 
+use claude_board_core::claude_live::{self, ClaudeSession, INTERRUPT_TAIL};
 use claude_board_core::{fileio, Record};
 use serde_json::Value;
 
@@ -59,6 +60,86 @@ fn last_model(data: &[u8]) -> Option<(String, String)> {
         return Some((model.to_string(), effort.to_string()));
     }
     None
+}
+
+/// 파일 수정 시각과 크기 — Windows 는 수정 시각이 타이머 틱 단위라 같은 틱 안에 다시 쓴 파일이 같은 시각으로 보일 수 있어
+/// 크기를 함께 본다(덧붙인 대화 기록 줄이나 고쳐 쓴 세션 파일이 읽다 만 결과로 굳지 않게).
+fn stamp(path: &Path) -> Option<(SystemTime, u64)> {
+    let md = std::fs::metadata(path).ok()?;
+    Some((md.modified().ok()?, md.len()))
+}
+
+/// Esc 로 끊은 응답 — 대화 기록 끝의 마지막 대화 줄이 중단 표시면 그 시각(유닉스 초)을 돌려준다
+/// (`InterruptReader`, `ClaudeBoard.swift:156`). 파일 수정 시각과 크기가 같으면 이전 결과를 쓴다.
+#[derive(Default)]
+pub struct InterruptReader {
+    parsed: HashMap<PathBuf, ((SystemTime, u64), Option<f64>)>,
+}
+
+impl InterruptReader {
+    /// 파일이 없으면 None(캐시하지 않는다).
+    pub fn read(&mut self, path: &Path) -> Option<f64> {
+        let changed = stamp(path)?;
+        if let Some((m, at)) = self.parsed.get(path) {
+            if *m == changed {
+                return *at;
+            }
+        }
+        let secs = changed.0.duration_since(UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64());
+        let at = claude_live::interrupted_at_in(&read_tail(path, INTERRUPT_TAIL), secs);
+        self.parsed.insert(path.to_path_buf(), (changed, at));
+        at
+    }
+
+    /// 목록에서 사라진 기록은 잊는다.
+    pub fn prune(&mut self, keep: &std::collections::HashSet<PathBuf>) {
+        self.parsed.retain(|k, _| keep.contains(k));
+    }
+
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.parsed.len()
+    }
+}
+
+/// Claude Code 가 `~/.claude/sessions/<pid>.json` 에 쓰는 세션 이름·status — pid 별로 파일 수정 시각과 크기가 같으면 다시 읽지 않는다
+/// (`ClaudeNames`, `ClaudeBoard.swift:193`). 파일이 없거나 객체가 아니면 None.
+pub struct ClaudeNames {
+    dir: PathBuf,
+    cache: HashMap<u32, ((SystemTime, u64), Option<ClaudeSession>)>,
+}
+
+impl ClaudeNames {
+    /// `dir` = `~/.claude`
+    pub fn new(dir: PathBuf) -> Self {
+        ClaudeNames { dir, cache: HashMap::new() }
+    }
+
+    pub fn get(&mut self, pid: u32) -> Option<ClaudeSession> {
+        let path = claude_live::claude_session_path(&self.dir, pid);
+        let Some(m) = (pid > 0).then(|| stamp(&path)).flatten() else {
+            self.cache.remove(&pid);
+            return None;
+        };
+        if let Some((cm, cs)) = self.cache.get(&pid) {
+            if *cm == m {
+                return cs.clone();
+            }
+        }
+        let cs = claude_live::read_claude_session(&self.dir, pid);
+        self.cache.insert(pid, (m, cs.clone()));
+        cs
+    }
+
+    /// 목록에서 사라진 pid 는 잊는다.
+    pub fn prune(&mut self, keep: &std::collections::HashSet<u32>) {
+        self.cache.retain(|k, _| keep.contains(k));
+    }
+
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.cache.len()
+    }
 }
 
 /// 세션별 컨텍스트 사용량.

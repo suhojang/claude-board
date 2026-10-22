@@ -1,3 +1,48 @@
+<script lang="ts" module>
+  // 가운데를 줄이는 글자(SwiftUI truncationMode(.middle)) — 긴 글이 넘치면 앞 30%·뒤 70% 글자만 남기고 가운데를 … 로 바꾼다.
+  // 남는 폭에서 20px 를 비운다(macOS 가 칸을 꽉 채우지 않고 남기는 만큼)
+  const SLACK = 20;
+  let canvas: CanvasRenderingContext2D | null = null;
+
+  function middle(node: HTMLElement, full: string) {
+    let text = full;
+    function fit() {
+      canvas ??= document.createElement("canvas").getContext("2d");
+      const ctx = canvas;
+      const avail = node.clientWidth - SLACK;
+      if (!ctx || avail <= 0) {
+        node.textContent = text;
+        return;
+      }
+      const cs = getComputedStyle(node);
+      ctx.font = `${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+      ctx.letterSpacing = cs.letterSpacing === "normal" ? "0px" : cs.letterSpacing;
+      const chars = Array.from(text);
+      const cut = (k: number) => {
+        const h = Math.round(k * 0.3);
+        return chars.slice(0, h).join("") + "…" + chars.slice(chars.length - (k - h)).join("");
+      };
+      let out = text;
+      if (ctx.measureText(text).width > node.clientWidth) {
+        let k = chars.length - 1;
+        while (k > 1 && ctx.measureText(cut(k)).width > avail) k--;
+        out = cut(k);
+      }
+      node.textContent = out;
+    }
+    const ro = new ResizeObserver(fit);
+    ro.observe(node);
+    fit();
+    return {
+      update(next: string) {
+        text = next;
+        fit();
+      },
+      destroy: () => ro.disconnect(),
+    };
+  }
+</script>
+
 <script lang="ts">
   // 새 버전 알림 줄(ClaudeBoard.swift:4186-4224) — 전체·중간 화면의 윗줄 아래에 뜬다.
   // 새 버전이 없으면 손으로 확인한 결과(최신·확인 실패·개발용 빌드)만 단추 없이 잠깐 보인다
@@ -24,8 +69,8 @@
 </script>
 
 <div class="banner" style:--t={tint}>
-  <span class="ic"><Icon name={icon} size={13} /></span>
-  <span class="text">{text}</span>
+  <span class="ic"><Icon name={icon} size={14.5} /></span>
+  <span class="text" use:middle={text}></span>
   {#if updater.running}
     <span class="spinner"></span>
   {:else if !notice}
@@ -45,6 +90,7 @@
     gap: 6px;
     padding: 6px 10px;
     border-radius: 8px;
+    line-height: 15px;
     background: rgb(var(--t) / 0.12);
   }
   .ic {
@@ -59,7 +105,6 @@
     font-weight: 600;
     white-space: nowrap;
     overflow: hidden;
-    text-overflow: ellipsis;
   }
   .link {
     flex: none;

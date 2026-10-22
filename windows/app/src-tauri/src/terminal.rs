@@ -277,7 +277,7 @@ fn env_dir(key: &str) -> Option<PathBuf> {
 }
 
 /// 설치 위치 — PATH 와 알려진 위치. Windows 가 아니면 늘 없음.
-fn locate(id: &str) -> Option<PathBuf> {
+pub(crate) fn locate(id: &str) -> Option<PathBuf> {
     if !cfg!(windows) {
         return None;
     }

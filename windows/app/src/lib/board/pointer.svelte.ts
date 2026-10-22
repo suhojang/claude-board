@@ -1,8 +1,8 @@
-// 창 안 마우스 위치와 창 활성 여부 — 투명 모드(마우스가 올라오거나 활성이면 불투명)와 오른쪽 터미널 독(오른쪽 끝에 대면 열림)이 함께 본다.
+// 창 안 마우스 위치와 창 활성 여부 — 투명 모드(마우스가 올라오거나 활성이면 불투명)와 터미널 독(보드 칸 바깥쪽 끝에 대면 열림)이 함께 본다.
 // 단추·줄마다 hover 를 따로 보면 경계를 지날 때 끊기므로 문서 전체에서 한 번만 추적한다
 import { inTauri } from "$lib/backend";
 
-// 터미널 독 크기(ClaudeBoard.swift:3503-3511) — 오른쪽 끝에서 이 폭 안, 아래에서 독 높이 조금 위까지 마우스가 오면 연다
+// 터미널 독 크기(ClaudeBoard.swift:3503-3511) — 보드 칸 바깥쪽 끝에서 이 폭 안, 아래에서 독 높이 조금 위까지 마우스가 오면 연다
 export const DOCK = { size: 36, gap: 8, pad: 8, trigger: 16, bottomInset: 34 };
 export const dockHeight = (n: number) => n * (DOCK.size + DOCK.gap) - DOCK.gap + DOCK.pad * 2;
 
@@ -15,12 +15,22 @@ export const win = $state({
   previewing: false,
 });
 
-export function trackWindow(terminalCount: () => number): () => void {
+// 보드 칸(터미널 칸을 펼치면 창의 한쪽일 뿐이다)과 그 바깥쪽 가장자리가 있는 쪽을 돌려준다
+export type BoardEdge = () => { el: HTMLElement | undefined; side: "left" | "right" };
+
+export function trackWindow(terminalCount: () => number, boardEdge: BoardEdge): () => void {
   win.focused = document.hasFocus();
   const move = (e: MouseEvent) => {
     pointer.inside = true;
     const triggerHeight = DOCK.bottomInset + dockHeight(terminalCount()) + 12;
-    pointer.atEdge = e.clientX >= window.innerWidth - DOCK.trigger && window.innerHeight - e.clientY <= triggerHeight;
+    const { el, side } = boardEdge();
+    if (!el) {
+      pointer.atEdge = false;
+      return;
+    }
+    const box = el.getBoundingClientRect();
+    const fromEdge = side === "right" ? box.right - e.clientX : e.clientX - box.left;
+    pointer.atEdge = fromEdge >= 0 && fromEdge <= DOCK.trigger && box.bottom - e.clientY <= triggerHeight;
   };
   const leave = () => {
     pointer.inside = false;

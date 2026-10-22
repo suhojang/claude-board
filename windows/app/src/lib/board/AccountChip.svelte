@@ -58,13 +58,13 @@
   use:hint={`로그인 계정 ${c?.email ?? "없음"}${c?.org ? ` · ${c.org}` : ""} — 눌러서 다른 계정으로 전환하거나 계정을 추가합니다` +
     (accounts.autoSwitch ? " · 한도 자동 전환 켜짐" : "")}
 >
-  <span class="avatar"><Icon name={accounts.adding ? "person-plus" : accounts.switching ? "person-switch" : "person"} size={14} /></span>
+  <span class="avatar"><Icon name={accounts.adding ? "person-plus" : accounts.switching ? "person-switch" : "person"} size={15.5} /></span>
   {#if !compact}
     <span class="email">{accounts.adding ? "로그인 기다리는 중…" : (c?.email ?? "로그인 정보 없음")}</span>
     {#if !accounts.adding && c?.plan}<span class="plan">{c.plan}</span>{/if}
   {/if}
   {#if accounts.autoSwitch}<span class="dim"><Icon name="swap" size={9} /></span>{/if}
-  <span class="dim"><Icon name="chevron-down" size={8} /></span>
+  <span class="dim"><Icon name="chevron-down" size={11} /></span>
 </button>
 
 <style>
@@ -74,6 +74,7 @@
     gap: 5px;
     min-width: 0;
     max-width: 100%;
+    min-height: 22px;
     padding: 3px 8px 3px 5px;
     border-radius: 999px;
     background: rgb(255 255 255 / 0.05);

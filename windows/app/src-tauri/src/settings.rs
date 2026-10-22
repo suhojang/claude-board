@@ -40,6 +40,14 @@ pub struct Settings {
     pub board_mini: bool,
     pub board_restore_frame: Option<Frame>,
     pub window_frame: Option<Frame>,
+    /// 내장 터미널을 펼쳤는지 — 펼친 채 끄면 다음에도 펼친 채 연다
+    pub terminal_expanded: bool,
+    /// 보드 칸 폭(논리 픽셀) — 접었을 때 창 폭, 펼쳤을 때 보드 칸 폭
+    pub board_pane_width: f64,
+    /// 보드가 붙는 화면 쪽 — `right` · `left`
+    pub board_side: String,
+    /// 펼친 채 최대축소로 들어갔는지의 표지 — 원래 크기로 돌아올 때 다시 펼친다
+    pub mini_from_expanded: bool,
 }
 
 impl Default for Settings {
@@ -62,11 +70,20 @@ impl Default for Settings {
             board_mini: false,
             board_restore_frame: None,
             window_frame: None,
+            terminal_expanded: true,
+            board_pane_width: DEFAULT_PANE_WIDTH,
+            board_side: "right".into(),
+            mini_from_expanded: false,
         }
     }
 }
 
 pub const MASCOTS: [&str; 8] = ["tralalero", "bombardiro", "tungtung", "lirili", "patapim", "boneca", "cappuccino", "foreman"];
+pub const SIDES: [&str; 2] = ["right", "left"];
+/// 보드 칸 폭의 기본값(논리 픽셀)
+pub const DEFAULT_PANE_WIDTH: f64 = 454.0;
+/// 보드 칸이 이보다 좁으면 전체·중간 화면이 무너진다(논리 픽셀)
+pub const MIN_PANE_WIDTH: f64 = 360.0;
 pub const POSITIONS: [&str; 5] = ["center", "top-left", "top-right", "bottom-left", "bottom-right"];
 
 impl Settings {
@@ -74,6 +91,10 @@ impl Settings {
     pub fn load(path: &Path) -> Self {
         let mut s: Settings = fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
         s.opacity = clamp_opacity(s.opacity);
+        s.board_pane_width = clamp_pane_width(s.board_pane_width);
+        if !SIDES.contains(&s.board_side.as_str()) {
+            s.board_side = "right".into();
+        }
         if !MASCOTS.contains(&s.mascot.as_str()) {
             s.mascot = "tralalero".into();
         }
@@ -102,6 +123,9 @@ impl Settings {
             opacity: self.opacity,
             auto_switch: self.auto_switch,
             board_mini: self.board_mini,
+            terminal_expanded: self.terminal_expanded,
+            board_side: self.board_side.clone(),
+            board_pane_width: self.board_pane_width,
             notify_position,
         }
     }
@@ -137,6 +161,15 @@ pub fn clamp_opacity(v: f64) -> f64 {
         v.clamp(0.3, 1.0)
     } else {
         1.0
+    }
+}
+
+/// 보드 칸 폭 — 숫자가 아니면 기본값, 너무 좁으면 최소값.
+pub fn clamp_pane_width(v: f64) -> f64 {
+    if v.is_finite() {
+        v.max(MIN_PANE_WIDTH)
+    } else {
+        DEFAULT_PANE_WIDTH
     }
 }
 
@@ -186,6 +219,8 @@ mod tests {
         let path = dir.join("board-settings.json");
         let d = Settings::load(&path);
         assert!(d.pinned && d.mascot == "tralalero" && d.opacity == 1.0 && !d.auto_switch);
+        assert!(d.terminal_expanded && !d.mini_from_expanded);
+        assert_eq!((d.board_pane_width, d.board_side.as_str()), (454.0, "right"));
 
         let mut s = Settings::default();
         toggle(&mut s.collapsed, "/a");
@@ -197,6 +232,10 @@ mod tests {
         s.window_frame = Some(Frame { x: 10.0, y: 0.0, w: 454.0, h: 1000.0 });
         s.mascot = "foreman".into();
         s.opacity = 0.5;
+        s.terminal_expanded = false;
+        s.board_pane_width = 520.5;
+        s.board_side = "left".into();
+        s.mini_from_expanded = true;
         s.save(&path).unwrap();
         let back = Settings::load(&path);
         assert_eq!(back, s);
@@ -207,11 +246,27 @@ mod tests {
         for k in ["endedOpen", "pinnedGroups", "kindCollapsed", "subCollapsed", "usageCompact", "boardMini", "notifyPosition"] {
             assert!(v.get(k).is_some(), "{k}");
         }
+        assert_eq!(v["terminalExpanded"], false);
+        assert_eq!(v["boardSide"], "left");
+        assert_eq!(v["boardPaneWidth"], 520.5);
         assert!(v.get("hiddenGroups").is_none());
+        assert!(v.get("miniFromExpanded").is_none());
 
         // 파일에 저장되는 키 이름(SPEC §5.9)
         let raw: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        for k in ["hiddenGroups", "autoFolded", "autoSwitchLast", "autoSwitchFull", "boardRestoreFrame", "windowFrame"] {
+        let stored = [
+            "hiddenGroups",
+            "autoFolded",
+            "autoSwitchLast",
+            "autoSwitchFull",
+            "boardRestoreFrame",
+            "windowFrame",
+            "terminalExpanded",
+            "boardPaneWidth",
+            "boardSide",
+            "miniFromExpanded",
+        ];
+        for k in stored {
             assert!(raw.get(k).is_some(), "{k}");
         }
 
@@ -223,9 +278,10 @@ mod tests {
         assert!(r.kind_collapsed.is_empty());
 
         // 깨진 값은 기본값으로
-        fs::write(&path, br#"{"opacity": 7, "mascot": "nope", "pinned": false}"#).unwrap();
+        fs::write(&path, br#"{"opacity": 7, "mascot": "nope", "pinned": false, "boardSide": "top", "boardPaneWidth": 90}"#).unwrap();
         let odd = Settings::load(&path);
         assert_eq!((odd.opacity, odd.mascot.as_str(), odd.pinned), (1.0, "tralalero", false));
+        assert_eq!((odd.board_side.as_str(), odd.board_pane_width), ("right", 360.0));
         fs::write(&path, b"{broken").unwrap();
         assert_eq!(Settings::load(&path), Settings::default());
         fs::remove_dir_all(&dir).unwrap();

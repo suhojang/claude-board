@@ -12,7 +12,7 @@
 </script>
 
 <span class="cap" class:compact style:--c={c} use:hint={name}>
-  <Icon name={subagent ? "people" : headless ? "moon-stars" : "terminal"} size={10} />
+  <Icon name={subagent ? "people" : headless ? "moon-stars" : "terminal"} size={subagent ? 12.6 : 10} pad={subagent ? 1.45 : 0} />
   {#if !compact}{name}{/if}
 </span>
 

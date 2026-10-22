@@ -4,6 +4,7 @@
 //! Windows 프로세스·콘솔 도구를 담는다. hook 실행 파일(`claude-board-hook`)과 보드 백엔드(Tauri)가 함께 쓴다.
 //! 공개 API 요약은 `API.md` 참고.
 
+pub mod claude_live;
 pub mod clock;
 pub mod console;
 pub mod fileio;

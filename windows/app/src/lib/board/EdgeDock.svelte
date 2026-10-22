@@ -1,14 +1,16 @@
 <script lang="ts">
-  // 오른쪽 아래 터미널 독(ClaudeBoard.swift:3501-3627, SPEC §5.11) — 평소엔 창 오른쪽 아래 끝의 탭만 보이다가
-  // 그 탭(창 오른쪽 끝 아래쪽)에 마우스를 대면 보드 위로 미끄러져 나오고, 독에서 벗어나면 조금 뒤 다시 숨는다
+  // 아래쪽 터미널 독(ClaudeBoard.swift:3501-3627, SPEC §5.11) — 평소엔 보드 칸 바깥쪽 끝(보드가 오른쪽이면 오른쪽, 왼쪽이면 왼쪽) 아래의 탭만 보이다가
+  // 그 탭에 마우스를 대면 보드 위로 미끄러져 나오고, 독에서 벗어나면 조금 뒤 다시 숨는다. 왼쪽일 때는 좌우를 뒤집어 그린다
   import { fly } from "svelte/transition";
-  import type { TerminalApp } from "$lib/types";
+  import type { BoardSide, TerminalApp } from "$lib/types";
   import { openTerminal } from "$lib/backend";
   import Icon from "./Icon.svelte";
   import TerminalIcon from "./TerminalIcon.svelte";
   import { DOCK, pointer } from "./pointer.svelte";
 
-  let { terminals }: { terminals: TerminalApp[] } = $props();
+  let { terminals, side = "right" }: { terminals: TerminalApp[]; side?: BoardSide } = $props();
+  // 바깥쪽(화면 가장자리 쪽)으로 미끄러지는 방향
+  const out = $derived(side === "right" ? 1 : -1);
 
   let open = $state(false);
   let overPanel = $state(false);
@@ -31,7 +33,7 @@
   const hintTop = (i: number) => DOCK.pad + i * (DOCK.size + DOCK.gap) + (DOCK.size - 26) / 2;
 </script>
 
-<div class="dock" style:bottom="{DOCK.bottomInset}px">
+<div class="dock" class:left={side === "left"} style:bottom="{DOCK.bottomInset}px">
   {#if open}
     <div
       class="panel"
@@ -42,7 +44,7 @@
         overPanel = false;
         hovered = null;
       }}
-      transition:fly={{ x: 60, duration: 280 }}
+      transition:fly={{ x: 60 * out, duration: 280 }}
     >
       {#each terminals as t, i (t.id)}
         <button
@@ -69,9 +71,9 @@
     </div>
   {:else}
     <!-- 숨어 있을 때의 탭 — 보드에 마우스가 들어오면 밝아지며 끝까지 튀어나온다. 열고 닫기는 창 전체 추적이 맡는다 -->
-    <div class="tab" class:lit={pointer.inside} transition:fly={{ x: 16, duration: 220 }}>
-      <Icon name="chevron-left" size={8} />
-      <Icon name="terminal" size={11} />
+    <div class="tab" class:lit={pointer.inside} transition:fly={{ x: 16 * out, duration: 220 }}>
+      <Icon name={side === "right" ? "chevron-left" : "chevron-right"} size={11.5} />
+      <Icon name="terminal" size={14.5} />
     </div>
   {/if}
 </div>
@@ -158,13 +160,13 @@
     position: absolute;
     right: 0;
     bottom: 0;
-    width: 16px;
+    width: 17px;
     height: 58px;
     display: flex;
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: 6px;
+    gap: 3.75px;
     color: rgb(255 255 255 / 0.6);
     background: rgb(var(--accent) / 0.25);
     border-radius: 8px 0 0 8px;
@@ -178,6 +180,36 @@
   .tab.lit {
     color: rgb(255 255 255 / 0.95);
     background: rgb(var(--accent) / 0.5);
+    transform: none;
+  }
+
+  /* 보드가 왼쪽에 있을 때 — 위 배치를 좌우로 뒤집는다 */
+  .dock.left {
+    right: auto;
+    left: 0;
+  }
+  .left .panel {
+    right: auto;
+    left: 8px;
+    box-shadow:
+      inset 0 0 0 0.5px rgb(255 255 255 / 0.14),
+      3px 4px 14px rgb(0 0 0 / 0.45);
+  }
+  .left .run {
+    right: auto;
+    left: -8px;
+  }
+  .left .tip {
+    right: auto;
+    left: calc(100% + 8px);
+  }
+  .left .tab {
+    right: auto;
+    left: 0;
+    border-radius: 0 8px 8px 0;
+    transform: translateX(-4px);
+  }
+  .left .tab.lit {
     transform: none;
   }
 </style>

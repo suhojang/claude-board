@@ -31,7 +31,7 @@
   class="op"
   use:hint={"투명도 — 보드에서 마우스가 벗어나 있고 다른 앱을 쓰는 동안 이 투명도로 보입니다. 마우스를 올리거나 보드를 누르면 불투명해집니다"}
 >
-  <Icon name="half-circle" size={11} />
+  <Icon name="half-circle" size={12} />
   <input
     type="range"
     min="0.3"
@@ -68,7 +68,7 @@
   .pct {
     width: 32px;
     text-align: right;
-    font-size: 10px;
+    font-size: 10.8px;
     font-weight: 600;
   }
   input {
@@ -82,7 +82,7 @@
   input::-webkit-slider-runnable-track {
     height: 4px;
     border-radius: 2px;
-    background: linear-gradient(90deg, rgb(var(--accent)) var(--p), rgb(255 255 255 / 0.18) var(--p));
+    background: linear-gradient(90deg, rgb(var(--accent)) calc(var(--p) * 0.8095), rgb(255 255 255 / 0.18) calc(var(--p) * 0.8095) 68px, transparent 68px);
   }
   input::-webkit-slider-thumb {
     -webkit-appearance: none;
@@ -90,19 +90,18 @@
     height: 10px;
     margin-top: -3px;
     border-radius: 5px;
-    background: #d9d9de;
-    box-shadow: 0 0.5px 2px rgb(0 0 0 / 0.5);
+    background: transparent;
   }
   input::-moz-range-track {
     height: 4px;
     border-radius: 2px;
-    background: linear-gradient(90deg, rgb(var(--accent)) var(--p), rgb(255 255 255 / 0.18) var(--p));
+    background: linear-gradient(90deg, rgb(var(--accent)) calc(var(--p) * 0.8095), rgb(255 255 255 / 0.18) calc(var(--p) * 0.8095) 68px, transparent 68px);
   }
   input::-moz-range-thumb {
     width: 16px;
     height: 10px;
     border: none;
     border-radius: 5px;
-    background: #d9d9de;
+    background: transparent;
   }
 </style>

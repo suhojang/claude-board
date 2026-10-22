@@ -1,6 +1,9 @@
 // 브라우저(npm run dev)용 가짜 백엔드 — docs/images/hero.png 와 같은 장면을 만들고, SPEC §6.2 명령마다 이 상태를 고쳐
 // 보드를 Tauri 없이도 끝까지 눌러 볼 수 있게 한다. 주소에 ?update 를 붙이면 새 버전 알림 줄, ?empty 면 세션 없는 화면
-import type { Account, Brain, Group, Session, Snapshot, State, Sub } from "./types";
+// 화면 대조용 시나리오(?scenario=mac1) — 파일은 저장소에 올리지 않는다(없으면 건너뜀)
+type Scenarios = { applyMac1?: (s: typeof S) => void; FROZEN_NOW?: number };
+const scenarios: Scenarios = Object.values(import.meta.glob("./mock-scenarios.ts", { eager: true }))[0] as Scenarios ?? {};
+import type { Account, Brain, Group, Session, Snapshot, State, Sub, TermId, TermInfo, TermSpec } from "./types";
 
 const SEC = 1000;
 const MIN = 60 * SEC;
@@ -10,6 +13,7 @@ const HOME = "C:\\Users\\demo";
 const q = new URLSearchParams(typeof location === "undefined" ? "" : location.search);
 const hasUpdate = q.has("update");
 const empty = q.has("empty");
+const scenario = q.get("scenario");
 
 const t0 = Date.now();
 
@@ -36,6 +40,7 @@ function session(cwd: string, p: Partial<Session> & { id: string; state: State }
     title: topic || message || "요청 전",
     topic,
     message,
+    name: null,
     ctx: null,
     brain: null,
     subagents: [],
@@ -69,6 +74,7 @@ function initialGroups(): Group[] {
         updated: t0 - 5 * SEC,
         topic: "주문 취소 시 재고를 복구하는 로직 추가해줘",
         message: "Claude needs your permission to use Bash",
+        name: "shop-api-3c",
         brain: opus(),
         ctx: ctx(312_000),
       }),
@@ -89,6 +95,7 @@ function initialGroups(): Group[] {
         since: t0 - (4 * MIN + 27 * SEC),
         updated: t0 - 2 * SEC,
         topic: "매출 차트를 주간·월간으로 바꿀 수 있게 해줘",
+        name: "frontend-dashboard-redesign-v2",
         brain: opus(),
         ctx: ctx(455_000),
         subagents: [
@@ -126,6 +133,7 @@ function initialGroups(): Group[] {
         since: t0 - 3 * HOUR,
         updated: t0 - 3 * HOUR,
         topic: "CI 캐시 키 정리",
+        name: "ci-cache-9d",
       }),
     ]),
   ];
@@ -172,6 +180,10 @@ const S: Snapshot = {
     autoSwitch: false,
     boardMini: false,
     notifyPosition: "center",
+    // 주소에 ?collapsed 를 붙이면 터미널을 접은 채, ?left 면 보드를 왼쪽에 두고 연다
+    terminalExpanded: !q.has("collapsed"),
+    boardSide: q.has("left") ? "left" : "right",
+    boardPaneWidth: 454,
   },
   claudeVersion: "2.1.301",
   terminals: [
@@ -182,6 +194,8 @@ const S: Snapshot = {
     { id: "git-bash", name: "Git Bash", installed: false, running: false },
   ],
 };
+
+if (scenario === "mac1") scenarios.applyMac1?.(S);
 
 const rank: Record<State, number> = { waiting: 0, working: 1, paused: 2, idle: 2, ended: 3 };
 
@@ -208,7 +222,7 @@ let publish: (s: Snapshot) => void = () => {};
 
 function push() {
   normalize();
-  S.now = Date.now();
+  S.now = scenario === "mac1" && scenarios.FROZEN_NOW ? scenarios.FROZEN_NOW : Date.now();
   publish(structuredClone(S));
 }
 
@@ -383,6 +397,33 @@ export async function handle(cmd: string, a: Record<string, unknown>): Promise<u
     case "set_board_mini":
       st.boardMini = bool("on");
       break;
+    case "set_terminal_expanded":
+      st.terminalExpanded = bool("on");
+      break;
+    case "set_board_side":
+      st.boardSide = a.side === "left" ? "left" : "right";
+      break;
+    case "set_board_width":
+      st.boardPaneWidth = Number(a.width) || 454;
+      break;
+    case "term_spawn":
+      return spawnTerm(a.spec as TermSpec);
+    case "term_list":
+      return [...fakeTerms.values()].map((t) => t.info());
+    case "term_ack":
+      return;
+    case "term_write":
+      fakeTerms.get(str("id"))?.input(str("data"));
+      return;
+    case "term_write_bin":
+      fakeTerms.get(str("id"))?.input(String.fromCharCode(...(a.data as number[])));
+      return;
+    case "term_resize":
+      fakeTerms.get(str("id"))?.resize(Number(a.cols), Number(a.rows));
+      return;
+    case "term_kill":
+      fakeTerms.get(str("id"))?.exit(1);
+      return;
     case "open_terminal": {
       const t = S.terminals.find((x) => x.id === str("id"));
       if (t?.installed) t.running = true;
@@ -394,4 +435,165 @@ export async function handle(cmd: string, a: Record<string, unknown>): Promise<u
       return;
   }
   push();
+}
+
+// ── 가짜 터미널(브라우저 개발용) ─────────────────────────────────
+// 셸 대신 한 줄을 쳐서 Enter 하면 그 줄을 되돌려 주는 에코 터미널. 실제 백엔드와 같은 프레임(8바이트 seq + 출력, JSON gap·exit)을
+// 내보내 프런트의 해독·다시 받기·종료 처리까지 같은 길로 지나게 한다. 명령: exit [코드] 종료 · flood 많은 줄 쏟아내기 · clear 화면 지우기
+
+// 터미널 칸을 미리 여는 길 — 주소에 ?tabs=N(1~12)을 붙이면 터미널을 펼칠 때 탭 N 개가 열린다(경로 줄·가로 밀림·상태 점·같은 이름 라벨을 볼 때)
+const TAB_PRESETS: { dir: string; sessionId?: string; name?: string }[] = [
+  { dir: cwdOf("shop-api"), sessionId: "s-shop-1" },
+  { dir: cwdOf("shop-api"), sessionId: "s-shop-2" },
+  { dir: cwdOf("web-dashboard"), sessionId: "s-web-1" },
+  { dir: cwdOf("shop-api") },
+  { dir: cwdOf("mobile-app"), sessionId: "s-mob-1" },
+  { dir: cwdOf("infra"), sessionId: "s-infra-1" },
+  { dir: "D:\\other\\shop-api" },
+  { dir: HOME },
+  { dir: cwdOf("infra"), sessionId: "s-infra-2" },
+  { dir: cwdOf("web-dashboard"), name: "배포 확인용 터미널" },
+  { dir: cwdOf("web-dashboard") },
+  { dir: cwdOf("web-dashboard") },
+];
+
+export function mockTabs() {
+  const n = Math.min(12, Math.max(0, Number(q.get("tabs")) || 0));
+  return TAB_PRESETS.slice(0, n);
+}
+
+const PROMPT = "PS C:\\Users\\demo> ";
+const encoder = new TextEncoder();
+const fakeTerms = new Map<TermId, FakeTerm>();
+let nextTermNumber = 1;
+
+class FakeTerm {
+  private log: Uint8Array[] = [];
+  private nextSeq = 0;
+  private line = "";
+  private emit: ((message: unknown) => void) | null = null;
+  private status: TermInfo["status"] = "running";
+  private exitCode: number | null = null;
+
+  constructor(
+    readonly id: TermId,
+    private cols: number,
+    private rows: number,
+    private readonly cwd: string,
+  ) {
+    // 제목(OSC 0) — 셸 탭의 "하는 일" 자리에 보이는 터미널 제목
+    this.print(`\x1b]0;${cwd}\x07Mock PowerShell (echo) ${cols}x${rows}\r\n한 줄을 치고 Enter 를 누르면 되돌려 줍니다. exit, flood, clear\r\n\r\n${PROMPT}`);
+  }
+
+  info(): TermInfo {
+    return {
+      id: this.id,
+      pid: 4000 + Number(this.id.slice(1)),
+      shell: "pwsh",
+      cwd: this.cwd,
+      cols: this.cols,
+      rows: this.rows,
+      status: this.status,
+      exitCode: this.exitCode,
+      windowsBuild: 26200,
+      oldestSeq: 0,
+      nextSeq: this.nextSeq,
+    };
+  }
+
+  // 채널을 이 연결로 바꾸고 fromSeq 부터 다시 보낸다
+  attach(fromSeq: number, emit: (message: unknown) => void): TermInfo {
+    this.emit = emit;
+    let offset = 0;
+    for (const chunk of this.log) {
+      if (offset + chunk.length > fromSeq) {
+        const skip = Math.max(0, fromSeq - offset);
+        this.send(offset + skip, chunk.subarray(skip));
+      }
+      offset += chunk.length;
+    }
+    if (this.status === "exited") emit({ t: "exit", code: this.exitCode });
+    return this.info();
+  }
+
+  resize(cols: number, rows: number) {
+    if (cols < 2 || rows < 1 || (cols === this.cols && rows === this.rows)) return;
+    this.cols = cols;
+    this.rows = rows;
+  }
+
+  input(data: string) {
+    if (this.status === "exited") return;
+    for (const ch of data) {
+      if (ch === "\r" || ch === "\n") this.submit();
+      else if (ch === "\x7f") {
+        if (this.line) {
+          this.line = [...this.line].slice(0, -1).join("");
+          this.print("\b \b");
+        }
+      } else if (ch === "\x03") {
+        this.line = "";
+        this.print(`^C\r\n${PROMPT}`);
+      } else if (ch === "\x1b") this.print("^[");
+      else if (ch >= " ") {
+        this.line += ch;
+        this.print(ch);
+      }
+    }
+  }
+
+  exit(code: number) {
+    if (this.status === "exited") return;
+    this.status = "exited";
+    this.exitCode = code;
+    this.emit?.({ t: "exit", code });
+  }
+
+  private submit() {
+    const line = this.line.trim();
+    this.line = "";
+    const [command, arg] = line.split(/\s+/);
+    if (command === "exit") {
+      this.print("\r\n");
+      this.exit(Number(arg) || 0);
+    } else if (command === "clear") this.print("\x1b[2J\x1b[H" + PROMPT);
+    else if (command === "flood") {
+      let text = "\r\n";
+      for (let i = 1; i <= 3000; i++) text += `line ${i}\r\n`;
+      this.print(text + PROMPT);
+    } else this.print(`\r\n${line ? `${line}\r\n` : ""}${PROMPT}`);
+  }
+
+  private print(text: string) {
+    const bytes = encoder.encode(text);
+    this.log.push(bytes);
+    this.send(this.nextSeq, bytes);
+    this.nextSeq += bytes.length;
+  }
+
+  private send(seq: number, bytes: Uint8Array) {
+    if (!this.emit) return;
+    const frame = new ArrayBuffer(8 + bytes.length);
+    new DataView(frame).setBigUint64(0, BigInt(seq), true);
+    new Uint8Array(frame, 8).set(bytes);
+    this.emit(frame);
+  }
+}
+
+function spawnTerm(spec: TermSpec): TermInfo {
+  const id = `t${nextTermNumber++}`;
+  const term = new FakeTerm(id, spec.cols, spec.rows, spec.cwd ?? HOME);
+  fakeTerms.set(id, term);
+  return term.info();
+}
+
+export function attachTerm(id: TermId, fromSeq: number, emit: (message: unknown) => void): TermInfo {
+  const term = fakeTerms.get(id);
+  if (!term) throw new Error(`터미널 ${id} 없음`);
+  return term.attach(fromSeq, emit);
+}
+
+// 브라우저 개발 화면의 "다른 폴더 고르기…" — 대화상자가 없어 고정된 폴더를 돌려준다
+export function mockPickFolder(): string {
+  return `${HOME}\\picked-folder`;
 }

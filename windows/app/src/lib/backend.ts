@@ -1,9 +1,11 @@
 // 백엔드(src-tauri)와 주고받는 곳 — windows/docs/SPEC.md §6.
 // Tauri 안에서는 invoke·이벤트를 쓰고, 브라우저(npm run dev)에서는 mock.ts 의 가짜 상태로 화면을 끝까지 눌러 볼 수 있게 한다.
 // 명령 인자 이름은 Rust 명령의 매개변수 이름과 같아야 한다(Tauri 가 camelCase ↔ snake_case 로 맞춘다)
-import { invoke, isTauri } from "@tauri-apps/api/core";
+import { Channel, invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { MascotKind, NotifyOptions, NotifyPosition, SessionAction, Snapshot, State } from "./types";
+import type {
+  BoardSide, MascotKind, NotifyOptions, NotifyPosition, SessionAction, Snapshot, State, TermFrame, TermId, TermInfo, TermSpec,
+} from "./types";
 
 export const inTauri = isTauri();
 
@@ -294,6 +296,129 @@ export function minimizeBoard() {
 
 export function log(text: string) {
   fire("log", { text });
+}
+
+// ── 터미널 칸·보드 칸 배치 ─────────────────────────────────────
+
+// 터미널을 펼치거나 접는다. 창 크기·위치는 백엔드가 바꾸고, 화면은 누른 즉시 따라간다
+export function setTerminalExpanded(on: boolean) {
+  optimistic((s) => {
+    s.settings.terminalExpanded = on;
+  });
+  fire("set_terminal_expanded", { on });
+}
+
+export function setBoardSide(side: BoardSide) {
+  optimistic((s) => {
+    s.settings.boardSide = side;
+  });
+  fire("set_board_side", { side });
+}
+
+// 경계를 놓을 때 한 번 저장한다(논리 px)
+export function setBoardWidth(width: number) {
+  optimistic((s) => {
+    s.settings.boardPaneWidth = width;
+  });
+  fire("set_board_width", { width });
+}
+
+// 백엔드가 Ctrl+Alt+T 등으로 터미널을 앞에 불렀을 때 — 활성 터미널에 포커스를 준다
+export function onTerminalFocus(fn: () => void): () => void {
+  if (!inTauri) return () => {};
+  let off: (() => void) | undefined;
+  let closed = false;
+  listen("board://terminal-focus", fn).then((unlisten) => (closed ? unlisten() : (off = unlisten)));
+  return () => {
+    closed = true;
+    off?.();
+  };
+}
+
+// ── 내장 터미널 명령 — 계약은 SPEC 터미널 절 ─────────────────────
+
+export function termSpawn(spec: TermSpec): Promise<TermInfo> {
+  return call<TermInfo>("term_spawn", { spec });
+}
+
+export function termList(): Promise<TermInfo[]> {
+  return call<TermInfo[]>("term_list");
+}
+
+export function termAck(id: TermId, seq: number) {
+  fire("term_ack", { id, seq });
+}
+
+export function termResize(id: TermId, cols: number, rows: number) {
+  fire("term_resize", { id, cols, rows });
+}
+
+export function termKill(id: TermId) {
+  fire("term_kill", { id });
+}
+
+// 채널 메시지 하나를 푼다. 원시 데이터는 8바이트 little-endian seq + 출력, JSON 제어는 {t:"gap"|"exit"}.
+// 작은 원시 메시지는 숫자 배열로, 큰 것은 ArrayBuffer 로 올 수 있어 둘 다 받는다
+export function decodeFrame(message: unknown): TermFrame {
+  let bytes: Uint8Array | null = null;
+  if (message instanceof ArrayBuffer) bytes = new Uint8Array(message);
+  else if (message instanceof Uint8Array) bytes = message;
+  else if (Array.isArray(message)) bytes = Uint8Array.from(message as number[]);
+  if (bytes) {
+    if (bytes.length < 8) throw new Error(`터미널 프레임이 8바이트보다 짧음: ${bytes.length}`);
+    const seq = Number(new DataView(bytes.buffer, bytes.byteOffset, 8).getBigUint64(0, true));
+    return { kind: "data", seq, bytes: bytes.subarray(8) };
+  }
+  const control = message as { t?: string; seq?: number; code?: number | null } | null;
+  if (control?.t === "gap") return { kind: "gap", seq: Number(control.seq) };
+  if (control?.t === "exit") return { kind: "exit", code: control.code ?? null };
+  throw new Error(`알 수 없는 터미널 프레임: ${JSON.stringify(message)}`);
+}
+
+// fromSeq 부터 다시 받기 시작하고, 이후 프레임을 onFrame 으로 보낸다. 같은 id 의 이전 채널은 백엔드가 대체한다
+export async function termAttach(id: TermId, fromSeq: number, onFrame: (frame: TermFrame) => void): Promise<TermInfo> {
+  const onMessage = (message: unknown) => onFrame(decodeFrame(message));
+  if (inTauri) {
+    const channel = new Channel<unknown>();
+    channel.onmessage = onMessage;
+    return invoke<TermInfo>("term_attach", { id, fromSeq, onData: channel });
+  }
+  const mock = await import("./mock");
+  return mock.attachTerm(id, fromSeq, onMessage);
+}
+
+// 입력은 터미널마다 줄을 세워 앞 명령이 끝난 뒤에 보낸다 — 비동기 명령은 도착 순서가 보장되지 않아 빠르게 치면 글자가 뒤섞인다.
+// 기다리는 동안 쌓인 같은 종류의 입력은 한 번에 보낸다
+type Input = { text: string } | { bin: number[] };
+const inputs = new Map<TermId, { queue: Input[]; busy: boolean }>();
+
+function enqueueInput(id: TermId, item: Input) {
+  let state = inputs.get(id);
+  if (!state) inputs.set(id, (state = { queue: [], busy: false }));
+  const last = state.queue.at(-1);
+  if (last && "text" in last && "text" in item) last.text += item.text;
+  else if (last && "bin" in last && "bin" in item) last.bin.push(...item.bin);
+  else state.queue.push(item);
+  if (!state.busy) void drainInput(id, state);
+}
+
+async function drainInput(id: TermId, state: { queue: Input[]; busy: boolean }) {
+  state.busy = true;
+  try {
+    for (let item = state.queue.shift(); item; item = state.queue.shift()) {
+      await ("text" in item ? call("term_write", { id, data: item.text }) : call("term_write_bin", { id, data: item.bin })).catch(() => {});
+    }
+  } finally {
+    state.busy = false;
+  }
+}
+
+export function termWrite(id: TermId, data: string) {
+  enqueueInput(id, { text: data });
+}
+
+export function termWriteBin(id: TermId, data: number[]) {
+  enqueueInput(id, { bin: data });
 }
 
 // ── 알림 패널(/notify) — §6.3 ──────────────────────────────────

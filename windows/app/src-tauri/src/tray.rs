@@ -1,5 +1,6 @@
 //! 트레이 아이콘 (SPEC §5.10) — macOS 메뉴 막대 아이콘·앱 메뉴 대응.
 //! 왼쪽 클릭 = 보드 열고 닫기, 툴팁 = 상태별 개수, 승인 대기가 있으면 주황 점·작업 중만 있으면 파란 점 아이콘.
+//! 오른쪽 클릭 메뉴에는 터미널 펼치기(체크)와 보드 위치(오른쪽·왼쪽)가 있다.
 
 use std::sync::Arc;
 
@@ -31,11 +32,15 @@ const POSITION_NAMES: [(&str, &str); 5] = [
     ("bottom-right", "오른쪽 하단"),
 ];
 
+const SIDE_NAMES: [(&str, &str); 2] = [("right", "오른쪽 (기본)"), ("left", "왼쪽")];
+
 pub struct Tray {
     icon: TrayIcon<Wry>,
+    terminal: CheckMenuItem<Wry>,
     pin: CheckMenuItem<Wry>,
     mascots: Vec<(&'static str, CheckMenuItem<Wry>)>,
     positions: Vec<(&'static str, CheckMenuItem<Wry>)>,
+    sides: Vec<(&'static str, CheckMenuItem<Wry>)>,
 }
 
 fn icon_for(counts: &Counts) -> Image<'static> {
@@ -66,15 +71,23 @@ pub fn build(app: &AppHandle) -> tauri::Result<Tray> {
         .iter()
         .map(|(k, name)| Ok((*k, CheckMenuItem::with_id(app, format!("pos:{k}"), name, true, false, None::<&str>)?)))
         .collect::<tauri::Result<_>>()?;
+    let sides: Vec<(&str, CheckMenuItem<Wry>)> = SIDE_NAMES
+        .iter()
+        .map(|(k, name)| Ok((*k, CheckMenuItem::with_id(app, format!("side:{k}"), name, true, false, None::<&str>)?)))
+        .collect::<tauri::Result<_>>()?;
+    let terminal = CheckMenuItem::with_id(app, "terminal", "터미널 펼치기 (Ctrl+Alt+T)", true, false, None::<&str>)?;
     let mascot_menu = Submenu::with_id_and_items(app, "mascots", "캐릭터", true, &refs(&mascots))?;
     let position_menu = Submenu::with_id_and_items(app, "positions", "알림 위치", true, &refs(&positions))?;
+    let side_menu = Submenu::with_id_and_items(app, "sides", "보드 위치", true, &refs(&sides))?;
     let menu = Menu::with_items(
         app,
         &[
             &MenuItem::with_id(app, "show", "세션 보드 보기", true, None::<&str>)?,
+            &terminal,
             &pin,
             &mascot_menu,
             &position_menu,
+            &side_menu,
             &MenuItem::with_id(app, "update", "업데이트 확인…", true, None::<&str>)?,
             &PredefinedMenuItem::separator(app)?,
             &MenuItem::with_id(app, "quit", "종료", true, None::<&str>)?,
@@ -92,7 +105,7 @@ pub fn build(app: &AppHandle) -> tauri::Result<Tray> {
             }
         })
         .build(app)?;
-    Ok(Tray { icon, pin, mascots, positions })
+    Ok(Tray { icon, terminal, pin, mascots, positions, sides })
 }
 
 fn on_menu(app: &AppHandle, e: MenuEvent) {
@@ -112,6 +125,11 @@ fn on_menu(app: &AppHandle, e: MenuEvent) {
                 if id == "pin" {
                     let on = !board.settings.lock().unwrap().pinned;
                     board.set_pinned(on);
+                } else if id == "terminal" {
+                    let on = !board.settings.lock().unwrap().terminal_expanded;
+                    board.set_terminal(on);
+                } else if let Some(side) = id.strip_prefix("side:") {
+                    board.set_side(crate::window::Side::parse(side));
                 } else if let Some(kind) = id.strip_prefix("mascot:") {
                     board.update_settings(|s| s.mascot = kind.to_string());
                     board.publish();
@@ -133,6 +151,8 @@ pub struct TrayState {
     pub pinned: bool,
     pub mascot: String,
     pub position: String,
+    pub terminal_expanded: bool,
+    pub side: String,
 }
 
 impl Tray {
@@ -141,6 +161,10 @@ impl Tray {
         let _ = self.icon.set_icon(Some(icon_for(&s.counts)));
         let _ = self.icon.set_tooltip(Some(tooltip(&s.counts)));
         let _ = self.pin.set_checked(s.pinned);
+        let _ = self.terminal.set_checked(s.terminal_expanded);
+        for (k, item) in &self.sides {
+            let _ = item.set_checked(*k == s.side);
+        }
         for (k, item) in &self.mascots {
             let _ = item.set_checked(*k == s.mascot);
         }

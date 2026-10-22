@@ -18,15 +18,18 @@ use tauri::{AppHandle, Emitter, Manager, State, WebviewWindowBuilder};
 use crate::accounts::{self, AccountPaths, Accounts};
 use crate::autoswitch::{self, AutoSwitch};
 use crate::model::{Counts, Group, Session, Snapshot};
-use crate::settings::{self, set_in, toggle, Settings};
+use crate::settings::{self, set_in, toggle, Frame, Settings};
 use crate::store::{Probe, Store};
 use crate::terminal::{self, Terminals};
+use crate::terms::TermHub;
 use crate::updater::{self, Updater};
 use crate::usage::{self, Next, Usage};
 use crate::util::{board_log, ms};
 use crate::{tray, window};
 
 pub const SNAPSHOT_EVENT: &str = "board://snapshot";
+/// 터미널을 앞으로 불렀을 때 — 프론트가 활성 터미널에 포커스를 준다
+pub const TERMINAL_FOCUS_EVENT: &str = "board://terminal-focus";
 
 #[derive(Default)]
 pub struct View {
@@ -193,11 +196,11 @@ impl Board {
     /// 트레이는 메인 스레드에서만 고친다 — 다른 스레드에서 고치면 메인 스레드 응답을 기다리는 동안
     /// 메인 스레드(메뉴 처리)가 같은 잠금을 기다려 서로 멈출 수 있다.
     fn refresh_tray_with(&self, counts: &Counts, force: bool) {
-        let (pinned, mascot) = {
+        let (pinned, mascot, terminal_expanded, side) = {
             let s = self.settings.lock().unwrap();
-            (s.pinned, s.mascot.clone())
+            (s.pinned, s.mascot.clone(), s.terminal_expanded, s.board_side.clone())
         };
-        let state = tray::TrayState { counts: counts.clone(), pinned, mascot, position: settings::notify_position() };
+        let state = tray::TrayState { counts: counts.clone(), pinned, mascot, position: settings::notify_position(), terminal_expanded, side };
         {
             let mut shown = self.tray_shown.lock().unwrap();
             if !force && shown.as_ref() == Some(&state) {
@@ -216,8 +219,12 @@ impl Board {
     }
 
     pub fn set_pinned(&self, on: bool) {
-        self.update_settings(|s| s.pinned = on);
-        if let Some(w) = window::main_window(&self.app) {
+        let expanded = self.update_settings(|s| {
+            s.pinned = on;
+            s.terminal_expanded
+        });
+        // 터미널을 펼친 동안은 항상 위가 아니다 — 접을 때 고정 여부를 따른다
+        if let Some(w) = window::main_window(&self.app).filter(|_| !expanded) {
             let _ = w.set_always_on_top(on);
         }
         self.publish();
@@ -313,6 +320,7 @@ impl Board {
     }
 
     /// 창이 움직임을 멈추면 위치를 저장한다. 미니가 아닌 크기면 ⤢ 로 돌아갈 자리로도 기억한다.
+    /// 터미널을 펼친 동안은 창이 작업 영역 전체이거나 사용자가 끈 크기라 저장하지 않는다(접으면 늘 보드 쪽에 붙는다).
     fn save_frame_if_settled(&self, now: f64) {
         let mut dirty = self.frame_dirty.lock().unwrap();
         if !dirty.is_some_and(|t| now - t > 0.7) {
@@ -320,6 +328,9 @@ impl Board {
         }
         *dirty = None;
         drop(dirty);
+        if self.settings.lock().unwrap().terminal_expanded {
+            return;
+        }
         let Some(win) = window::main_window(&self.app) else { return };
         if win.is_minimized().unwrap_or(false) || !win.is_visible().unwrap_or(false) {
             return;
@@ -340,30 +351,144 @@ impl Board {
         *self.frame_dirty.lock().unwrap() = Some(clock::now());
     }
 
-    fn snap_right(&self) {
-        let Some(win) = window::main_window(&self.app) else { return };
-        let Some(m) = window::monitor_of(&win) else { return };
-        let f = window::snap_frame(&m);
-        window::set_frame(&win, f);
-        self.update_settings(|s| s.board_restore_frame = Some(f));
+    /// 보드 쪽·칸 폭·고정 여부 — 창 모양을 계산하는 데 쓴다.
+    fn layout(&self) -> (window::Side, f64, bool) {
+        let s = self.settings.lock().unwrap();
+        (window::Side::parse(&s.board_side), s.board_pane_width, s.pinned)
     }
 
+    /// 창을 펼친 모양(작업 영역 전체)이나 접은 모양(보드 쪽에 붙인 폭)으로 바꾼다.
+    /// 설정을 먼저 고친다 — 창이 움직이며 생기는 이벤트가 프레임 저장 가드를 지날 때 새 값을 봐야 한다.
+    /// 접은 모양은 ⤢ 로 돌아갈 자리로도 기억한다. 돌려주는 값은 새 창 프레임이다.
+    fn apply_terminal(&self, on: bool) -> Option<Frame> {
+        let win = window::main_window(&self.app)?;
+        let m = window::monitor_of(&win)?;
+        self.update_settings(|s| {
+            s.terminal_expanded = on;
+            if on {
+                s.mini_from_expanded = false;
+            }
+        });
+        if win.is_minimized().unwrap_or(false) {
+            let _ = win.unminimize();
+        }
+        let (side, width, pinned) = self.layout();
+        let shape = window::shape(&m, on, side, width, pinned);
+        window::apply_shape(&win, &shape);
+        if !on {
+            self.update_settings(|s| s.board_restore_frame = Some(shape.frame));
+        }
+        self.publish();
+        Some(shape.frame)
+    }
+
+    /// 터미널 펼침·접힘(제목 막대 단추·트레이). 이미 그 상태면 아무것도 하지 않는다.
+    pub fn set_terminal(&self, on: bool) {
+        if self.settings.lock().unwrap().terminal_expanded == on {
+            return;
+        }
+        if on {
+            self.expand_terminal();
+        } else {
+            self.apply_terminal(false);
+        }
+    }
+
+    /// 터미널을 펼치고 보드를 앞으로 가져와 활성 터미널에 포커스를 준다.
+    fn expand_terminal(&self) {
+        self.apply_terminal(true);
+        window::show(&self.app, true);
+        let _ = self.app.emit(TERMINAL_FOCUS_EVENT, ());
+    }
+
+    /// 배율이 바뀌면(설정에서 바꿈·다른 배율 모니터로 끌어감) 펼친 창이 윈도우가 제안한 크기로 줄어 작업 영역과 가장자리마다 1px 어긋난다.
+    /// 접힌 창은 논리 크기 그대로 붙어 있으니 건드리지 않고, 펼친 창만 작업 영역 전체로 다시 맞춘다. tao 가 제안 크기를 적용한 뒤에 돌도록 잠깐 기다린다.
+    fn refit_expanded(self: &Arc<Self>) {
+        let board = self.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(250));
+            let app = board.app.clone();
+            let _ = app.run_on_main_thread(move || {
+                if board.settings.lock().unwrap().terminal_expanded {
+                    board.apply_terminal(true);
+                }
+            });
+        });
+    }
+
+    /// 터미널을 접고 보드 쪽에 붙인다 — 이미 접혀 있어도 다시 붙인다. 앞으로 가져오되 포커스는 가져가지 않는다.
+    fn snap_right(&self) {
+        self.apply_terminal(false);
+        window::show(&self.app, false);
+    }
+
+    /// Ctrl+Alt+T — 접힘이면 펼치고, 펼침이고 앞이면 접고, 펼침이지만 뒤에 있으면 앞으로 가져온다.
+    fn toggle_terminal(&self) {
+        let expanded = self.settings.lock().unwrap().terminal_expanded;
+        let front = window::main_window(&self.app).is_some_and(|w| window::is_front(&w));
+        match window::term_key(expanded, front) {
+            window::TermKey::Expand => self.expand_terminal(),
+            window::TermKey::Collapse => {
+                self.apply_terminal(false);
+            }
+            window::TermKey::Focus => {
+                window::show(&self.app, true);
+                let _ = self.app.emit(TERMINAL_FOCUS_EVENT, ());
+            }
+        }
+    }
+
+    /// 보드 쪽을 바꾼다. 접혀 있으면 새 쪽으로 옮기고, 펼쳐 있으면 값만 저장한다(프론트가 칸 순서를 바꾼다).
+    pub fn set_side(&self, side: window::Side) {
+        self.update_settings(|s| s.board_side = side.as_str().to_string());
+        let expanded = self.settings.lock().unwrap().terminal_expanded;
+        if let (false, Some(win)) = (expanded, window::main_window(&self.app)) {
+            if let (Some(m), Some(cur)) = (window::monitor_of(&win), window::frame(&win)) {
+                let f = window::side_frame(cur, &m, side, self.layout().1);
+                window::set_frame(&win, f);
+                if f.w >= window::BOARD_MIN_WIDTH * m.scale {
+                    self.update_settings(|s| s.board_restore_frame = Some(f));
+                }
+            }
+        }
+        self.publish();
+    }
+
+    /// 터미널을 펼친 채 들어왔으면 먼저 접고 그 표지를 남긴다. 미니 프레임은 보드 쪽 위 모서리 기준이다.
     fn enter_mini(&self, rows: usize) {
         let Some(win) = window::main_window(&self.app) else { return };
-        let (Some(cur), Ok(scale)) = (window::frame(&win), win.scale_factor()) else { return };
-        if cur.w >= window::BOARD_MIN_WIDTH * scale {
-            self.update_settings(|s| s.board_restore_frame = Some(cur));
-        }
-        window::set_frame(&win, window::mini_frame(cur, rows, scale));
+        let Some(m) = window::monitor_of(&win) else { return };
+        let was_expanded = self.settings.lock().unwrap().terminal_expanded;
+        let cur = if was_expanded { self.apply_terminal(false) } else { window::frame(&win) };
+        let Some(cur) = cur else { return };
+        self.update_settings(|s| {
+            if was_expanded {
+                s.mini_from_expanded = true;
+            }
+            if cur.w >= window::BOARD_MIN_WIDTH * m.scale {
+                s.board_restore_frame = Some(cur);
+            }
+        });
+        let (side, _, _) = self.layout();
+        window::set_frame(&win, window::mini_frame(cur, rows, m.scale, side));
     }
 
-    /// 미니에서 원래 크기로 — 기억한 위치가 없거나 지금 연결된 화면 밖이면 처음 크기로 오른쪽에 붙인다.
+    /// 미니에서 원래 크기로 — 펼친 채 들어왔으면 다시 펼친다. 아니면 기억한 위치로, 없거나 지금 연결된 화면 밖이면 보드 쪽에 붙인다.
     fn leave_mini(&self) {
         let Some(win) = window::main_window(&self.app) else { return };
-        let saved = self.settings.lock().unwrap().board_restore_frame;
+        let (saved, from_expanded) = {
+            let s = self.settings.lock().unwrap();
+            (s.board_restore_frame, s.mini_from_expanded)
+        };
+        if from_expanded {
+            self.expand_terminal();
+            return;
+        }
         match saved.filter(|f| window::restorable(*f, &window::monitors(&self.app))) {
             Some(f) => window::set_frame(&win, f),
-            None => self.snap_right(),
+            None => {
+                self.apply_terminal(false);
+            }
         }
     }
 }
@@ -614,6 +739,24 @@ fn open_terminal(board: B<'_>, id: String) {
     terminal::open_terminal(&board, id);
 }
 
+/// 터미널 펼침·접힘 — 창 크기·위치·항상 위는 백엔드가 바꾼다. 이미 그 상태면 아무것도 하지 않는다.
+#[tauri::command(async)]
+fn set_terminal_expanded(board: B<'_>, on: bool) {
+    board.set_terminal(on);
+}
+
+#[tauri::command(async)]
+fn set_board_side(board: B<'_>, side: String) {
+    board.set_side(window::Side::parse(&side));
+}
+
+/// 경계를 놓을 때 보드 칸 폭(논리 px)을 저장한다.
+#[tauri::command(async)]
+fn set_board_width(board: B<'_>, width: f64) {
+    board.update_settings(|s| s.board_pane_width = settings::clamp_pane_width(width));
+    board.publish();
+}
+
 #[tauri::command(async)]
 fn enter_mini(board: B<'_>, rows: usize) {
     board.enter_mini(rows);
@@ -682,16 +825,19 @@ fn queue_action(board: &Arc<Board>, action: String, id: String) {
 fn register_shortcut(app: &AppHandle) {
     use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
     let snap = Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyB);
+    let terminal = Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyT);
     let plugin = tauri_plugin_global_shortcut::Builder::new()
         .with_handler(move |app, shortcut, event| {
-            if *shortcut != snap || event.state() != ShortcutState::Pressed {
+            if event.state() != ShortcutState::Pressed {
                 return;
             }
-            // 처음 크기로 오른쪽에 붙이고 앞으로 — 포커스는 지금 앱에 남긴다
-            if let Some(board) = app.try_state::<Arc<Board>>() {
+            let Some(board) = app.try_state::<Arc<Board>>() else { return };
+            if *shortcut == snap {
+                // 터미널을 접고 보드 쪽에 붙여 앞으로 — 포커스는 지금 앱에 남긴다
                 board.snap_right();
+            } else if *shortcut == terminal {
+                board.toggle_terminal();
             }
-            window::show(app, false);
         })
         .build();
     if let Err(e) = app.plugin(plugin) {
@@ -699,27 +845,37 @@ fn register_shortcut(app: &AppHandle) {
         return;
     }
     // 다른 앱이 먼저 잡은 단축키면 등록에 실패한다 — 보드는 그대로 동작하고 로그만 남긴다
-    if let Err(e) = app.global_shortcut().register(snap) {
-        board_log(&format!("전역 단축키 Ctrl+Alt+B 등록 실패 ({e})"));
+    for (shortcut, name) in [(snap, "Ctrl+Alt+B"), (terminal, "Ctrl+Alt+T")] {
+        if let Err(e) = app.global_shortcut().register(shortcut) {
+            board_log(&format!("전역 단축키 {name} 등록 실패 ({e})"));
+        }
     }
 }
 
 fn create_window(app: &AppHandle, board: &Arc<Board>, background: bool) -> tauri::Result<()> {
     let cfg = app.config().app.windows.iter().find(|w| w.label == "main").cloned().ok_or(tauri::Error::WindowNotFound)?;
     let win = WebviewWindowBuilder::from_config(app, &cfg)?.build()?;
-    let (saved, mini, pinned) = {
+    let launch = {
         let s = board.settings.lock().unwrap();
-        (s.window_frame, s.board_mini, s.pinned)
+        window::launch_frame(&window::monitors(app), &s)
     };
-    let mons = window::monitors(app);
-    if let Some(f) = window::launch_frame(&mons, saved, mini) {
-        window::set_frame(&win, f);
+    if let Some(l) = launch {
+        window::apply_shape(&win, &l.shape);
         let scale = win.scale_factor().unwrap_or(1.0);
-        if !mini && f.w >= window::BOARD_MIN_WIDTH * scale {
-            board.update_settings(|s| s.board_restore_frame = Some(f));
-        }
+        board.update_settings(|s| {
+            s.terminal_expanded = l.expanded;
+            // ⤢ 로 돌아갈 자리는 접은 채 연 창만(펼친 창과 미니는 아니다)
+            if !l.expanded && !s.board_mini && l.shape.frame.w >= window::BOARD_MIN_WIDTH * scale {
+                s.board_restore_frame = Some(l.shape.frame);
+            }
+        });
+    } else {
+        let (expanded, pinned) = {
+            let s = board.settings.lock().unwrap();
+            (s.terminal_expanded, s.pinned)
+        };
+        let _ = win.set_always_on_top(pinned && !expanded);
     }
-    let _ = win.set_always_on_top(pinned);
     window::apply_vibrancy(&win);
     // 셸 설정·로그인 자동 실행에서 --background 로 띄우면 창만 보이고 포커스는 지금 앱에 남긴다
     if background {
@@ -738,6 +894,7 @@ fn create_window(app: &AppHandle, board: &Arc<Board>, background: bool) -> tauri
             }
         }
         tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_) => b.mark_frame_dirty(),
+        tauri::WindowEvent::ScaleFactorChanged { .. } => b.refit_expanded(),
         _ => {}
     });
     Ok(())
@@ -821,11 +978,23 @@ pub fn run(argv: Vec<String>, context: tauri::Context<tauri::Wry>) {
             hide_board,
             minimize_board,
             log,
+            set_terminal_expanded,
+            set_board_side,
+            set_board_width,
+            crate::terms::term_spawn,
+            crate::terms::term_list,
+            crate::terms::term_attach,
+            crate::terms::term_ack,
+            crate::terms::term_write,
+            crate::terms::term_write_bin,
+            crate::terms::term_resize,
+            crate::terms::term_kill,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
             let board = Board::new(handle.clone());
             app.manage(board.clone());
+            app.manage(TermHub::default());
             let paths = board.account_paths.clone();
             std::thread::spawn(move || accounts::cleanup_slots(&paths));
             board.reload();
@@ -848,6 +1017,10 @@ pub fn run(argv: Vec<String>, context: tauri::Context<tauri::Wry>) {
             // 창을 닫아도(숨겨도) 앱은 트레이에 남는다 — 종료는 트레이 메뉴의 "종료"(코드가 있는 exit)로만
             tauri::RunEvent::ExitRequested { code: None, api, .. } => api.prevent_exit(),
             tauri::RunEvent::Exit => {
+                // 보드와 함께 셸과 그 자손(claude 등)을 끝낸다
+                if let Some(hub) = app.try_state::<TermHub>() {
+                    hub.kill_all();
+                }
                 if let Some(board) = app.try_state::<Arc<Board>>() {
                     board.save_frame_if_settled(f64::INFINITY);
                 }

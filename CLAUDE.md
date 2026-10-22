@@ -134,6 +134,7 @@ Windows 판은 `windows/` 아래에만 있다(최상위 macOS 파일은 고치�
 ```sh
 cd windows && cargo test                                    # core·hook 단위 테스트 (macOS 에서도 돈다)
 cd windows && cargo check --target x86_64-pc-windows-msvc   # Windows 전용 코드 컴파일 확인(링크 전까지). rustup target add x86_64-pc-windows-msvc 필요
+cd windows/app && npm run check && npm test                 # 프론트엔드 타입 검사(svelte-check)와 순수 함수 시험(node --test src/lib/**/*.test.ts)
 cd windows/app && npm ci && npm run tauri dev               # 보드를 띄워 화면 확인 (macOS 에서는 가짜 세션 파일로)
 ```
 

@@ -42,6 +42,8 @@ jobs:
       - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -90,6 +92,10 @@ jobs:
         working-directory: windows
         run: cargo test --workspace
 
+      - name: core·hook clippy
+        working-directory: windows
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
       - name: hook 빌드
         working-directory: windows
         run: cargo build --release -p claude-board-hook
@@ -106,6 +112,15 @@ jobs:
         working-directory: windows/app
         run: npm ci
 
+      # 타입·svelte 검사와 프론트엔드 단위 시험(node --test, Node 22.18+ 는 .ts 를 바로 읽는다)
+      - name: 프론트엔드 검사
+        working-directory: windows/app
+        run: npm run check
+
+      - name: 프론트엔드 테스트
+        working-directory: windows/app
+        run: npm test
+
       # 버전은 JSON 파일로 넘긴다 — npx 가 Windows 에서 cmd.exe 를 거치므로 따옴표가 든 JSON 문자열은 깨지기 쉽다
       - name: 앱·설치 프로그램(NSIS) 빌드
         working-directory: windows/app
@@ -116,7 +131,11 @@ jobs:
           printf '{"version":"%s"}\n' "$SEMVER" > "$cfg"
           npx tauri build --bundles nsis --config "$cfg"
 
-      # 백엔드 단위 테스트 — 위 빌드가 만든 프론트엔드 결과(../build)와 sidecar 가 있어야 컴파일된다
+      # 백엔드 clippy·단위 테스트 — 위 빌드가 만든 프론트엔드 결과(../build)와 sidecar 가 있어야 컴파일된다
+      - name: 백엔드 clippy
+        working-directory: windows/app/src-tauri
+        run: cargo clippy --all-targets -- -D warnings
+
       - name: 백엔드 테스트
         working-directory: windows/app/src-tauri
         run: cargo test
