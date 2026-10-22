@@ -102,6 +102,37 @@ hook 사본을 바꿀 때는 실행 중인 exe 를 덮어쓸 수 없으므로 `c
 | `context/<sid>.json` | 사용자 상태줄 → 보드 | `{context_window:{context_window_size, current_usage:{input_tokens,cache_creation_input_tokens,cache_read_input_tokens}, used_percentage}, model, effort, at}` |
 | `%TEMP%\.claude-usage-cache.json` | 보드(·상태줄) | 사용량 API 응답 캐시(macOS 는 `/tmp/.claude-usage-cache.json`) |
 
+### 2.3 자율주행 실행 폴더 (macOS 먼저, Windows 는 같은 약속으로 뒤에)
+
+자리는 `~/.claude/notifier/` 가 아니다 — macOS 는 `~/Library/Application Support/Claude Board/autopilot/runs/<실행 id>/`(시험 빌드 `Claude Board Dev`), 엔진 전용 폴더는 같은 뿌리의 `private/<실행 id>/`. 모델 쪽 읽기 금지는 엔진 전용 뿌리 전체(실제·시험 판), 모든 실행의 `engine/`, 옛 뿌리까지다(다른 실행의 백업을 읽지 못하게). Claude Code 가 `~/.claude` 를 보호 경로로 두어 모델의 Write·Edit 도구가 단위 폴더에 쓰지 못해서 옮겼다(2026-10-20). Windows 는 `%LOCALAPPDATA%\Claude Board\autopilot\` 같은 사용자 앱 데이터 자리에 둔다.
+
+실행을 넘어 쌓이는 기록(지난 실행, 단위별 추정·실제, 답한 카드, 프로젝트 대기열, 실행마다 쓴 자율주행 세트와 하네스 지문)은 같은 뿌리의 `private/records.sqlite` 하나에 두기로 했다(2026-10-21, macOS 2단계에서 만듦). 엔진들이 쓰고 보드는 읽기 전용으로 열며 모델은 읽지 못한다. 바깥 서비스 연결(macOS 4단계, `docs/자율주행/설계.md` 5장 6절)도 같은 약속이다 — 쓰기는 보드 내장 REST 만, 읽기는 내장과 사용자 MCP 읽기 세션이고 결과는 메타 형식 파일로 근거 묶음에 넣는다.
+macOS 는 1단계(엔진과 상태 파일, `ClaudeAutopilot.swift` → `claude-autopilot`)까지 있다. 필드·상태 값·규칙의 기준은 `docs/자율주행/설계.md` 4장(엔진)·5장(파일 약속)이고, 바꾸면 그 문서와 이 절을 함께 고친다. Windows 판은 아직 만들지 않는다.
+
+| 파일 | 쓰는 쪽 → 읽는 쪽 | 뜻 |
+|---|---|---|
+| `run.json` | 출발 화면(설정) → 엔진(상태) → 보드·TUI | 설정(`model`·`effort`·`stopline`·`caps`·`check_timeout_min`·`check_retries`·`precheck_retry_min`·`background_quiet_sec`·`allowed_tools`·`disallowed_tools`·`write_roots`·`network_allow`·`local_binding`·`env_pass`·`unix_sockets`·`read_deny`·`sandbox_exclude`)과 상태(`state`: `starting`·`running`·`waiting_limit`·`waiting_stopline`·`waiting_precheck`·`paused`·`stopped`·`done`·`error`, `reason`, `unit`, `unit_caps`, `wait_until`, `engine_pid`, `sessions`, `usage`, 시각들). 설정 칸은 출발 때 `pinned/frozen.json` 으로 고정되고 엔진은 그것만 읽는다 |
+| `queue.json` | 엔진(출발 때 동결) → 보드 | 단위 배열: `id`·`title`·`prompt`·`check`(종료 코드 0 이 통과)·`precheck`(선택)·`action`(선택, 엔진이 모델 전에 돌리는 고정 명령)·`check_timeout_min`·`action_timeout_min`(선택)·`context`(선택, 근거 묶음 폴더 — 출발 때 `pinned/context/<n>/` 로 사본, 단위 시작 때 `units/<n>/context/` 로 읽기 전용)·`cwd`·`caps{minutes,usd,weekly_pp}`·`review`·`tickets`(배열)·`status`(`pending`·`running`·`done`·`failed`·`capped`·`stopped`) |
+| `cards.json`, `answers.json` | 출발 화면 → 엔진·모델 | 출발 카드와 고른 답 |
+| `units/<n>/result.json` | 모델 → 엔진·보드 | 단위 결과 기록(모델이 쓰는 유일한 결과물) |
+| `units/<n>/engine.json`, `stream.jsonl`, `stderr.log`, `evidence/check-<k>/` | 엔진 → 보드 | 단위 상태·시계·비용·판정·상한·세션 id·프로세스(엔진 비공개 `engine/unit-<n>.json` 의 사본), claude stream 원문, 판정 출력과 증거 파일 |
+| `events.jsonl`, `context.jsonl` | 엔진 → 보드·TUI | 쉬운 말 진행 기록 `{ts, who: board\|model\|engine, text}`, 도구 호출 원문 요약 |
+| `control.json` | 보드 → 엔진 | `{action: pause\|resume\|stop\|takeover\|giveback\|restart_from_intake, ts}`. 엔진이 받으면 지운다 |
+| `inbox/`, `outbox/` | 보드 ↔ 엔진 | 사람 지시, 올리지 않은 바깥 글(2·4단계) |
+| `pinned/` | 엔진(출발 때) | 고정한 엔진·플러그인 사본과 고정 설정 `frozen.json`(해시는 다시 띄우는 쪽의 인자로만), 프로젝트 자율주행 세트 사본 `set/`(지시 `autopilot.md`, 주제로 시작이면 명세 `spec.md`·기술 스택 `stack.json`), 판정 스크립트·판정 시나리오 사본 `checks/`(판정은 이 고정본으로) — 다시 띄우는 쪽은 이 사본을 실행하고, 해시가 다르면 `error` |
+| `engine/` | 엔진 | 엔진 비공개 상태·샌드박스 설정(모델의 쓰기 범위 밖) |
+| (실행 폴더 밖) `private/<실행 id>/` | 엔진이 돌리는 명령 | 비밀이 든 것(복원 전 백업 등), 출발 때 뜬 사용자 하네스 사본 `harness/`. 모델은 읽기도 금지 |
+| (실행 폴더 밖) `private/projects/<프로젝트>/set/` | 보드·가져오기 세션·초안 세션 → 엔진(출발 때 사본) | 프로젝트의 지금 자율주행 세트: 지시 `autopilot.md`, 판정 스크립트·판정 시나리오 `checks/`, 기준 하네스 지문 `harness.json`, 작업 트리에 함께 둘 파일 `worktree_files.json`, 주제로 시작이면 명세 `spec.md`(요구사항·수용 기준)와 기술 스택 `stack.json`(`stack` 칸: 프론트·백엔드·DB 칸마다 이름·버전·빌드 도구와 어디서 왔는지) |
+| (실행 폴더 밖) `projects/<프로젝트>.json` | 엔진·보드 → 보드·엔진 | 프로젝트 설정: 정책 카드 답, 보고서 받을 곳, 승격 차례 `promotion`(단계 목록 `[{from, into, after}]`, `from` 이 `autopilot` 이면 그 실행의 자율주행 가지), 지난 출발 가지 `last_base`(`{<저장소>: <가지>}`) |
+| `starts.log`, `engine.log` | 엔진 | 뜬 시각(10분 안에 세 번 비정상 시작이면 `error`), 엔진 출력 |
+
+엔진이 띄우는 claude(와 판정 명령)에는 `CLAUDE_BOARD_AUTOPILOT`(실행 id)·`CLAUDE_BOARD_AUTOPILOT_DIR`(실행 폴더)·`CLAUDE_BOARD_UNIT_DIR`(단위 폴더)를 붙인다. hook 은 이 변수가 있을 때만 자율주행 규칙을 쓴다(macOS 도 아직 hook 은 그대로). `sessions/<sid>.json` 의 필드는 바꾸지 않는다.
+사용자 하네스(작업 저장소의 `CLAUDE.md`·`.claude/`·`.mcp.json`)는 출발 준비·실행·끝 어디서도 고치지 않는다(2026-10-21). 자율주행 지시는 보드의 프로젝트 자율주행 세트로 갖고 엔진이 시스템 프롬프트로 자율주행 세션에만 얹는다. 엔진은 출발 때 하네스 사본과 지문을 남기고 끝날 때 다시 재어 `run.json` 의 `harness`(`base`·`files`·`folders`, 끝에 `same`·`changed`·`checked`·`cleaned`)에 적으며, 출발 때 없던 빈 `.claude/.cc-writes` 를 치운다. 세트는 실행마다 기록 저장소에 남고 같은 경로에서 다시 출발하면 불러와 고쳐 쓴다(`docs/자율주행/설계.md` 2장 끝).
+어디서 도는가(2026-10-21, 가지 전략은 같은 날 저녁에 바꿈): 사람이 출발 확인에서 저장소마다 출발 가지를 고르고, 두 모드 모두 그 가지에서 `autopilot/<실행 id>` 를 만들어 거기에만 커밋한다(기존 가지 ref·`packed-refs` 는 쓰기 금지, 단위 칸 `work_branches` 는 없앰). 단일 저장소이고 확인(한 저장소, submodule 없음, 형제 경로 없음, 작업 트리에서 환경 확인 통과)을 통과하면 그 가지의 따로 작업 트리(macOS `~/.claude-board/worktrees/<실행 id>/<저장소 이름>/`, 경로에 공백 없이)에서 돌고, 아니면 원래 작업 트리를 그 가지로 바꿔(`git switch -c`) 돌며 보드가 "자율주행 중"을 표시하고, 끝나면 작업 트리가 깨끗할 때만 출발 때 걸려 있던 가지로 되돌린다. `run.json` 의 `worktree`(`mode`·`reason`·`repo`·`path`·`branch`·`base`)와 `branches`(`repos` 아래 저장소마다 `base{branch, head}`·`work`·`original`·`restored`, 출발·끝 가지 머리 `start`·`end`, `moved` 는 0 이어야 함, `created`). 승격은 끝난 뒤 사람이 보드에서 프로젝트 설정의 승격 차례대로 한다(자율주행 가지 → dev, 자율주행 가지 → live(dev 뒤에만), live → master(live 뒤에만), 엔진 `finish <실행 폴더> merge --into <가지>`·`promote <가지> --into <가지>`·`discard`(합치기 전에만)). 판정 미리 돌리기는 엔진 `prerun`, 단위 칸 `prerun`(기본 true). 주제로 시작의 판정 시나리오는 출발 뒤 모델이 고칠 수 없고 엔진은 `pinned/checks/` 의 고정본으로 판정한다.
+
+Windows 로 옮길 때: 엔진은 Rust 실행 파일(같은 상태 기계), 다시 띄우기는 macOS LaunchAgent(KeepAlive) 대신 작업 스케줄러(실패하면 다시 시작), claude 와 그 자식은 Job Object 로 묶어 엔진이 죽거나 멈출 때 함께 끝낸다(macOS 는 process group). 실행 id 는 작업 이름에 들어가므로 영문·숫자·`.-_` 만.
+격리: macOS 는 Claude Code 의 Bash 샌드박스(`--settings` 의 `sandbox`, Seatbelt)로 쓰기 범위·네트워크 허용 목록을 건다. Claude Code 문서상 네이티브 Windows 에서는 이 샌드박스가 없어 명령이 샌드박스 없이 돈다(WSL2 에서만 bubblewrap) — Windows 판은 WSL2 안에서 돌리거나 다른 격리(AppContainer·별도 계정 등)를 먼저 정해야 같은 약속을 지킬 수 있다. 환경 변수는 고른 목록만 넘기고(`docs/자율주행/설계.md` 4장 `passEnv`), 실행 폴더의 상태 파일은 모델의 쓰기 범위 밖에, 엔진 전용 폴더는 읽기도 금지로 둔다. 엔진이 밖에서 돌리는 git 에는 `core.fsmonitor=false`·`core.hooksPath` 비우기와 시스템·전역 설정 끄기를 건다. localhost 는 기본으로 막는다.
+
 ## 3. hook — `claude-board-hook.exe`
 
 ### 3.1 등록 형식 (exec form — 셸을 거치지 않는다)
@@ -404,6 +435,7 @@ setup.exe 메모(실기 확인): `/S` 로 같은 버전을 다시 설치하면 T
 - `windows/README.md`(사용자용: 컨셉·필요 환경·설치·사용법·업데이트·제거·배포·macOS 와 다른 점), `windows/docs/설치 가이드.md`(모든 기능 자세히), `windows/CHANGELOG.md`(`## 2.12 — 2026-10-16` 첫 항목).
 - 최상위 `README.md` 에 Windows 판 안내 한 절(설치 한 줄 + `windows/README.md` 링크), `CLAUDE.md` 에 Windows 구조·명령·"Latest 금지" 규칙, `.gitignore` 에 `!/windows/`·`!/.github/`.
 - 사용자에게 보이는 기능이 바뀌면 `windows/CHANGELOG.md`·`windows/README.md`·`windows/docs/설치 가이드.md` 를 함께 고친다.
+- 자율주행(§2.3)은 macOS 의 `docs/자율주행/설계.md` 를 기준으로 하고, Windows 판을 만들 때 이 명세를 먼저 맞춘다.
 
 ## 10. 이 Mac 에서 확인할 수 있는 것과 없는 것
 
@@ -440,6 +472,7 @@ Windows CI 러너에서 실기로 확인: `#[cfg(windows)]` 시험(콘솔 제목
 | T1 | TUI | board-tui.py | crates/hook `tui` | macOS 실행 |
 | R1 | CI·자동 릴리스(Latest 금지) | release.sh | .github/workflows/windows.yml | 브랜치 push 후 CI |
 | D1 | 문서 | README.md, packaging/README.txt | windows/*.md, 최상위 README·CLAUDE.md | 검토 |
+| A1 | 자율주행 엔진·실행 폴더 약속(§2.3) | ClaudeAutopilot.swift, docs/자율주행/설계.md | (아직 없음 — macOS 먼저, 같은 약속으로 뒤에) | 미구현 |
 
 ### 11.1 검증 결과 (2026-10-16, 첫 판 2.12)
 

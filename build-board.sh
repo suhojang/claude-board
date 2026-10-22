@@ -28,6 +28,10 @@ BIN="$(spm --show-bin-path)"
 # 떠 있는 보드가 있어도 깨지지 않게 새 파일로 복사해 바꿔 끼운다
 cp "$BIN/ClaudeBoard" "$APP/Contents/MacOS/ClaudeBoard.new"
 mv "$APP/Contents/MacOS/ClaudeBoard.new" "$APP/Contents/MacOS/ClaudeBoard"
+# 자율주행 엔진 — 보드 앱 밖에서 launchd 로 도는 실행 파일. 출발할 때 실행 폴더에 자기 사본을 두고 그 사본으로 돌아서,
+# 여기서 바꿔 끼워도 도는 실행은 그대로다(docs/자율주행/설계.md). ~/.claude/notifier 로는 옮기지 않는다(보드가 앱 안의 것을 부른다)
+swiftc -O "$N/ClaudeAutopilot.swift" -o "$APP/Contents/MacOS/claude-autopilot.new"
+mv "$APP/Contents/MacOS/claude-autopilot.new" "$APP/Contents/MacOS/claude-autopilot"
 # 엔진 리소스(terminfo·셸 통합) — .app 맨 위에 두면 서명이 거부되므로 Contents/Resources 에 두고 앱이 시작할 때 그 자리를 알려 준다
 rm -rf "$APP/Contents/Resources/GhosttyKit_GhosttyTerminal.bundle"
 cp -R "$BIN/GhosttyKit_GhosttyTerminal.bundle" "$APP/Contents/Resources/"
@@ -60,10 +64,12 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </dict>
 </plist>
 PLIST
-# make-cert.sh 로 만든 개인 인증서가 있으면 그것으로, 없으면 ad-hoc 서명
+# make-cert.sh 로 만든 개인 인증서가 있으면 그것으로, 없으면 ad-hoc 서명 — 안쪽 실행 파일(엔진) → 앱 순서
 if security find-identity -v -p codesigning | grep -qF "\"$SIGN_ID\""; then
+  codesign --force --timestamp=none --sign "$SIGN_ID" "$APP/Contents/MacOS/claude-autopilot"
   codesign --force --timestamp=none --sign "$SIGN_ID" "$APP"
 else
+  codesign --force --sign - "$APP/Contents/MacOS/claude-autopilot" >/dev/null 2>&1 || true
   codesign --force --sign - "$APP" >/dev/null 2>&1 || true
 fi
 touch "$APP"
