@@ -163,15 +163,17 @@ func mkdirPrivate(_ p: String) {
     chmod(p, 0o700)
 }
 
-// 엔진 자신이 부르는 git: 저장소 설정의 fsmonitor·hooks 를 쓰지 않고 시스템·전역 설정도 읽지 않는다
+// 엔진이 샌드박스 밖에서 부르는 git 의 보호(보안 검토 2026-10-22 둘째): 저장소 설정의 fsmonitor·hooks·attributesFile·gpgsign 을 쓰지 않고,
+// 시스템·전역 설정과 전역 attributes·replace 객체도 읽지 않는다 — 모델이 저장소 설정·attributes·replace 에 명령을 심어도 밖의 git 이 실행하지 않게
+let gitHardenEnv = ["GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_ATTR_NOSYSTEM=1", "GIT_NO_REPLACE_OBJECTS=1"]
+let gitHardenC = ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false", "-c", "core.attributesFile=/dev/null"]
 func safeGit(_ args: [String], cwd: String) -> String {
-    runTool("/usr/bin/env", ["GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "/usr/bin/git", "--no-optional-locks",
-                             "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"] + args, cwd: cwd).out
+    runTool("/usr/bin/env", gitHardenEnv + ["/usr/bin/git", "--no-optional-locks"] + gitHardenC + args, cwd: cwd).out
 }
 // 엔진이 가지를 바꾸는 git(만들기·바꾸기·병합 커밋·ref 올리기): safeGit 과 같은 보호에 종료 코드와 오류 출력까지 돌려준다.
 // 전역 설정을 읽지 않으므로 엔진이 만드는 커밋에는 사용자 신원을 명령줄로 붙인다(없으면 "Please tell me who you are")
 func gitRun(_ args: [String], cwd: String, commit: Bool = false) -> (code: Int32, out: String) {
-    var a = ["GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "/usr/bin/git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"]
+    var a = gitHardenEnv + ["/usr/bin/git"] + gitHardenC
     if commit { let i = gitIdentity(cwd); a += ["-c", "user.name=\(i.name)", "-c", "user.email=\(i.email)"] }
     let r = runTool("/usr/bin/env", a + args, cwd: cwd, timeout: 120, withErr: true)
     return (r.code, r.out.trimmingCharacters(in: .whitespacesAndNewlines))
@@ -715,8 +717,15 @@ func checkedOut(_ repo: String) -> [String: String] {
     return m
 }
 func repoName(_ r: String) -> String { (r as NSString).lastPathComponent }
-// Jira 가지 이름 꼴(프로젝트 설정 tickets.branch_names, 예 features/parent/{story}·features/{task})
-func renderBranch(_ pattern: String, _ key: String, _ ph: String) -> String { pattern.replacingOccurrences(of: "{\(ph)}", with: key) }
+// Jira 가지 이름 꼴(프로젝트 설정 tickets.branch_names). 자리표 {type}·{story}·{task} 를 채운다.
+// 예: story "{type}/_{story}/parent/{story}", task "{type}/_{story}/{task}". {type} 은 tickets.type_by_kind 에서 단위 종류로 찾는다
+func renderBranch(_ pattern: String, type: String? = nil, story: String? = nil, task: String? = nil) -> String {
+    var s = pattern
+    if let t = type { s = s.replacingOccurrences(of: "{type}", with: t) }
+    if let st = story { s = s.replacingOccurrences(of: "{story}", with: st) }
+    if let tk = task { s = s.replacingOccurrences(of: "{task}", with: tk) }
+    return s
+}
 func validBranch(_ b: String, cwd: String) -> Bool { gitRun(["check-ref-format", "--branch", b], cwd: cwd).code == 0 }
 // 프로젝트 설정(설계 5장 5절 projects/<프로젝트>.json): 승격 차례 promotion, 티켓·가지 규칙 tickets
 func projectSettings(_ name: String, dev: Bool) -> [String: Any]? { readJSON(autopilotRoot(dev: dev) + "/projects/\(name).json") as? [String: Any] }
@@ -729,20 +738,67 @@ func baseBranch(_ f: [String: Any], _ repo: String) -> String? {
     return currentBranch(repo)
 }
 
-// 출발 때: 저장소마다 출발 가지에서 autopilot/<실행 id> 를 만들어 바꾼다. 하나라도 실패하면 바꾼 저장소를 되돌리고 까닭을 돌려준다
-func startBranches(_ f: [String: Any], id: String) -> (branches: [String: Any], error: String?) {
+// git 폴더의 장치·inode(보안: 출발 때와 같은지 verifyGitDir 가 견준다)
+func gitStat(_ p: String) -> String? {
+    var st = stat(); guard lstat(p, &st) == 0 else { return nil }
+    return "\(st.st_dev):\(st.st_ino)"
+}
+// replace ref·tag·shallow 묶음(보안: 실행 중 새 replace·shallow·tag 변화를 끝에 보고하려고)
+func extraRefs(_ repo: String, _ common: String) -> [String: Any] {
+    var tags: [String: String] = [:], replace: [String] = []
+    for line in (gitOut(["for-each-ref", "--format=%(refname)\t%(objectname)", "refs/tags/", "refs/replace/"], cwd: repo) ?? "").split(separator: "\n") {
+        let f = line.split(separator: "\t"); guard f.count == 2 else { continue }
+        if f[0].hasPrefix("refs/tags/") { tags[String(f[0].dropFirst(10))] = String(f[1]) }
+        else if f[0].hasPrefix("refs/replace/") { replace.append(String(f[0].dropFirst(13))) }
+    }
+    let shallow = fm.contents(atPath: common + "/shallow").map { sha256($0) }
+    return ["tags": tags, "replace": replace.sorted(), "shallow": shallow ?? NSNull()]
+}
+// 저장소 지역 config 의 include·includeIf·filter(보안): git config 는 include 를 따라가므로 raw config 파일을 읽는다.
+// scope(쓰기 범위) 안을 가리키는 include 는 risky — 모델이 그 파일을 고쳐 filter 를 심으면 엔진 밖 git 이 실행할 수 있다
+func configIncludes(_ common: String, scope: [String]) -> (snapshot: [String], risky: [String]) {
+    guard let text = try? String(contentsOfFile: common + "/config", encoding: .utf8) else { return ([], []) }
+    var snap: [String] = [], risky: [String] = [], section = ""
+    for raw in text.split(separator: "\n", omittingEmptySubsequences: false) {
+        let line = raw.trimmingCharacters(in: .whitespaces)
+        if line.hasPrefix("[") { section = line.lowercased(); continue }
+        guard section.hasPrefix("[include") || section.hasPrefix("[filter"), !line.isEmpty, !line.hasPrefix("#"), !line.hasPrefix(";") else { continue }
+        snap.append(section + " " + line)
+        if section.hasPrefix("[include"), line.lowercased().hasPrefix("path"), let eq = line.firstIndex(of: "=") {
+            var p = line[line.index(after: eq)...].trimmingCharacters(in: .whitespaces)
+            if p.hasPrefix("~/") { p = home + p.dropFirst(1) }
+            let abs = p.hasPrefix("/") ? canonical(p) : canonical(common + "/" + p)
+            if scope.contains(where: { abs == $0 || abs.hasPrefix($0 + "/") }) { risky.append(abs) }
+        }
+    }
+    return (snap, risky)
+}
+// 저장소 하나의 가지 기록 틀(두 모드 공통). workTree 가 있으면 따로 작업 트리 모드
+func repoRecord(_ f: [String: Any], _ r: String, work: String, original: String?, workTree: String?, scope: [String]) -> [String: Any] {
+    let wtCwd = workTree ?? r
+    let gitDir = gitOut(["rev-parse", "--absolute-git-dir"], cwd: wtCwd) ?? r + "/.git"
+    var common = gitOut(["rev-parse", "--git-common-dir"], cwd: r) ?? r + "/.git"
+    if !common.hasPrefix("/") { common = canonical(r + "/" + common) }
+    common = canonical(common)
+    let base = baseBranch(f, r) ?? ""
+    var one: [String: Any] = [
+        "base": ["branch": base, "head": headOf(r, "refs/heads/" + base) ?? ""], "work": work,
+        "original": original ?? NSNull(), "original_head": headOf(r, "HEAD") ?? "", "restored": NSNull(),
+        "git_dir": canonical(gitDir), "common_dir": common, "common_ino": gitStat(common) ?? NSNull(),
+        "dirty_start": porcelain(wtCwd), "on": work, "made": [work],
+        "includes": configIncludes(common, scope: scope).snapshot, "extra": extraRefs(r, common)]
+    if let wt = workTree { one["work_tree"] = wt; one["work_git_dir"] = canonical(gitDir); one["work_git_ino"] = gitStat(canonical(gitDir)) ?? NSNull() }
+    return one
+}
+
+// 원래 작업 트리 모드: 저장소마다 출발 가지에서 autopilot/<실행 id> 를 만들어 원래 작업 트리를 바꾼다(git switch -c). 하나라도 실패하면 되돌린다
+func startBranches(_ f: [String: Any], id: String, scope: [String]) -> (branches: [String: Any], error: String?) {
     let work = "autopilot/" + id
     var info: [String: Any] = [:], start: [String: Any] = [:]
     for r in f["repos"] as? [String] ?? [] {
         let original = currentBranch(r)
         let base = baseBranch(f, r) ?? ""
-        let gitDir = gitOut(["rev-parse", "--absolute-git-dir"], cwd: r) ?? r + "/.git"
-        var common = gitOut(["rev-parse", "--git-common-dir"], cwd: r) ?? gitDir
-        if !common.hasPrefix("/") { common = canonical(r + "/" + common) }
-        let one: [String: Any] = [
-            "base": ["branch": base, "head": headOf(r, "refs/heads/" + base) ?? ""], "work": work,
-            "original": original ?? NSNull(), "original_head": headOf(r, "HEAD") ?? "", "restored": NSNull(),
-            "git_dir": canonical(gitDir), "common_dir": canonical(common), "dirty_start": porcelain(r), "on": work, "made": [work]]
+        let one = repoRecord(f, r, work: work, original: original, workTree: nil, scope: scope)
         start[r] = branchHeads(r)
         let sw = gitRun(["switch", "-c", work, base], cwd: r)
         guard sw.code == 0 else {
@@ -753,13 +809,83 @@ func startBranches(_ f: [String: Any], id: String) -> (branches: [String: Any], 
     }
     return (["repos": info, "start": start, "stories": [:] as [String: Any]], nil)
 }
-// 출발이 끝까지 가지 못했을 때: 바꾼 저장소를 출발 때 가지로 되돌리고 만든 가지를 지운다
+
+// 따로 작업 트리 모드(단일 저장소): 출발 가지 머리에서 autopilot/<실행 id> 가지와 작업 트리(~/.claude-board/worktrees/<id>/<저장소>/)를 만든다.
+// 원래 작업 트리·가지는 건드리지 않는다. 함께 둘 파일(git 이 무시하는 .env·데이터 등)을 복사하거나 읽기 전용으로 잇는다. 경로 바꾸기는 cmdStart 가 한다
+func startWorktree(_ f: [String: Any], id: String, scope: [String]) -> (branches: [String: Any], worktree: [String: Any], wtPath: String, repo: String, error: String?) {
+    let work = "autopilot/" + id
+    guard let r = (f["repos"] as? [String])?.first else { return ([:], [:], "", "", "따로 작업 트리로 돌 저장소가 없습니다") }
+    let base = baseBranch(f, r) ?? ""
+    let wtBase = home + "/.claude-board/worktrees/" + id
+    let wtPath = wtBase + "/" + repoName(r)
+    if fm.fileExists(atPath: wtPath) { return ([:], [:], "", r, "작업 트리 자리가 이미 있습니다: \(wtPath)") }
+    mkdirPrivate(home + "/.claude-board"); mkdirPrivate(home + "/.claude-board/worktrees"); mkdirPrivate(wtBase)
+    _ = gitRun(["worktree", "prune"], cwd: r)
+    let startHeads = branchHeads(r)   // 작업 가지를 만들기 전 머리(autopilot/<id> 가 "움직임" 아니라 "새로 생김"으로 잡히게)
+    let add = gitRun(["worktree", "add", "-b", work, wtPath, base], cwd: r)
+    guard add.code == 0 else {
+        try? fm.removeItem(atPath: wtBase)
+        return ([:], [:], "", r, "\(repoName(r)) 에 출발 가지 \(base) 에서 작업 트리를 만들지 못했습니다: \(firstLine(add.out))")
+    }
+    // 함께 둘 파일(git 이 무시하는 자리). 세트·run.json 의 worktree_files: ["경로"] 또는 [{path, link}] (복사 기본, link 는 읽기 전용 바로가기)
+    for item in f["worktree_files"] as? [Any] ?? [] {
+        let path = (item as? String) ?? ((item as? [String: Any])?["path"] as? String) ?? ""
+        let link = (item as? [String: Any])?["link"] as? Bool ?? false
+        guard !path.isEmpty, !path.hasPrefix("/"), !path.contains("..") else { continue }
+        let src = r + "/" + path, dst = wtPath + "/" + path
+        guard fm.fileExists(atPath: src) else { continue }
+        try? fm.createDirectory(atPath: (dst as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+        try? fm.removeItem(atPath: dst)
+        if link { try? fm.createSymbolicLink(atPath: dst, withDestinationPath: src) }
+        else { try? fm.copyItem(atPath: src, toPath: dst) }
+    }
+    let one = repoRecord(f, r, work: work, original: currentBranch(r), workTree: wtPath, scope: scope)
+    let branches: [String: Any] = ["repos": [r: one], "start": [r: startHeads], "stories": [:] as [String: Any]]
+    let worktree: [String: Any] = ["mode": "worktree", "repo": r, "path": wtPath, "branch": work,
+                                   "base": (one["base"] as? [String: Any])?["head"] ?? "",
+                                   "reason": "단일 저장소라 따로 작업 트리에서 돕니다(원래 작업 트리는 사람이 그대로 씁니다)"]
+    return (branches, worktree, wtPath, r, nil)
+}
+
+// 출발이 끝까지 가지 못했을 때: 바꾼 저장소를 출발 때 가지로 되돌리고 만든 가지·작업 트리를 지운다
 func rollbackBranches(_ b: [String: Any]) {
     for (r, v) in b["repos"] as? [String: Any] ?? [:] {
         guard let i = v as? [String: Any], let work = i["work"] as? String else { continue }
-        if let o = i["original"] as? String { _ = gitRun(["switch", o], cwd: r) }
-        else if let h = i["original_head"] as? String, !h.isEmpty { _ = gitRun(["switch", "--detach", h], cwd: r) }
-        _ = gitRun(["branch", "-D", work], cwd: r)
+        if let wt = i["work_tree"] as? String {   // 따로 작업 트리: 작업 트리를 지우고 prune 한 뒤 가지 삭제
+            _ = gitRun(["worktree", "remove", "--force", wt], cwd: r)
+            _ = gitRun(["worktree", "prune"], cwd: r)
+            _ = gitRun(["branch", "-D", work], cwd: r)
+            let base = (wt as NSString).deletingLastPathComponent
+            if (try? fm.contentsOfDirectory(atPath: base))?.isEmpty == true { try? fm.removeItem(atPath: base) }
+        } else {
+            if let o = i["original"] as? String { _ = gitRun(["switch", o], cwd: r) }
+            else if let h = i["original_head"] as? String, !h.isEmpty { _ = gitRun(["switch", "--detach", h], cwd: r) }
+            _ = gitRun(["branch", "-D", work], cwd: r)
+        }
+    }
+}
+
+// 단위 경로를 작업 트리 쪽으로 바꾼다(cmdStart 가 작업 트리를 만든 뒤). cwd·write_roots 는 접두사 치환, 명령·프롬프트는 경계 치환, context 는 그대로
+func remapToWorktree(_ f: inout [String: Any], from orig: String, to wt: String) {
+    func prefix(_ s: String) -> String { s == orig ? wt : (s.hasPrefix(orig + "/") ? wt + String(s.dropFirst(orig.count)) : s) }
+    func boundary(_ s: String) -> String {   // orig 뒤에 /·끝·따옴표·공백이 올 때만 바꾼다(toy vs toy2 가름)
+        var out = "", i = s.startIndex
+        while let rng = s.range(of: orig, range: i..<s.endIndex) {
+            out += s[i..<rng.lowerBound]
+            let after = rng.upperBound < s.endIndex ? s[rng.upperBound] : " "
+            out += (after == "/" || after == " " || after == "\"" || after == "'" || after == "\n" || after == "`") ? wt : orig
+            i = rng.upperBound
+        }
+        out += s[i...]
+        return out
+    }
+    if let roots = f["write_roots"] as? [String] { f["write_roots"] = roots.map(prefix) }
+    if var units = f["units"] as? [[String: Any]] {
+        for j in units.indices {
+            if let c = units[j]["cwd"] as? String { units[j]["cwd"] = prefix(c) }
+            for k in ["check", "precheck", "action", "prompt"] { if let s = units[j][k] as? String { units[j][k] = boundary(s) } }
+        }
+        f["units"] = units
     }
 }
 
@@ -984,9 +1110,16 @@ extension RecordsDB {
         }
         if let project {
             let cwds = q.indices.compactMap { def($0)["cwd"] as? String }
-            // 저장소 목록: 엔진이 출발 때 찾은 저장소 뿌리(하네스 폴더), 옮겨 담는 옛 실행은 단위 작업 폴더(저장소를 열어 보지 않는다)
-            var folders = (r["harness"] as? [String: Any])?["folders"] as? [String] ?? []
-            for c in cwds where !folders.contains(where: { c == $0 || c.hasPrefix($0 + "/") }) { folders.append(c) }
+            // 저장소 목록: 가지 기록의 저장소 키(원래 저장소 경로 — 따로 작업 트리면 작업 트리가 아니라 원래 저장소). 없으면 하네스 폴더,
+            // 옮겨 담는 옛 실행은 단위 작업 폴더(저장소를 열어 보지 않는다). 작업 트리 경로가 기록 저장소의 projects.repos 에 들어가지 않게 한다
+            let branchRepos = ((r["branches"] as? [String: Any])?["repos"] as? [String: Any])?.keys.map { String($0) }.sorted() ?? []
+            var folders: [String]
+            if !branchRepos.isEmpty {
+                folders = branchRepos
+            } else {
+                folders = (r["harness"] as? [String: Any])?["folders"] as? [String] ?? []
+                for c in cwds where !folders.contains(where: { c == $0 || c.hasPrefix($0 + "/") }) { folders.append(c) }
+            }
             try upsertProject(project, explicitRoot: (f["project_root"] ?? r["project_root"]) as? String, repos: folders)
             written += 1
         }
@@ -1659,7 +1792,27 @@ final class Engine {
         var b = br, rs = b["repos"] as? [String: Any] ?? [:]
         rs[r] = i; b["repos"] = rs; br = b
     }
-    func repoOf(_ path: String) -> String? { repos.filter { path == $0 || path.hasPrefix($0 + "/") }.max { $0.count < $1.count } }
+    // 저장소의 작업 트리 자리: 따로 작업 트리 모드면 그 작업 트리, 아니면 원래 저장소. 작업 트리 쪽 git(switch·status·커밋)은 이 자리에서 돈다
+    func wt(_ r: String) -> String { repoInfo(r)["work_tree"] as? String ?? r }
+    func repoOf(_ path: String) -> String? {
+        repos.filter { r in let w = wt(r); return path == r || path.hasPrefix(r + "/") || path == w || path.hasPrefix(w + "/") }.max { $0.count < $1.count }
+    }
+    // 보안(2026-10-22 둘째): 엔진이 샌드박스 밖에서 쓰는 git 을 돌리기 전에 그 저장소의 git 폴더가 출발 때와 같은지 본다.
+    // 모델이 .git 을 바꿔치기했으면(장치·inode·절대 경로가 다름) git 을 돌리지 않고 위반으로 알린다(샌드박스가 이미 막지만 받침)
+    func gitDirOK(_ r: String) -> Bool {
+        let i = repoInfo(r)
+        guard let c = i["common_dir"] as? String else { return true }
+        let live = gitOut(["rev-parse", "--git-common-dir"], cwd: wt(r)).map { $0.hasPrefix("/") ? canonical($0) : canonical(wt(r) + "/" + $0) }
+        if live != c || (i["common_ino"] as? String).map({ $0 != gitStat(c) }) == true {
+            event("engine", "보안: \(repoName(r)) 의 git 폴더가 출발 때와 달라져 git 을 돌리지 않습니다(바꿔치기 의심). 사람이 확인하세요.")
+            return false
+        }
+        if let wg = i["work_git_dir"] as? String, (i["work_git_ino"] as? String).map({ $0 != gitStat(wg) }) == true {
+            event("engine", "보안: \(repoName(r)) 의 작업 트리 git 폴더가 출발 때와 달라져 git 을 돌리지 않습니다. 사람이 확인하세요.")
+            return false
+        }
+        return true
+    }
     func story(_ k: String) -> [String: Any] { (br["stories"] as? [String: Any])?[k] as? [String: Any] ?? [:] }
     func setStory(_ k: String, _ s: [String: Any]) {
         var b = br, ss = b["stories"] as? [String: Any] ?? [:]
@@ -1686,17 +1839,27 @@ final class Engine {
             names.formUnion(i["made"] as? [String] ?? [])
             names.remove(on)
             for b in names.sorted() { out += [c + "/refs/heads/" + b, c + "/refs/heads/" + b + ".lock"] }
-            out += [g + "/HEAD", c + "/packed-refs", c + "/config"]
-            if let d = storyDir, !on.hasPrefix(d + "/") { out.append(c + "/refs/heads/" + d) }
+            out += [c + "/HEAD", g + "/HEAD", c + "/packed-refs", c + "/config"]
+            // 밖에서 도는 git 이 실행할 공통 .git 설정 자리(작업 트리 모드는 공통 .git 이 쓰기 범위라 harnessDeny 가 못 덮는다, 보안 2026-10-22 둘째)
+            out += [c + "/hooks", c + "/config.worktree", c + "/info", c + "/commondir", c + "/objects/info/alternates"]
+            // 보안: replace ref(검토 속이기)와 shallow(얕은 복제로 이력 가리기)
+            out += [c + "/refs/replace", c + "/shallow", g + "/shallow"]
+            for d in storyDirs where !on.hasPrefix(d + "/") { out.append(c + "/refs/heads/" + d) }
+            // 따로 작업 트리: 작업 트리 .git 파일과 그 작업 트리 git 폴더의 commondir·gitdir(git 폴더 바꿔치기 막기)
+            if let w = i["work_tree"] as? String { out += [w + "/.git", g + "/commondir", g + "/gitdir"] }
         }
         return out
     }
-    // 스토리 가지 꼴의 앞 폴더: "features/parent/{story}" → "features/parent"
-    var storyDir: String? {
-        guard let p = ((cfg["tickets"] as? [String: Any])?["branch_names"] as? [String: Any])?["story"] as? String,
-              let x = p.range(of: "{story}"), let slash = p[..<x.lowerBound].lastIndex(of: "/") else { return nil }
-        let d = String(p[..<slash])
-        return d.isEmpty ? nil : d
+    // 스토리 가지들의 앞 폴더(통째로 막아 모델이 스토리 꼴 가지를 만들거나 옮기지 못하게). 꼴이 {type}·{story} 로 스토리마다 달라
+    // 패턴이 아니라 이 실행이 정한 실제 스토리 가지(단위 story_branch)에서 뽑는다. 예 "fix/_TOY-1/parent/TOY-1" → "fix/_TOY-1/parent"
+    var storyDirs: [String] {
+        var s = Set<String>()
+        for d in defs {
+            if let sb = d["story_branch"] as? String, let slash = sb.lastIndex(of: "/") {
+                let p = String(sb[..<slash]); if !p.isEmpty { s.insert(p) }
+            }
+        }
+        return s.sorted()
     }
 
     // 단위를 시작하기 전의 가지(설계 2장 끝): 기대는 앞 단위(depends)가 통과하지 않았으면(Jira 단위면 스토리 가지에 합쳐지지 않았으면) 건너뛴다.
@@ -1749,20 +1912,22 @@ final class Engine {
     // 다음 작업 가지에 섞이지 않게. 출발 때부터 더러웠거나 실행 중에 누가 가지를 바꿨으면 바꾸지 않는다(까닭을 돌려줌)
     func switchTo(_ r: String, _ want: String) -> String? {
         var i = repoInfo(r)
-        let on = i["on"] as? String ?? "", cur = currentBranch(r) ?? ""
+        let w = wt(r)   // 작업 트리 모드면 작업 트리에서, 아니면 원래 저장소에서 바꾼다
+        let on = i["on"] as? String ?? "", cur = currentBranch(w) ?? ""
         if on == want, cur == want { return nil }
+        guard gitDirOK(r) else { return "\(repoName(r)) 의 git 폴더가 바뀌어 \(want) 로 바꾸지 않았습니다" }
         if cur != on { return "\(repoName(r)) 의 가지가 실행 중에 바뀌어(지금 \(cur.isEmpty ? "가지 없음" : cur)) \(want) 로 바꾸지 않았습니다" }
-        let dirty = porcelain(r), dirtyStart = i["dirty_start"] as? [String] ?? []
+        let dirty = porcelain(w), dirtyStart = i["dirty_start"] as? [String] ?? []
         if dirty != dirtyStart {
             guard dirtyStart.isEmpty, (i["made"] as? [String] ?? []).contains(on) else {
                 return "\(repoName(r)) 에 커밋하지 않은 변경 \(dirty.count)개가 있어 \(want) 로 바꾸지 않았습니다"
             }
-            let a = gitRun(["add", "-A"], cwd: r)
-            let c = a.code == 0 ? gitRun(["commit", "-q", "--no-verify", "-m", "자율주행 \(id): \(on) 에 커밋하지 않고 남은 변경(다음 단위로 가지를 바꾸기 전에 엔진이 남김)"], cwd: r, commit: true) : a
+            let a = gitRun(["add", "-A"], cwd: w)
+            let c = a.code == 0 ? gitRun(["commit", "-q", "--no-verify", "-m", "자율주행 \(id): \(on) 에 커밋하지 않고 남은 변경(다음 단위로 가지를 바꾸기 전에 엔진이 남김)"], cwd: w, commit: true) : a
             guard c.code == 0 else { return "\(repoName(r)) 에 남은 변경을 \(on) 에 커밋하지 못해 \(want) 로 바꾸지 않았습니다: \(firstLine(c.out))" }
             event("board", "앞 단위가 커밋하지 않고 남긴 변경 \(dirty.count)개를 그 가지(\(on))에 커밋해 두었습니다.")
         }
-        let sw = gitRun(["switch", want], cwd: r)
+        let sw = gitRun(["switch", want], cwd: w)
         guard sw.code == 0 else { return "\(repoName(r)) 를 \(want) 로 바꾸지 못했습니다: \(firstLine(sw.out))" }
         i = repoInfo(r); i["on"] = want; setRepoInfo(r, i); saveRun()
         return nil
@@ -1790,6 +1955,7 @@ final class Engine {
         if let m = u["merge"] as? [String: Any], m["state"] as? String == "merged" { return m }   // 합친 뒤 끊겨 판정을 다시 했다
         guard let k = def(n)["story"] as? String, let task = def(n)["branch"] as? String, let sb = def(n)["story_branch"] as? String,
               let r = repoOf(cwd(n)) else { return [:] }
+        guard gitDirOK(r) else { return ["story": k, "task": task, "branch": sb, "state": "not_merged", "why": "git 폴더가 바뀌어 합치지 않았습니다", "at": r3(now())] }
         var m: [String: Any] = ["story": k, "task": task, "branch": sb, "at": r3(now())]
         let th = headOf(r, "refs/heads/" + task), sh = headOf(r, "refs/heads/" + sb)
         func no(_ why: String) { m["state"] = "not_merged"; m["why"] = why }
@@ -1856,13 +2022,31 @@ final class Engine {
                 created.append(["repo": r, "branch": k, "head": v, "by": made.contains(k) ? "engine" : "other"])
             }
         }
-        b["end"] = end; b["moved"] = moved; b["created"] = created; br = b
+        b["end"] = end; b["moved"] = moved; b["created"] = created
+        // 보안(2026-10-22 둘째): 실행 중에 새로 생긴 replace ref·바뀐 tag·shallow·include/filter 를 보고한다(되돌리지 않고 보여만 준다)
+        var replaceNew: [[String: Any]] = [], tagsChanged: [[String: Any]] = [], shallowChanged: [String] = [], includeChanged: [String] = []
+        for r in repos {
+            let i = repoInfo(r); let c = i["common_dir"] as? String ?? r + "/.git"
+            let nowE = extraRefs(r, c), wasE = i["extra"] as? [String: Any] ?? [:]
+            let wasT = wasE["tags"] as? [String: String] ?? [:], nowT = nowE["tags"] as? [String: String] ?? [:]
+            for (k, v) in nowT where wasT[k] != v { tagsChanged.append(["repo": r, "tag": k]) }
+            for k in wasT.keys where nowT[k] == nil { tagsChanged.append(["repo": r, "tag": k, "removed": true]) }
+            let wasR = Set(wasE["replace"] as? [String] ?? []), nowR = Set(nowE["replace"] as? [String] ?? [])
+            for x in nowR.subtracting(wasR).sorted() { replaceNew.append(["repo": r, "object": x]) }
+            if jtext(wasE["shallow"]) != jtext(nowE["shallow"]) { shallowChanged.append(r) }
+            if (i["includes"] as? [String] ?? []) != configIncludes(c, scope: []).snapshot { includeChanged.append(r) }
+        }
+        b["replace_new"] = replaceNew; b["tags_changed"] = tagsChanged; b["shallow_changed"] = shallowChanged; b["include_changed"] = includeChanged
+        br = b
         let other = created.filter { $0["by"] as? String == "other" }.compactMap { $0["branch"] as? String }
         if moved.isEmpty {
             event("engine", "출발 때 있던 가지는 하나도 움직이지 않았습니다. 이 실행이 만든 가지 \(created.count - other.count)개\(other.isEmpty ? "" : ", 그 밖에 새로 생긴 가지 \(other.count)개(\(other.prefix(3).joined(separator: ", ")))").")
         } else {
             let some = moved.prefix(3).map { "\(repoName($0["repo"] as? String ?? "")) \($0["branch"] ?? "")" }
             event("engine", "출발 때 있던 가지 \(moved.count)개가 움직였습니다(\(some.joined(separator: ", "))\(moved.count > 3 ? " 등" : "")). 되돌리지 않았습니다. 사람이 확인하세요.")
+        }
+        if !replaceNew.isEmpty || !tagsChanged.isEmpty || !shallowChanged.isEmpty || !includeChanged.isEmpty {
+            event("engine", "보안: 실행 중에 replace 객체 \(replaceNew.count)개, 태그 변화 \(tagsChanged.count)개, shallow 변화 \(shallowChanged.count)곳, include/filter 변화 \(includeChanged.count)곳이 생겼습니다. 사람이 push·검토 전에 확인하세요.")
         }
     }
 
@@ -1873,6 +2057,10 @@ final class Engine {
         for r in repos {
             var i = repoInfo(r)
             guard i["restored"] == nil || i["restored"] is NSNull else { continue }
+            if i["work_tree"] != nil {   // 따로 작업 트리: 원래 작업 트리·가지를 건드리지 않았으니 되돌릴 것이 없다
+                i["restored"] = NSNull(); i["restore_note"] = "따로 작업 트리라 원래 작업 트리·가지를 건드리지 않았습니다"; setRepoInfo(r, i)
+                continue
+            }
             let original = i["original"] as? String, on = i["on"] as? String ?? "", cur = currentBranch(r)
             var ok = false, note: String
             if let o = original, cur == o { ok = true; note = "이미 출발 때 가지(\(o))에 있습니다" }
@@ -2219,12 +2407,15 @@ final class Engine {
     func commandEnv(_ n: Int) -> [String: String] {
         var e = claudeEnv(n)
         var k = Int(e["GIT_CONFIG_COUNT"] ?? "") ?? 0
-        for (key, value) in [("core.hooksPath", "/dev/null")] {   // fsmonitor 는 claudeEnv 에 이미 있다
+        // fsmonitor 는 claudeEnv 에 이미 있다. 모델이 저장소 설정·attributes·replace 에 명령을 심어도 밖에서 도는 판정·고정 단계의 git 이 실행하지 않게
+        for (key, value) in [("core.hooksPath", "/dev/null"), ("commit.gpgsign", "false"), ("core.attributesFile", "/dev/null")] {
             e["GIT_CONFIG_KEY_\(k)"] = key; e["GIT_CONFIG_VALUE_\(k)"] = value; k += 1
         }
         e["GIT_CONFIG_COUNT"] = String(k)
         e["GIT_CONFIG_NOSYSTEM"] = "1"
         e["GIT_CONFIG_GLOBAL"] = "/dev/null"
+        e["GIT_ATTR_NOSYSTEM"] = "1"
+        e["GIT_NO_REPLACE_OBJECTS"] = "1"
         e["CLAUDE_BOARD_PRIVATE_DIR"] = enginePrivate
         return e
     }
@@ -2782,9 +2973,12 @@ func prepare(_ dir: String, dev: Bool) -> (problems: [String], frozen: [String: 
         let names = t["branch_names"] as? [String: Any] ?? [:]
         let sp = names["story"] as? String ?? defaultStoryPattern, tp = names["task"] as? String ?? defaultTaskPattern
         let how = t["merge"] as? String ?? "merge"
-        if !sp.contains("{story}") || !tp.contains("{task}") { problems.append("프로젝트 설정 tickets.branch_names 의 꼴에 {story}·{task} 가 있어야 합니다") }
+        let typeByKind = t["type_by_kind"] as? [String: Any] ?? [:]   // 단위 종류(kind) → {type} 자리표 값(예 {"fix":"fix","dev":"feature"})
+        let needsType = sp.contains("{type}") || tp.contains("{type}")
+        if !sp.contains("{story}") { problems.append("프로젝트 설정 tickets.branch_names.story 꼴에 {story} 가 있어야 합니다") }
+        if !tp.contains("{task}") { problems.append("프로젝트 설정 tickets.branch_names.task 꼴에 {task} 가 있어야 합니다") }
         if !["merge", "ff"].contains(how) { problems.append("프로젝트 설정 tickets.merge 는 merge(병합 커밋) 또는 ff(앞으로 감기)입니다") }
-        f["tickets"] = ["branch_names": ["story": sp, "task": tp], "merge": how]
+        f["tickets"] = ["branch_names": ["story": sp, "task": tp], "merge": how, "type_by_kind": typeByKind]
         var seen = Set<String>()
         for i in units.indices {
             guard let story = units[i]["story"] as? String else { continue }
@@ -2792,11 +2986,19 @@ func prepare(_ dir: String, dev: Bool) -> (problems: [String], frozen: [String: 
             guard let r = repos.filter({ cwd == $0 || cwd.hasPrefix($0 + "/") }).max(by: { $0.count < $1.count }) else {
                 problems.append("단위 \(n) 은 story 가 있는데 작업 폴더가 git 저장소 안이 아닙니다"); continue
             }
+            var type: String? = nil
+            if needsType {   // 가지 꼴에 {type} 이 있으면 단위 종류로 찾는다. 없으면 출발 거부(사용자 결정 2026-10-22)
+                let kind = units[i]["kind"] as? String ?? ""
+                guard let ty = typeByKind[kind] as? String, !ty.isEmpty else {
+                    problems.append("단위 \(n) 의 가지 꼴에 {type} 이 있는데 종류(\(kind.isEmpty ? "없음" : kind))에 맞는 tickets.type_by_kind 가 없습니다"); continue
+                }
+                type = ty
+            }
             let key = (units[i]["tickets"] as? [Any])?.first.map { "\($0)" }
-            guard let task = units[i]["branch"] as? String ?? key.map({ renderBranch(tp, $0, "task") }) else {
+            guard let task = units[i]["branch"] as? String ?? key.map({ renderBranch(tp, type: type, story: story, task: $0) }) else {
                 problems.append("단위 \(n) 은 story 가 있는데 tickets 에 작업 키도 branch 도 없습니다"); continue
             }
-            let sb = renderBranch(sp, story, "story")
+            let sb = renderBranch(sp, type: type, story: story)
             units[i]["branch"] = task; units[i]["story_branch"] = sb
             queue[i]["branch"] = task
             for b in [sb, task] where !validBranch(b, cwd: r) { problems.append("단위 \(n) 의 가지 이름 \(b) 가 git 가지 이름 꼴이 아닙니다") }
@@ -2805,8 +3007,73 @@ func prepare(_ dir: String, dev: Bool) -> (problems: [String], frozen: [String: 
             if !seen.insert(task).inserted { problems.append("작업 가지 \(task) 를 두 단위가 함께 씁니다") }
         }
     }
+    // 어디서 도는가(설계 2장 끝 "어디서 도는가"): 단일 저장소면 따로 작업 트리, 묶음·확인 실패면 원래 작업 트리. worktree_mode 로 강제할 수 있다.
+    // 함께 둘 파일 목록(git 이 무시하는 .env·데이터 등)은 run.json worktree_files 또는 세트 worktree_files.json
+    if let wf = run["worktree_files"] {
+        if let a = wf as? [Any] { f["worktree_files"] = a } else { problems.append("run.json 의 worktree_files 는 배열이어야 합니다") }
+    } else if let sd = (f["set"] as? [String: Any])?["dir"] as? String, let a = readJSON(sd + "/worktree_files.json") as? [Any] {
+        f["worktree_files"] = a
+    }
+    let scope = (units.compactMap { $0["cwd"] as? String } + roots)
+    for r in repos {   // 보안(2026-10-22 둘째): git config 의 include 가 쓰기 범위 안을 가리키면 모델이 그 파일로 filter 를 심을 수 있어 출발을 막는다
+        var common = gitOut(["rev-parse", "--git-common-dir"], cwd: r) ?? r + "/.git"
+        if !common.hasPrefix("/") { common = canonical(r + "/" + common) }
+        for p in configIncludes(canonical(common), scope: scope).risky {
+            problems.append("\(repoName(r)) 의 git config include 가 쓰기 범위 안(\(p))을 가리킵니다. 모델이 그 파일로 명령을 심을 수 있어 출발하지 않습니다(밖으로 옮기세요)")
+        }
+    }
+    let forced = run["worktree_mode"] as? String ?? (f["project"] as? String).flatMap { projectSettings($0, dev: dev)?["worktree_mode"] as? String }
+    let (wtOK, wtReason) = worktreeChecks(repos, units, roots)
+    switch forced {
+    case "in_place": f["worktree_mode"] = "in_place"; f["worktree_reason"] = "worktree.mode 설정으로 원래 작업 트리에서 돕니다"
+    case "worktree":
+        if wtOK { f["worktree_mode"] = "worktree"; f["worktree_reason"] = wtReason }
+        else { problems.append("worktree.mode 로 따로 작업 트리를 강제했지만 될 수 없습니다: \(wtReason)") }
+    default:
+        f["worktree_mode"] = wtOK ? "worktree" : "in_place"; f["worktree_reason"] = wtReason
+    }
     f["units"] = units
     return (problems, f, queue)
+}
+
+// 단일 저장소 확인(설계 2장 끝): ① 한 저장소 ② submodule 없음 ③ 형제 경로(../) 없음. ④ 작업 트리 precheck 는 cmdStart 가 만든 뒤 본다
+func worktreeChecks(_ repos: [String], _ units: [[String: Any]], _ roots: [String]) -> (ok: Bool, reason: String) {
+    if repos.count != 1 { return (false, repos.isEmpty ? "git 저장소에서 돌지 않아 원래 자리에서 돕니다" : "저장소 묶음(\(repos.count)곳)이라 원래 작업 트리에서 돕니다") }
+    let r = repos[0]
+    if fm.fileExists(atPath: r + "/.gitmodules") { return (false, "submodule 이 있어(.gitmodules) 원래 작업 트리에서 돕니다") }
+    for (i, u) in units.enumerated() {
+        for k in ["prompt", "check", "precheck", "action"] {
+            if let s = u[k] as? String, let hit = siblingHit(s) { return (false, "단위 \(i + 1) 의 \(k) 가 형제 경로(\(hit))를 가리켜 원래 작업 트리에서 돕니다") }
+        }
+    }
+    for hf in ["CLAUDE.md", "CLAUDE.local.md", ".mcp.json", ".claude/settings.json", ".claude/settings.local.json"] {
+        if let t = try? String(contentsOfFile: r + "/" + hf, encoding: .utf8), let hit = siblingHit(t) {
+            return (false, "저장소 \(hf) 가 형제 경로(\(hit))를 가리켜 원래 작업 트리에서 돕니다")
+        }
+    }
+    return (true, "단일 저장소라 따로 작업 트리에서 돕니다")
+}
+// 형제 저장소 상대 경로(../<다른 저장소>)로 보이는 토큰. 보수적으로 잡아 의심스러우면 원래 작업 트리로(안전한 쪽)
+func siblingHit(_ s: String) -> String? {
+    for tok in s.split(whereSeparator: { " \t\n\"'`()[]".contains($0) }) {
+        if tok.hasPrefix("../") || tok.contains("/../") { return String(tok.prefix(60)) }
+    }
+    return nil
+}
+// ④ 작업 트리 precheck 를 돌릴 때 쓰는 환경(출발 전, Engine 없이): 로그인 환경에서 고른 것 + 밖에서 도는 git 보호
+func worktreeCheckEnv(_ f: [String: Any]) -> [String: String] {
+    var e = passEnv(captureLoginEnv(loginShell()) ?? ["PATH": "\(home)/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin", "HOME": home],
+                    extra: f["env_pass"] as? [String] ?? [])
+    if e["JAVA_HOME"] == nil { let jh = runTool("/usr/libexec/java_home", [], timeout: 10); let p = jh.out.trimmingCharacters(in: .whitespacesAndNewlines); if jh.code == 0, isDir(p) { e["JAVA_HOME"] = p } }
+    for (i, kv) in [("GIT_CONFIG_NOSYSTEM", "1"), ("GIT_CONFIG_GLOBAL", "/dev/null"), ("GIT_ATTR_NOSYSTEM", "1"), ("GIT_NO_REPLACE_OBJECTS", "1")].enumerated() { _ = i; e[kv.0] = kv.1 }
+    return e
+}
+// 출발 전 명령 하나(precheck)를 로그인 셸로 cwd 에서 돌린다. 종료 코드(2분 상한, 못 돌리면 -1)
+func runCheckAt(_ cmd: String, cwd: String, env: [String: String]) -> Int32 {
+    guard let c = Child(loginShell(), ["-l", "-c", cmd], env: env, cwd: cwd, outFile: "/dev/null", newGroup: true) else { return -1 }
+    let ok = c.wait(120)
+    killGroup(c.pid); _ = c.wait(2)
+    return ok ? (c.code ?? -1) : -1
 }
 
 // run.json 에 내놓는 세트 요약(보드가 그린다). 글 전문은 고정 설정과 pinned/set/ 에만 둔다
@@ -2840,40 +3107,68 @@ func cmdStart(_ args: [String]) -> Never {
     chmod(dir + "/pinned", 0o700); chmod(dir + "/engine", 0o700)
     try? fm.removeItem(atPath: pinned)
     do { try fm.copyItem(atPath: selfPath(), toPath: pinned) } catch { fail("엔진 사본을 만들지 못했습니다: \(error.localizedDescription)") }
-    let frozenData = Data(jsonText(frozen, pretty: true).utf8)
-    guard writePrivate(dir + "/pinned/frozen.json", frozenData) else { fail("고정 설정을 쓰지 못했습니다") }
-    // 근거 묶음도 출발 때 사본을 떠 둔다(출발 뒤에 원본이 바뀌어도 단위가 받는 묶음은 같다). 단위를 시작할 때 units/<n>/context/ 로 넘긴다
+    // 가지·작업 트리를 먼저 만들고 경로를 바꾼 뒤에 고정 설정을 쓴다(remap 이 해시에 들어가야 한다, 설계 4장 "시작과 끝").
+    // 따로 작업 트리(단일 저장소)면 작업 트리를 만들고 ④ precheck 를 그 자리에서 보고, 실패하면 원래 작업 트리로 떨어진다
+    var fz = frozen
+    let scope = (fz["units"] as? [[String: Any]] ?? []).compactMap { $0["cwd"] as? String } + (fz["write_roots"] as? [String] ?? [])
+    var branches: [String: Any] = [:]
+    func inPlace(_ reason: String) {
+        let (b, err) = startBranches(fz, id: id, scope: scope)
+        if let err { fail("출발하지 않았습니다: \(err)") }
+        branches = b
+        if !(b["repos"] as? [String: Any] ?? [:]).isEmpty {
+            run["branches"] = b
+            let rs = fz["repos"] as? [String] ?? []
+            run["worktree"] = ["mode": "in_place", "repos": rs, "branch": "autopilot/" + id,
+                               "base": (b["repos"] as? [String: Any] ?? [:]).mapValues { (($0 as? [String: Any])?["base"] as? [String: Any])?["head"] ?? "" },
+                               "reason": reason + (rs.count > 1 ? " (저장소 \(rs.count)곳)" : "")]
+        }
+    }
+    if fz["worktree_mode"] as? String == "worktree" {
+        let (b, w, wtPath, repo, err) = startWorktree(fz, id: id, scope: scope)
+        if let err { fail("출발하지 않았습니다: \(err)") }
+        // ④ 작업 트리에서 precheck 가 통과하는지 본다. 실패하면 작업 트리를 지우고 원래 작업 트리로
+        var test = fz; remapToWorktree(&test, from: repo, to: wtPath)
+        var precheckFail: String?
+        if (test["units"] as? [[String: Any]] ?? []).contains(where: { ($0["precheck"] as? String ?? "").isEmpty == false }) {
+            let penv = worktreeCheckEnv(fz)
+            for (i, u) in (test["units"] as? [[String: Any]] ?? []).enumerated() {
+                guard let pc = u["precheck"] as? String, !pc.isEmpty, let cwd = u["cwd"] as? String else { continue }
+                if runCheckAt(pc, cwd: cwd, env: penv) != 0 { precheckFail = "단위 \(i + 1) 의 시험 환경 확인이 작업 트리에서 실패"; break }
+            }
+        }
+        if let pf = precheckFail {
+            rollbackBranches(b)
+            inPlace("따로 작업 트리의 \(pf)해 원래 작업 트리에서 돕니다")
+        } else {
+            fz = test; branches = b; run["branches"] = b; run["worktree"] = w
+        }
+    } else {
+        inPlace(fz["worktree_reason"] as? String ?? "원래 작업 트리에서 돕니다")
+    }
+    let frozenData = Data(jsonText(fz, pretty: true).utf8)
+    guard writePrivate(dir + "/pinned/frozen.json", frozenData) else { rollbackBranches(branches); fail("고정 설정을 쓰지 못했습니다") }
+    // 근거 묶음도 출발 때 사본을 떠 둔다(출발 뒤에 원본이 바뀌어도 단위가 받는 묶음은 같다). 단위를 시작할 때 units/<n>/context/ 로 넘긴다. context 는 바꾸지 않는다
     try? fm.removeItem(atPath: dir + "/pinned/context")
-    for (i, d) in (frozen["units"] as? [[String: Any]] ?? []).enumerated() {
+    for (i, d) in (fz["units"] as? [[String: Any]] ?? []).enumerated() {
         guard let src = d["context"] as? String else { continue }
         try? fm.createDirectory(atPath: dir + "/pinned/context", withIntermediateDirectories: true)
-        do { try fm.copyItem(atPath: src, toPath: dir + "/pinned/context/\(i + 1)") } catch { fail("단위 \(i + 1) 의 근거 묶음을 복사하지 못했습니다: \(error.localizedDescription)") }
+        do { try fm.copyItem(atPath: src, toPath: dir + "/pinned/context/\(i + 1)") } catch { rollbackBranches(branches); fail("단위 \(i + 1) 의 근거 묶음을 복사하지 못했습니다: \(error.localizedDescription)") }
     }
     // 프로젝트 자율주행 세트의 사본: 고정 설정에 넣은 글 그대로(보드·사람이 보는 자리. 엔진은 고정 설정의 글을 쓴다)
     try? fm.removeItem(atPath: dir + "/pinned/set")
-    if let set = frozen["set"] as? [String: Any], set["instruction"] != nil || set["spec"] != nil || set["stack"] != nil {
+    if let set = fz["set"] as? [String: Any], set["instruction"] != nil || set["spec"] != nil || set["stack"] != nil {
         mkdirPrivate(dir + "/pinned/set")
         if let t = set["instruction"] as? String { writePrivate(dir + "/pinned/set/autopilot.md", Data((t + "\n").utf8)) }
         if let t = set["spec"] as? String { writePrivate(dir + "/pinned/set/spec.md", Data(t.utf8)) }
         if let st = set["stack"] { writePrivate(dir + "/pinned/set/stack.json", Data((jsonText(st, pretty: true) + "\n").utf8)) }
     }
-    // 가지: 저장소마다 출발 가지에서 autopilot/<실행 id> 를 만들어 원래 작업 트리를 그 가지로 바꾼다. 하네스 사본은 바꾼 뒤에 뜬다
-    // (끝 검사도 작업 가지 위에서 재고, 출발 때 가지로 되돌리기는 끝 검사·기록 뒤에 한다 — 되돌리기가 하네스 파일을 바꿔 "바뀜"으로 잡히지 않게)
-    let (branches, branchError) = startBranches(frozen, id: id)
-    if let branchError { fail("출발하지 않았습니다: \(branchError)") }
-    if !(branches["repos"] as? [String: Any] ?? [:]).isEmpty {
-        run["branches"] = branches
-        let rs = frozen["repos"] as? [String] ?? []
-        run["worktree"] = ["mode": "in_place", "repos": rs, "branch": "autopilot/" + id,
-                           "base": (branches["repos"] as? [String: Any] ?? [:]).mapValues { (($0 as? [String: Any])?["base"] as? [String: Any])?["head"] ?? "" },
-                           "reason": "따로 작업 트리는 엔진에 아직 없어(다음 차례) 원래 작업 트리에서 돕니다" + (rs.count > 1 ? ". 저장소 묶음(\(rs.count)곳)" : "")]
-    }
-    // 하네스 사본과 지문: 단위 작업 폴더들의 저장소 뿌리마다, 엔진 전용 폴더(모델은 읽지 못함)에 둔다. 끝에 다시 재어 같은지 적는다
+    // 하네스 사본과 지문: 단위 작업 폴더들의 저장소 뿌리마다(따로 작업 트리면 작업 트리), 엔진 전용 폴더(모델은 읽지 못함)에 둔다. 끝에 다시 재어 같은지 적는다
     let ep = privateRoot(dev: dev) + "/" + id
     mkdirPrivate(privateRoot(dev: dev)); mkdirPrivate(ep)
-    let cwds = (frozen["units"] as? [[String: Any]] ?? []).compactMap { $0["cwd"] as? String }
+    let cwds = (fz["units"] as? [[String: Any]] ?? []).compactMap { $0["cwd"] as? String }
     run["harness"] = harnessSnapshot(harnessFolders(cwds), to: ep + "/harness")
-    run["set"] = setSummary(frozen)
+    run["set"] = setSummary(fz)
     let sha = sha256(frozenData)
     writeJSON(dir + "/queue.json", queue)
     run["state"] = "starting"; run["reason"] = "엔진을 띄우는 중입니다."
@@ -2950,15 +3245,23 @@ func statusBeforeStart(_ dir: String, _ run: [String: Any], dev devFlag: Bool) -
     out += "쓰기 범위: 단위마다 작업 폴더 + \((f["write_roots"] as? [String] ?? []).joined(separator: ", ").ifEmpty("(더 없음)")) + 단위 폴더 + 임시 폴더\n"
     out += "네트워크: \((f["network_allow"] as? [String] ?? defaultNetwork).joined(separator: ", ").ifEmpty("(없음)"))\((f["local_binding"] as? Bool ?? false) ? " · localhost 모든 포트 열림" : "")\n"
     out += "읽기 금지: \((f["read_deny"] as? [String] ?? []).count)곳 + 엔진 전용 뿌리(실제·시험 판), 모든 실행의 engine 폴더, 옛 뿌리(~/.claude/notifier/autopilot)\n"
-    // 어디서와 가지: 원래 작업 트리를 출발 가지에서 만든 autopilot/<실행 id> 로 바꿔 돈다(따로 작업 트리는 다음 차례)
+    // 어디서와 가지: 단일 저장소면 따로 작업 트리, 묶음·확인 실패면 원래 작업 트리를 출발 가지에서 만든 autopilot/<실행 id> 로 바꿔 돈다
     let id = (dir as NSString).lastPathComponent
+    let wtMode = f["worktree_mode"] as? String == "worktree"
+    out += "어디서: \(wtMode ? "따로 작업 트리(~/.claude-board/worktrees/\(id)/<저장소>/)" : "원래 작업 트리")\(f["worktree_reason"].map { " — \($0)" } ?? "")\n"
     for r in f["repos"] as? [String] ?? [] {
         let cur = currentBranch(r), base = baseBranch(f, r) ?? "?"
         let dirty = porcelain(r)
-        out += "가지: \(r) · 출발 가지 \(base)\(headOf(r, "refs/heads/" + base).map { "(\($0.prefix(7)))" } ?? "") 에서 autopilot/\(id) 를 만들어 원래 작업 트리를 바꿈 · 지금 \(cur ?? "가지 없음"), 끝나면 깨끗할 때 되돌림\n"
-        if !dirty.isEmpty { out += "  커밋 안 한 변경 \(dirty.count)개: 가지가 바뀌어도 이 변경은 작업 트리에 남고, 모델이 함께 커밋할 수 있습니다\n" }
-        if let b = baseBranch(f, r), let c = cur, b != c { out += "  지금 걸린 가지(\(c))가 출발 가지(\(b))와 다릅니다. 판정 미리 돌리기는 지금 자리에서 돌므로 결과가 다를 수 있습니다\n" }
+        if wtMode {
+            out += "가지: \(repoName(r)) · 출발 가지 \(base)\(headOf(r, "refs/heads/" + base).map { "(\($0.prefix(7)))" } ?? "") 에서 autopilot/\(id) 를 만들어 따로 작업 트리에서 돕니다. 원래 작업 트리(지금 \(cur ?? "가지 없음"))는 그대로 둡니다\n"
+            if !dirty.isEmpty { out += "  원래 작업 트리의 커밋 안 한 변경 \(dirty.count)개: 이 변경은 자율주행에 들어가지 않습니다(작업 트리는 출발 가지의 마지막 커밋에서 시작)\n" }
+        } else {
+            out += "가지: \(repoName(r)) · 출발 가지 \(base)\(headOf(r, "refs/heads/" + base).map { "(\($0.prefix(7)))" } ?? "") 에서 autopilot/\(id) 를 만들어 원래 작업 트리를 바꿈 · 지금 \(cur ?? "가지 없음"), 끝나면 깨끗할 때 되돌림\n"
+            if !dirty.isEmpty { out += "  커밋 안 한 변경 \(dirty.count)개: 가지가 바뀌어도 이 변경은 작업 트리에 남고, 모델이 함께 커밋할 수 있습니다\n" }
+            if let b = baseBranch(f, r), let c = cur, b != c { out += "  지금 걸린 가지(\(c))가 출발 가지(\(b))와 다릅니다. 판정 미리 돌리기는 지금 자리에서 돌므로 결과가 다를 수 있습니다\n" }
+        }
     }
+    if let wf = f["worktree_files"] as? [Any], !wf.isEmpty { out += "작업 트리에 함께 둘 파일: \(wf.count)개\n" }
     if let t = f["tickets"] as? [String: Any], let names = t["branch_names"] as? [String: Any] {
         out += "Jira 가지: 스토리 \(names["story"] ?? "?") · 작업 \(names["task"] ?? "?") · 작업 → 스토리는 판정 통과 때 엔진이 \(t["merge"] as? String == "ff" ? "앞으로 감기로" : "병합 커밋으로")\n"
     }
@@ -3146,13 +3449,35 @@ func cmdPrerun(_ args: [String]) -> Never {
     let e = Engine(dir)
     e.cfg = f; e.defs = f["units"] as? [[String: Any]] ?? []; e.queue = queue
     e.setupEnv()
+    let id = (dir as NSString).lastPathComponent
     var whereNotes: [[String: Any]] = []
-    for r in f["repos"] as? [String] ?? [] {
-        let cur = currentBranch(r), base = baseBranch(f, r)
-        let same = base != nil && cur == base && headOf(r, "HEAD") == headOf(r, "refs/heads/" + (base ?? ""))
-        var w: [String: Any] = ["repo": r, "on": cur ?? NSNull(), "base": base ?? NSNull(), "same": same]
-        if !same { w["note"] = "지금 걸린 가지(\(cur ?? "가지 없음"))에서 돌렸습니다. 출발 가지(\(base ?? "?"))와 다르면 결과가 다를 수 있습니다" }
-        whereNotes.append(w)
+    // 따로 작업 트리 모드면 출발 기준(고른 출발 가지)의 임시 분리 작업 트리에서 돌린다(설계 4장 prerun). 끝에 지운다. 명령 글은 바꾸지 않는다(cwd 만)
+    var tempWt: (repo: String, path: String)?
+    if f["worktree_mode"] as? String == "worktree", let r = (f["repos"] as? [String])?.first, let base = baseBranch(f, r) {
+        let wtp = home + "/.claude-board/worktrees/.prerun-" + id
+        mkdirPrivate(home + "/.claude-board"); mkdirPrivate(home + "/.claude-board/worktrees")
+        try? fm.removeItem(atPath: wtp); _ = gitRun(["worktree", "prune"], cwd: r)
+        if gitRun(["worktree", "add", "--detach", wtp, base], cwd: r).code == 0 {
+            tempWt = (r, wtp)
+            for item in f["worktree_files"] as? [Any] ?? [] {
+                let path = (item as? String) ?? ((item as? [String: Any])?["path"] as? String) ?? ""
+                guard !path.isEmpty, !path.hasPrefix("/"), !path.contains(".."), fm.fileExists(atPath: r + "/" + path) else { continue }
+                try? fm.createDirectory(atPath: ((wtp + "/" + path) as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+                try? fm.copyItem(atPath: r + "/" + path, toPath: wtp + "/" + path)
+            }
+            e.defs = e.defs.map { var d = $0; if let c = d["cwd"] as? String { d["cwd"] = c == r ? wtp : (c.hasPrefix(r + "/") ? wtp + String(c.dropFirst(r.count)) : c) }; return d }
+            whereNotes.append(["repo": r, "base": base, "same": true, "note": "따로 작업 트리(출발 가지 \(base) 기준)의 임시 작업 트리에서 돌렸습니다"])
+        } else {
+            whereNotes.append(["repo": r, "base": base, "same": false, "note": "임시 작업 트리를 만들지 못해 지금 자리에서 돌렸습니다"])
+        }
+    } else {
+        for r in f["repos"] as? [String] ?? [] {
+            let cur = currentBranch(r), base = baseBranch(f, r)
+            let same = base != nil && cur == base && headOf(r, "HEAD") == headOf(r, "refs/heads/" + (base ?? ""))
+            var w: [String: Any] = ["repo": r, "on": cur ?? NSNull(), "base": base ?? NSNull(), "same": same]
+            if !same { w["note"] = "지금 걸린 가지(\(cur ?? "가지 없음"))에서 돌렸습니다. 출발 가지(\(base ?? "?"))와 다르면 결과가 다를 수 있습니다" }
+            whereNotes.append(w)
+        }
     }
     let out = dir + "/prerun"
     try? fm.removeItem(atPath: out)
@@ -3189,6 +3514,10 @@ func cmdPrerun(_ args: [String]) -> Never {
             say("실패(종료 코드 \(r.code)\(r.timedOut ? ", 시간 상한" : ""), \(dur(r.sec))). 일하기 전이라 맞습니다")
         }
     }
+    if let tw = tempWt {   // 임시 작업 트리를 지운다
+        _ = gitRun(["worktree", "remove", "--force", tw.path], cwd: tw.repo)
+        _ = gitRun(["worktree", "prune"], cwd: tw.repo); try? fm.removeItem(atPath: tw.path)
+    }
     writeJSON(dir + "/prerun.json", ["at": r3(now()), "where": whereNotes, "units": units, "already_passing": passing, "cards": cards])
     print("결과: \(dir)/prerun.json (일하기 전부터 통과 \(passing.count)개)")
     exit(0)
@@ -3200,6 +3529,18 @@ func cmdPrerun(_ args: [String]) -> Never {
 //   discard [--story <키>]               어느 단계도 합치기 전에만 자율주행 가지(또는 그 스토리의 스토리·작업 가지)를 지운다
 // 합치기는 받는 가지가 그대로면 앞으로 감기, 앞서 나갔으면 병합 커밋(merge-tree 로 체크아웃 없이), 충돌이면 하지 않는다. 받는 가지가 어느 작업 트리에
 // 걸려 있으면 그 작업 트리가 깨끗할 때만 그 자리에서 앞으로 감기(ff-only)로 올리고, 아니면 하지 않는다
+// 따로 작업 트리 모드에서 엔진이 만든 작업 트리를 지우고 prune 한다(합친 뒤·버린 뒤). 커밋 안 한 변경이 있으면 force 없이는 지우지 않고 까닭을 돌려준다
+func finishWorktreeRemove(_ r: String, _ info: [String: Any], force: Bool) -> String? {
+    guard let i = info[r] as? [String: Any], let w = i["work_tree"] as? String, isDir(w) else { return nil }
+    let rm = gitRun(["worktree", "remove"] + (force ? ["--force"] : []) + [w], cwd: r)
+    guard rm.code == 0 else { return "작업 트리(\(w))를 지우지 못했습니다(커밋하지 않은 변경이 있을 수 있음): \(firstLine(rm.out))" }
+    _ = gitRun(["worktree", "prune"], cwd: r)
+    let base = (w as NSString).deletingLastPathComponent
+    if (try? fm.contentsOfDirectory(atPath: base))?.isEmpty == true { try? fm.removeItem(atPath: base) }
+    print("  작업 트리를 지웠습니다: \(w)")
+    return nil
+}
+
 func cmdFinish(_ args: [String]) -> Never {
     guard args.count >= 2 else { usage() }
     let dir = runDir(args[0])
@@ -3247,6 +3588,8 @@ func cmdFinish(_ args: [String]) -> Never {
             fail("\(after) 에 먼저 합쳐야 \(into) 에 합칠 수 있습니다(승격 차례).")
         }
         promoted += mergeRefs(label, refs, into, id: id)
+        // 합친 뒤 따로 작업 트리를 지운다(깨끗할 때만, 커밋 안 한 변경이 있으면 지우지 않고 알린다). 가지는 남아 다음 승격에 쓰인다
+        for r in Set(refs.map { $0.repo }) { if let note = finishWorktreeRemove(r, info, force: false) { print("  " + note) } }
     case "promote":
         guard let into, rest.count == 1 else { usage() }
         let from = rest[0]
@@ -3263,9 +3606,15 @@ func cmdFinish(_ args: [String]) -> Never {
             let defs = (readJSON(dir + "/pinned/frozen.json") as? [String: Any])?["units"] as? [[String: Any]] ?? []
             for d in defs where d["story"] as? String == k { if let t = d["branch"] as? String, branchExists(r, t) { del.append((r, t)) } }
         }
+        // 엔진 자신의 작업 트리에 걸린 가지는 먼저 작업 트리를 지워(force) 떼어 내면 된다. 다른 작업 트리에 걸린 것만 거부
         var bad: [String] = []
-        for (r, x) in del { if let wt = checkedOut(r)[x] { bad.append("\(x) 가 작업 트리(\(wt))에 걸려 있습니다. 다른 가지로 바꾼 뒤 다시 하세요") } }
+        for (r, x) in del {
+            if let wt = checkedOut(r)[x], wt != (info[r] as? [String: Any])?["work_tree"] as? String {
+                bad.append("\(x) 가 작업 트리(\(wt))에 걸려 있습니다. 다른 가지로 바꾼 뒤 다시 하세요")
+            }
+        }
         if !bad.isEmpty { fail("버리지 않았습니다:\n" + bad.map { "  - " + $0 }.joined(separator: "\n")) }
+        for r in Set(del.map { $0.repo }) { if let note = finishWorktreeRemove(r, info, force: true) { print("  " + note) } }
         var gone: [[String: Any]] = []
         if !del.contains(where: { branchExists($0.repo, $0.branch) }) { print("  지울 가지가 없습니다(이미 버렸거나 지워짐).") }
         for (r, x) in del where branchExists(r, x) {

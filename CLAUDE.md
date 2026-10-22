@@ -69,6 +69,7 @@ Claude Code hook ──> state.py  ──> ~/.claude/notifier/sessions/<session_
 | `~/.claude/sessions/<pid>.json` (이 폴더 밖, `name`·`status` …) | Claude Code (도는 세션마다, 끝나면 지움) | 보드 (카드 세션 이름 라벨·탭 줄 이름, 이름 바꾸기 전 승인 창 확인 `status`) |
 | `/tmp/.claude-usage-cache.json` | 보드·상태줄 스크립트(·자율주행 엔진이 사용량 API 를 부를 때)가 함께 씀 | 보드, 자율주행 엔진(멈출 선) |
 | (이 폴더 밖) `~/Library/Application Support/Claude Board/autopilot/runs/<실행 id>/`(시험 빌드는 `Claude Board Dev`, 엔진 전용 `…/autopilot/private/<실행 id>/`, 실행 기록 저장소 `…/autopilot/private/records.sqlite`) — `run.json`·`queue.json`·`control.json`·`events.jsonl`·`units/<n>/{result,engine}.json` … 자세히는 `docs/자율주행/설계.md` 5장. `~/.claude` 는 Claude Code 보호 경로라 옮겼다 | 자율주행 엔진(`control.json` 은 보드, `result.json` 은 모델) | 보드(2단계), 엔진 |
+| (이 폴더 밖) `~/.claude-board/worktrees/<실행 id>/<저장소>/` — 단일 저장소를 따로 작업 트리에서 돌릴 때 엔진이 만드는 작업 트리(경로에 공백 없게 실행 폴더 뿌리 밖). `start` 가 만들고 `finish`(합친 뒤·버린 뒤)·제거 도구가 지운다. 모델 쓰기 범위이므로 비밀을 두지 않는다 | 자율주행 엔진 | 모델(작업 트리 세션), 엔진 |
 
 ### 실행 파일
 
