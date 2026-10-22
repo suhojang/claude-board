@@ -5,10 +5,13 @@
 // 사용법: claude-autopilot start <실행 폴더> [--dev]                 run.json·queue.json 확인 → 고정 사본 → LaunchAgent 올리기
 //        claude-autopilot run <실행 폴더> <고정 설정 해시>            launchd 가 부르는 본체(해시는 start 가 LaunchAgent 인자로 넣는다)
 //        claude-autopilot control <실행 폴더> pause|resume|stop      control.json 쓰기(보드도 같은 파일을 쓴다)
-//        claude-autopilot status <실행 폴더>                        사람이 읽는 한 화면 요약
+//        claude-autopilot status <실행 폴더> [--dev]                  사람이 읽는 한 화면 요약
+//        claude-autopilot records import [--dev|--db <파일>] [--project <이름>] [--unit-key <칸 경로>] <원본…>
+//                                                                   실행 기록 저장소(SQLite)에 실행 폴더·일반 꼴 대기열을 옮겨 담기
 import Foundation
 import Darwin
 import CryptoKit
+import SQLite3
 
 // MARK: - 공통 도구
 
@@ -146,6 +149,16 @@ func uid() -> String { String(getuid()) }
 // 자율주행 폴더 뿌리: ~/.claude 는 Claude Code 의 보호 경로라 Write·Edit 도구가 단위 폴더에 못 쓴다(실측) — Application Support 아래에 둔다
 func autopilotRoot(dev: Bool) -> String { home + "/Library/Application Support/" + (dev ? "Claude Board Dev" : "Claude Board") + "/autopilot" }
 func privateRoot(dev: Bool) -> String { autopilotRoot(dev: dev) + "/private" }
+// 프로젝트 자율주행 세트(지시 autopilot.md, 주제로 시작이면 spec.md·stack.json)의 지금 판. 엔진 전용 뿌리 아래라 모델은 읽지도 쓰지도 못한다
+func setDir(project: String, dev: Bool) -> String { privateRoot(dev: dev) + "/projects/\(project)/set" }
+// 실행을 넘어 쌓이는 기록(설계 5장 7절). 엔진들이 함께 쓰고 보드는 읽기 전용으로 연다
+func recordsPath(dev: Bool) -> String { privateRoot(dev: dev) + "/records.sqlite" }
+func validName(_ s: String) -> Bool { s.range(of: "^[A-Za-z0-9._-]+$", options: .regularExpression) != nil }
+func isLink(_ p: String) -> Bool { (try? fm.attributesOfItem(atPath: p)[.type] as? FileAttributeType) == .typeSymbolicLink }
+func mkdirPrivate(_ p: String) {
+    try? fm.createDirectory(atPath: p, withIntermediateDirectories: true)
+    chmod(p, 0o700)
+}
 
 // 엔진 자신이 부르는 git: 저장소 설정의 fsmonitor·hooks 를 쓰지 않고 시스템·전역 설정도 읽지 않는다
 func safeGit(_ args: [String], cwd: String) -> String {
@@ -476,6 +489,496 @@ let harnessEntries = ["CLAUDE.md", ".mcp.json", ".claude/CLAUDE.md", ".claude/se
                       ".git/modules/*/hooks", ".git/modules/*/config", ".git/modules/*/config.worktree", ".git/modules/*/info",
                       ".git/modules/*/objects/info/alternates"]
 
+// MARK: - 사용자 하네스 사본과 지문
+
+// 저장소의 하네스(CLAUDE.md·CLAUDE.local.md·.mcp.json·.claude/)는 출발 준비·실행·끝 어디서도 고치지 않는다(설계 2장 끝).
+// 출발 때 엔진 전용 폴더에 사본과 지문을 남기고, 끝에 다시 재어 같은지만 적는다. 다르면 사람이 고쳤을 수 있어 되돌리지 않는다
+let harnessNames: Set<String> = ["CLAUDE.md", "CLAUDE.local.md", ".mcp.json"]
+let harnessWalkSkip: Set<String> = [".git", "node_modules", "build", ".gradle", "target", "dist", "out", ".idea", ".build", "DerivedData", "Pods", ".venv"]
+
+struct HarnessScan {
+    var files: [[String: Any]] = []     // [{folder, path, sha256, size}] — path 는 폴더 안 상대 경로
+    var claudeDirs: [String] = []       // 있는 .claude 폴더(절대 경로)
+    var ccWrites: [String] = []         // 있는 .claude/.cc-writes 폴더(절대 경로)
+    var base: String {                  // 지문 전체의 sha256(경로·sha256·크기 줄을 차례로)
+        sha256(Data(files.map { "\($0["folder"] ?? "")\t\($0["path"] ?? "")\t\($0["sha256"] ?? "")\t\($0["size"] ?? "")\n" }.joined().utf8))
+    }
+}
+
+// 폴더마다 깊이 4 까지 내려가며 하네스 파일을 모은다. `.claude/` 는 안을 모두 담되 worktrees/(작업 트리)·.cc-writes/(claude 의 임시 자리)는 뺀다
+func scanHarness(_ folders: [String]) -> HarnessScan {
+    var s = HarnessScan()
+    func add(_ folder: String, _ rel: String) {
+        let p = folder + "/" + rel
+        guard let d = fm.contents(atPath: p) else { return }
+        s.files.append(["folder": folder, "path": rel, "sha256": sha256(d), "size": d.count])
+    }
+    for folder in folders {
+        var level = [""], depth = 0
+        while !level.isEmpty, depth <= 4 {
+            var next: [String] = []
+            for rel in level {
+                let d = rel.isEmpty ? folder : folder + "/" + rel
+                for name in ((try? fm.contentsOfDirectory(atPath: d)) ?? []).sorted() {
+                    let r = rel.isEmpty ? name : rel + "/" + name
+                    let p = folder + "/" + r
+                    if name == ".claude", isDir(p), !isLink(p) {
+                        s.claudeDirs.append(p)
+                        if isDir(p + "/.cc-writes") { s.ccWrites.append(p + "/.cc-writes") }
+                        // worktrees/ 안은 프로젝트 흐름이 만든 git 작업 트리(빌드 결과까지)일 수 있어 내려가지 않는다
+                        var inner: [String] = []
+                        if let en = fm.enumerator(atPath: p) {
+                            while let x = en.nextObject() as? String {
+                                if x == "worktrees" || x == ".cc-writes" { en.skipDescendants(); continue }
+                                inner.append(x)
+                            }
+                        }
+                        for f in inner.sorted() where !isDir(p + "/" + f) { add(folder, r + "/" + f) }
+                    } else if harnessNames.contains(name), !isDir(p) {
+                        add(folder, r)
+                    } else if isDir(p), !isLink(p), !harnessWalkSkip.contains(name) {
+                        next.append(r)
+                    }
+                }
+            }
+            level = next; depth += 1
+        }
+    }
+    return s
+}
+
+// 단위 작업 폴더들의 저장소 뿌리(저장소가 아니면 그 폴더). 같은 뿌리는 한 번만
+func harnessFolders(_ cwds: [String]) -> [String] {
+    var out: [String] = []
+    for c in cwds {
+        let top = safeGit(["rev-parse", "--show-toplevel"], cwd: c).trimmingCharacters(in: .whitespacesAndNewlines)
+        let f = top.hasPrefix("/") && isDir(top) ? canonical(top) : c
+        if !out.contains(f) { out.append(f) }
+    }
+    return out
+}
+
+// 출발 때: 사본(<엔진 전용 폴더>/harness/<폴더 번호>/<상대 경로>)과 지문(manifest.json)을 남기고 run.json 에 넣을 요약을 돌려준다
+func harnessSnapshot(_ folders: [String], to dir: String) -> [String: Any] {
+    try? fm.removeItem(atPath: dir)
+    mkdirPrivate(dir)
+    let s = scanHarness(folders)
+    for f in s.files {
+        guard let folder = f["folder"] as? String, let rel = f["path"] as? String, let i = folders.firstIndex(of: folder) else { continue }
+        let dst = dir + "/\(i + 1)/" + rel
+        try? fm.createDirectory(atPath: (dst as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+        if let d = fm.contents(atPath: folder + "/" + rel) { writePrivate(dst, d) }
+    }
+    let manifest: [String: Any] = ["folders": folders, "files": s.files, "claude_dirs": s.claudeDirs, "cc_writes": s.ccWrites,
+                                   "base": s.base, "at": r3(now())]
+    writePrivate(dir + "/manifest.json", Data(jsonText(manifest, pretty: true).utf8))
+    return ["base": s.base, "files": s.files.count, "folders": folders, "copy": dir]
+}
+
+// 끝에: 출발 때 없던 빈 .claude/.cc-writes 와 그것만 들어 있던 .claude 를 치우고, 다시 재어 출발 때와 견준다(사본·지문은 manifest 만 읽는다 — 고정 설정 없이도 된다)
+func harnessCheck(manifestDir dir: String) -> [String: Any]? {
+    guard let m = readJSON(dir + "/manifest.json") as? [String: Any], let folders = m["folders"] as? [String] else { return nil }
+    let hadClaude = Set(m["claude_dirs"] as? [String] ?? []), hadCC = Set(m["cc_writes"] as? [String] ?? [])
+    var cleaned: [String] = []
+    for cc in scanHarness(folders).ccWrites where !hadCC.contains(cc) && (try? fm.contentsOfDirectory(atPath: cc))?.isEmpty == true {
+        guard rmdir(cc) == 0 else { continue }
+        cleaned.append(cc)
+        let parent = (cc as NSString).deletingLastPathComponent
+        if !hadClaude.contains(parent), (try? fm.contentsOfDirectory(atPath: parent))?.isEmpty == true, rmdir(parent) == 0 { cleaned.append(parent) }
+    }
+    let s = scanHarness(folders)
+    func key(_ f: [String: Any]) -> String { "\(f["folder"] ?? "")/\(f["path"] ?? "")" }
+    var before: [String: String] = [:], after: [String: String] = [:]
+    for f in m["files"] as? [[String: Any]] ?? [] { before[key(f)] = "\(f["sha256"] ?? "")" }
+    for f in s.files { after[key(f)] = "\(f["sha256"] ?? "")" }
+    var changed: [[String: Any]] = []
+    for (k, v) in before.sorted(by: { $0.key < $1.key }) {
+        if let a = after[k] { if a != v { changed.append(["path": k, "change": "changed"]) } } else { changed.append(["path": k, "change": "removed"]) }
+    }
+    for k in after.keys.sorted() where before[k] == nil { changed.append(["path": k, "change": "added"]) }
+    return ["same": changed.isEmpty, "changed": changed, "checked": r3(now()), "cleaned": cleaned, "end_base": s.base]
+}
+
+// MARK: - 실행 기록 저장소 (SQLite, 설계 5장 7절)
+
+// 실행을 넘어 쌓이는 기록. 엔진(여러 실행의 엔진이 함께)과 옮겨 담기가 쓰고 보드는 읽기 전용으로 연다. 자리는 엔진 전용 뿌리라 모델은 읽지 못한다.
+// 쓰기는 모두 같은 키로 덮어쓰는 upsert 라 같은 실행을 몇 번 옮겨도 행이 늘지 않고, 한 번 실패해도 다음 쓰기가 실행 폴더에서 다시 옮긴다
+struct DBError: Error, CustomStringConvertible {
+    let description: String
+    var busy = false
+}
+
+let SQLITE_TRANSIENT_ = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+
+final class RecordsDB {
+    private var db: OpaquePointer?
+    static let version: Int32 = 1
+    static let tables = ["projects", "runs", "units", "queue_items", "cards", "carry", "sets", "tickets", "imports"]
+    static let schemaV1 = """
+    CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT NOT NULL, root TEXT UNIQUE, kind TEXT, repos TEXT, created REAL, updated REAL);
+    CREATE TABLE runs (id TEXT PRIMARY KEY, project_id TEXT, title TEXT, source TEXT, continues TEXT, state TEXT, reason TEXT, model TEXT,
+      effort TEXT, dev INTEGER, started REAL, ended REAL, units_total INTEGER, units_done INTEGER, units_failed INTEGER, units_capped INTEGER,
+      units_stopped INTEGER, active_sec REAL, cost_usd REAL, weekly_pp REAL, worktree TEXT, branches TEXT, harness TEXT, set_id TEXT,
+      epic TEXT, run_dir TEXT, origin TEXT, updated REAL);
+    CREATE INDEX runs_project ON runs(project_id);
+    CREATE TABLE units (run_id TEXT NOT NULL, n INTEGER NOT NULL, unit_id TEXT, title TEXT, kind TEXT, source_key TEXT, story_key TEXT,
+      task_key TEXT, branch TEXT, status TEXT, merged TEXT, est_min REAL, est_basis TEXT, active_sec REAL, cost_usd REAL, weekly_pp REAL,
+      turns INTEGER, tries INTEGER, check_exit INTEGER, denials TEXT, result TEXT, model TEXT, started REAL, ended REAL, PRIMARY KEY (run_id, n));
+    CREATE INDEX units_source ON units(source_key);
+    CREATE TABLE queue_items (project_id TEXT NOT NULL, source_key TEXT NOT NULL, title TEXT, kind TEXT, grp TEXT, est_min REAL, est_basis TEXT,
+      depends TEXT, needs TEXT, state TEXT, done_run TEXT, done_unit INTEGER, origin TEXT, story_key TEXT, task_key TEXT, note TEXT,
+      added REAL, updated REAL, PRIMARY KEY (project_id, source_key));
+    CREATE TABLE cards (run_id TEXT NOT NULL, card_id TEXT NOT NULL, def TEXT, answer TEXT, policy INTEGER, answered REAL, PRIMARY KEY (run_id, card_id));
+    CREATE TABLE carry (id TEXT PRIMARY KEY, run_id TEXT, unit_n INTEGER, kind TEXT, title TEXT, why TEXT, state TEXT, used_run TEXT);
+    CREATE INDEX carry_run ON carry(run_id);
+    CREATE TABLE sets (id TEXT PRIMARY KEY, project_id TEXT, digest TEXT UNIQUE, instruction TEXT, spec TEXT, stack TEXT, checks TEXT, harness TEXT,
+      worktree_files TEXT, parent_id TEXT, origin TEXT, created REAL);
+    CREATE TABLE tickets (project_id TEXT NOT NULL, key TEXT NOT NULL, kind TEXT, parent_key TEXT, title TEXT, url TEXT, source_key TEXT,
+      created_run TEXT, created REAL, PRIMARY KEY (project_id, key));
+    CREATE TABLE imports (path TEXT NOT NULL, sha256 TEXT NOT NULL, rows INTEGER, at REAL, PRIMARY KEY (path, sha256));
+    """
+
+    init(_ path: String) throws {
+        let fresh = !fm.fileExists(atPath: path)
+        try? fm.createDirectory(atPath: (path as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+        guard sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK else {
+            let m = db.map { String(cString: sqlite3_errmsg($0)) } ?? "?"
+            sqlite3_close_v2(db); db = nil
+            throw DBError(description: "열지 못함(\(m))")
+        }
+        if fresh { chmod(path, 0o600) }
+        sqlite3_busy_timeout(db, 5000)   // 다른 엔진이 쓰는 중이면 5초까지 기다린다(그 뒤는 transaction 이 다시 한다)
+        try exec("PRAGMA journal_mode=WAL")
+        let v = Int32(try rows("PRAGMA user_version").first.flatMap { num($0[0]) } ?? 0)
+        if v > RecordsDB.version { throw DBError(description: "저장소 판(\(v))이 이 엔진이 아는 판(\(RecordsDB.version))보다 새롭습니다. 보드를 업데이트하세요") }
+        if v < 1 {
+            try transaction {
+                // 다른 엔진이 먼저 만들었을 수 있다 — 잠금을 잡은 뒤 다시 본다
+                if (try rows("PRAGMA user_version").first.flatMap { num($0[0]) } ?? 0) < 1 {
+                    try exec(RecordsDB.schemaV1)
+                    try exec("PRAGMA user_version=1")
+                }
+            }
+        }
+    }
+    deinit { close() }
+    // 마지막 연결이 닫힐 때 SQLite 가 WAL 을 본 파일로 접는다. exit 앞에서는 deinit 이 불리지 않아 직접 닫는다
+    func close() { if db != nil { sqlite3_close_v2(db); db = nil } }
+
+    private func err(_ rc: Int32) -> DBError {
+        DBError(description: String(cString: sqlite3_errmsg(db)), busy: rc == SQLITE_BUSY || rc == SQLITE_LOCKED || (rc & 0xff) == SQLITE_BUSY)
+    }
+
+    func exec(_ sql: String) throws {
+        let rc = sqlite3_exec(db, sql, nil, nil, nil)
+        guard rc == SQLITE_OK else { throw err(rc) }
+    }
+
+    private func prepare(_ sql: String, _ args: [Any?]) throws -> OpaquePointer? {
+        var st: OpaquePointer?
+        let rc = sqlite3_prepare_v2(db, sql, -1, &st, nil)
+        guard rc == SQLITE_OK else { throw err(rc) }
+        for (i, a) in args.enumerated() {
+            let k = Int32(i + 1)
+            switch a {
+            case nil: sqlite3_bind_null(st, k)
+            case let s as String: sqlite3_bind_text(st, k, s, -1, SQLITE_TRANSIENT_)
+            case let b as Bool: sqlite3_bind_int64(st, k, b ? 1 : 0)
+            case let x as Int: sqlite3_bind_int64(st, k, Int64(x))
+            case let x as Double: sqlite3_bind_double(st, k, x)
+            default: sqlite3_bind_null(st, k)
+            }
+        }
+        return st
+    }
+
+    @discardableResult
+    func run(_ sql: String, _ args: [Any?] = []) throws -> Int {
+        let st = try prepare(sql, args)
+        defer { sqlite3_finalize(st) }
+        var rc = sqlite3_step(st)
+        while rc == SQLITE_ROW { rc = sqlite3_step(st) }
+        guard rc == SQLITE_DONE else { throw err(rc) }
+        return Int(sqlite3_changes(db))
+    }
+
+    func rows(_ sql: String, _ args: [Any?] = []) throws -> [[Any?]] {
+        let st = try prepare(sql, args)
+        defer { sqlite3_finalize(st) }
+        var out: [[Any?]] = []
+        var rc = sqlite3_step(st)
+        while rc == SQLITE_ROW {
+            out.append((0..<sqlite3_column_count(st)).map { c -> Any? in
+                switch sqlite3_column_type(st, c) {
+                case SQLITE_INTEGER: return Int(sqlite3_column_int64(st, c))
+                case SQLITE_FLOAT: return sqlite3_column_double(st, c)
+                case SQLITE_TEXT: return String(cString: sqlite3_column_text(st, c))
+                default: return nil
+                }
+            })
+            rc = sqlite3_step(st)
+        }
+        guard rc == SQLITE_DONE else { throw err(rc) }
+        return out
+    }
+
+    // 쓰기 잠금을 먼저 잡고(BEGIN IMMEDIATE) 한 번에 쓴다. 다른 엔진과 겹쳐 잠겨 있으면 조금 쉬었다 다섯 번까지 다시 한다
+    func transaction(_ body: () throws -> Void) throws {
+        var tries = 0
+        while true {
+            do {
+                try exec("BEGIN IMMEDIATE")
+                do { try body(); try exec("COMMIT"); return } catch { _ = try? exec("ROLLBACK"); throw error }
+            } catch let e as DBError where e.busy && tries < 5 {
+                tries += 1
+                usleep(useconds_t(300_000 * tries))
+            }
+        }
+    }
+
+    func count(_ table: String) -> Int { (try? rows("SELECT COUNT(*) FROM \(table)").first.flatMap { num($0[0]) }).flatMap { $0 }.map(Int.init) ?? -1 }
+}
+
+// 옮겨 담는 실행 하나
+struct RunSource {
+    var dir: String
+    var origin: String              // engine(엔진이 실행 중에) | import(records import)
+    var project: String?            // 옮겨 담기의 --project. 없으면 run.json·고정 설정의 project
+    var unitKey: String?            // 단위의 원천 항목 키를 queue.json 단위의 어느 칸에서 읽을지(점으로 잇는 경로). 없으면 source_key
+    var frozen: [String: Any]?      // 엔진은 자기가 읽은 고정 설정을 넘긴다. 없으면 pinned/frozen.json(없으면 queue.json)
+}
+
+func valueAt(_ path: String, _ o: [String: Any]) -> Any? {
+    var cur: Any? = o
+    for k in path.split(separator: ".") { cur = (cur as? [String: Any])?[String(k)] }
+    return cur
+}
+func jtext(_ v: Any?) -> String? {
+    guard let v, !(v is NSNull) else { return nil }
+    return v as? String ?? jsonText(v)
+}
+func inum(_ v: Any?) -> Int? { num(v).map { Int($0) } }
+func mtime(_ p: String) -> Double? { ((try? fm.attributesOfItem(atPath: p))?[.modificationDate] as? Date).map { r3($0.timeIntervalSince1970) } }
+
+// 폴더 여럿의 공통 조상. 홈이나 그 위가 되면 쓰지 않는다(프로젝트 작업 경로로는 너무 넓다)
+func commonRoot(_ paths: [String]) -> String? {
+    guard var parts = paths.first?.split(separator: "/").map(String.init) else { return nil }
+    for p in paths.dropFirst() {
+        let q = p.split(separator: "/").map(String.init)
+        var i = 0
+        while i < min(parts.count, q.count), parts[i] == q[i] { i += 1 }
+        parts = Array(parts.prefix(i))
+    }
+    let r = "/" + parts.joined(separator: "/")
+    return r == "/" || r == home || home.hasPrefix(r + "/") ? nil : r
+}
+
+// 판정 스크립트 지문(출발 때 고정한 pinned/checks/): 경로·sha256·크기와 글
+func checksFingerprint(_ dir: String) -> [[String: Any]] {
+    (fm.enumerator(atPath: dir)?.allObjects as? [String] ?? []).sorted().compactMap { rel in
+        let p = dir + "/" + rel
+        guard !isDir(p), let d = fm.contents(atPath: p) else { return nil }
+        var o: [String: Any] = ["path": rel, "sha256": sha256(d), "size": d.count]
+        if d.count <= 200_000, let t = String(data: d, encoding: .utf8) { o["text"] = t }
+        return o
+    }
+}
+
+extension RecordsDB {
+    // 프로젝트 행. 작업 경로(root)는 대기열 파일·run.json 이 적은 값이 이기고, 없으면 처음 정한 값을 둔다(처음이면 저장소들의 공통 조상)
+    func upsertProject(_ id: String, explicitRoot: String?, repos: [String]) throws {
+        let old = try rows("SELECT root, repos FROM projects WHERE id=?", [id]).first
+        let oldRoot = old.flatMap { $0[0] as? String }
+        var all = old.flatMap { $0[1] as? String }.flatMap { (try? JSONSerialization.jsonObject(with: Data($0.utf8))) as? [String] } ?? []
+        for x in repos where !all.contains(x) { all.append(x) }
+        var root = explicitRoot.map { canonical($0) } ?? oldRoot ?? commonRoot(all) ?? all.first
+        if let r = root, try !rows("SELECT id FROM projects WHERE root=? AND id<>?", [r, id]).isEmpty { root = oldRoot }   // 다른 프로젝트의 자리
+        let t = r3(now())
+        try run("""
+            INSERT INTO projects(id,name,root,kind,repos,created,updated) VALUES(?,?,?,?,?,?,?)
+            ON CONFLICT(id) DO UPDATE SET root=excluded.root, kind=excluded.kind, repos=excluded.repos, updated=excluded.updated
+            """, [id, id, root, all.count > 1 ? "bundle" : "single", jsonText(all), t, t])
+    }
+
+    // 실행 폴더 하나를 runs·units·cards·carry(와 projects·sets, 끝난 단위의 대기열 항목 상태)로 옮긴다. 쓴 행 수를 돌려준다
+    func syncRun(_ src: RunSource) throws -> Int {
+        let dir = src.dir
+        guard let r = readJSON(dir + "/run.json") as? [String: Any], let q = readJSON(dir + "/queue.json") as? [[String: Any]] else {
+            throw DBError(description: "run.json·queue.json 을 읽지 못했습니다(\(dir))")
+        }
+        let f = src.frozen ?? (readJSON(dir + "/pinned/frozen.json") as? [String: Any]) ?? [:]
+        let defs = (f["units"] as? [[String: Any]]).flatMap { $0.count == q.count ? $0 : nil }
+        func def(_ i: Int) -> [String: Any] { defs?[i] ?? q[i] }
+        let runId = (dir as NSString).lastPathComponent
+        let project = src.project ?? (f["project"] as? String) ?? (r["project"] as? String)
+        let t = r3(now())
+        var written = 0
+        var eng: [Int: [String: Any]] = [:], resText: [Int: String] = [:]
+        for i in q.indices {
+            if let e = readJSON(dir + "/units/\(i + 1)/engine.json") as? [String: Any] { eng[i + 1] = e }
+            if let d = fm.contents(atPath: dir + "/units/\(i + 1)/result.json") { resText[i + 1] = String(decoding: d, as: UTF8.self) }
+        }
+        if let project {
+            let cwds = q.indices.compactMap { def($0)["cwd"] as? String }
+            // 저장소 목록: 엔진이 출발 때 찾은 저장소 뿌리(하네스 폴더), 옮겨 담는 옛 실행은 단위 작업 폴더(저장소를 열어 보지 않는다)
+            var folders = (r["harness"] as? [String: Any])?["folders"] as? [String] ?? []
+            for c in cwds where !folders.contains(where: { c == $0 || c.hasPrefix($0 + "/") }) { folders.append(c) }
+            try upsertProject(project, explicitRoot: (f["project_root"] ?? r["project_root"]) as? String, repos: folders)
+            written += 1
+        }
+        // 이 실행이 쓴 자율주행 세트(같은 판은 한 줄): 지시·명세·기술 스택·판정 스크립트로 판을 가른다. 하네스 지문은 그 판을 처음 쓴 실행의 것을
+        // 기준으로 남긴다(실행마다의 하네스는 runs.harness — 저장소가 다르거나 사람이 설정을 고쳐도 같은 지시가 새 판이 되지 않게)
+        var setId: String?
+        if let set = f["set"] as? [String: Any], set["instruction"] != nil || set["spec"] != nil || set["stack"] != nil {
+            let checks = checksFingerprint(dir + "/pinned/checks")
+            let harness = r["harness"] as? [String: Any]
+            let parts = [set["instruction"] as? String ?? "", set["spec"] as? String ?? "", jtext(set["stack"]) ?? "", jsonText(checks)]
+            let digest = sha256(Data(parts.joined(separator: "\u{0}").utf8))
+            let id = String(digest.prefix(16))
+            let parent = try project.flatMap { try rows("SELECT id FROM sets WHERE project_id=? AND id<>? ORDER BY created DESC LIMIT 1", [$0, id]).first?[0] as? String }
+            written += try run("""
+                INSERT INTO sets(id,project_id,digest,instruction,spec,stack,checks,harness,worktree_files,parent_id,origin,created)
+                VALUES(?,?,?,?,?,?,?,?,NULL,?,NULL,?) ON CONFLICT(id) DO NOTHING
+                """, [id, project, digest, set["instruction"] as? String, set["spec"] as? String, jtext(set["stack"]),
+                      checks.isEmpty ? nil : jsonText(checks), harness.map { jsonText($0) }, parent, t])
+            setId = id
+        }
+        let statuses = q.map { $0["status"] as? String ?? "pending" }
+        func cnt(_ s: String) -> Int { statuses.filter { $0 == s }.count }
+        var act = 0.0, cost = 0.0, pp = 0.0
+        for e in eng.values { act += num(e["active_sec"]) ?? 0; cost += num(e["cost_usd"]) ?? 0; pp += num(e["weekly_pp"]) ?? 0 }
+        let model = f["model"] as? String ?? r["model"] as? String
+        let runCols: [Any?] = [
+            runId, project, (f["title"] ?? r["title"]) as? String, jtext(r["source"]), jtext(r["continues"]), r["state"] as? String, r["reason"] as? String,
+            model, (f["effort"] ?? r["effort"]) as? String, (r["dev"] as? Bool).map { $0 ? 1 : 0 }, num(r["started"]), num(r["ended"]),
+            q.count, cnt("done"), cnt("failed"), cnt("capped"), cnt("stopped"), r3(act), r3(cost), r3(pp),
+            jtext(r["worktree"]), jtext(r["branches"]), jtext(r["harness"]), setId, jtext(r["epic"]), dir, src.origin, t]
+        written += try run("""
+            INSERT INTO runs(id,project_id,title,source,continues,state,reason,model,effort,dev,started,ended,units_total,units_done,units_failed,
+              units_capped,units_stopped,active_sec,cost_usd,weekly_pp,worktree,branches,harness,set_id,epic,run_dir,origin,updated)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id, title=excluded.title, source=excluded.source, continues=excluded.continues,
+              state=excluded.state, reason=excluded.reason, model=excluded.model, effort=excluded.effort, dev=excluded.dev, started=excluded.started,
+              ended=excluded.ended, units_total=excluded.units_total, units_done=excluded.units_done, units_failed=excluded.units_failed,
+              units_capped=excluded.units_capped, units_stopped=excluded.units_stopped, active_sec=excluded.active_sec, cost_usd=excluded.cost_usd,
+              weekly_pp=excluded.weekly_pp, worktree=excluded.worktree, branches=excluded.branches, harness=excluded.harness,
+              set_id=COALESCE(excluded.set_id, runs.set_id), epic=excluded.epic, run_dir=excluded.run_dir, updated=excluded.updated
+            """, runCols)
+        for (i, qq) in q.enumerated() {
+            let n = i + 1, d = def(i), e = eng[n] ?? [:]
+            let result = resText[n].flatMap { (try? JSONSerialization.jsonObject(with: Data($0.utf8))) as? [String: Any] }
+            var key = d["source_key"] as? String
+            if key == nil, let p = src.unitKey { key = valueAt(p, qq) as? String ?? valueAt(p, d) as? String }
+            var est = num(d["est_min"]), basis = d["est_basis"] as? String, kind = d["kind"] as? String
+            if let project, let key, let row = try rows("SELECT est_min, est_basis, kind FROM queue_items WHERE project_id=? AND source_key=?", [project, key]).first {
+                est = est ?? num(row[0]); basis = basis ?? row[1] as? String; kind = kind ?? row[2] as? String
+            }
+            kind = kind ?? (result?["unit"] as? [String: Any])?["kind"] as? String
+            let checks = e["checks"] as? [[String: Any]] ?? []
+            let status = qq["status"] as? String ?? "pending"
+            written += try run("""
+                INSERT INTO units(run_id,n,unit_id,title,kind,source_key,story_key,task_key,branch,status,merged,est_min,est_basis,active_sec,cost_usd,
+                  weekly_pp,turns,tries,check_exit,denials,result,model,started,ended)
+                VALUES(?,?,?,?,?,?,NULL,NULL,NULL,?,NULL,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(run_id,n) DO UPDATE SET unit_id=excluded.unit_id, title=excluded.title, kind=COALESCE(excluded.kind, units.kind),
+                  source_key=COALESCE(excluded.source_key, units.source_key), status=excluded.status, est_min=COALESCE(excluded.est_min, units.est_min),
+                  est_basis=COALESCE(excluded.est_basis, units.est_basis), active_sec=excluded.active_sec, cost_usd=excluded.cost_usd,
+                  weekly_pp=excluded.weekly_pp, turns=excluded.turns, tries=excluded.tries, check_exit=excluded.check_exit, denials=excluded.denials,
+                  result=excluded.result, model=excluded.model, started=excluded.started, ended=excluded.ended
+                """, [runId, n, d["id"] as? String ?? qq["id"] as? String, d["title"] as? String ?? qq["title"] as? String, kind, key, status, est, basis,
+                      num(e["active_sec"]), num(e["cost_usd"]), num(e["weekly_pp"]), inum(e["turns"]), inum(e["try"]),
+                      inum(checks.last?["exit"]), (e["denials"] as? [Any]).map { jsonText($0) }, resText[n], model,
+                      num(e["started"]), num(e["ended"])])
+            // 결과 기록의 미룬 사람 몫·새로 찾은 일(다음 출발 카드·대기열 후보). 고쳐 쓴 결과 기록에서 빠진 것은 아직 열린 것만 지운다
+            if let result {
+                var keep: [String] = []
+                for kindKey in ["next_start", "new_work"] {
+                    for (j, item) in (result[kindKey] as? [Any] ?? []).enumerated() {
+                        let o = item as? [String: Any] ?? ["title": "\(item)"]
+                        let cid = "\(runId)/\(n)/\(kindKey)/\(j + 1)"
+                        keep.append(cid)
+                        written += try run("""
+                            INSERT INTO carry(id,run_id,unit_n,kind,title,why,state,used_run) VALUES(?,?,?,?,?,?,'open',NULL)
+                            ON CONFLICT(id) DO UPDATE SET title=excluded.title, why=excluded.why
+                            """, [cid, runId, n, kindKey, jtext(o["title"]), jtext(o["why"])])
+                    }
+                }
+                for row in try rows("SELECT id FROM carry WHERE run_id=? AND unit_n=? AND state='open'", [runId, n]) {
+                    if let x = row[0] as? String, !keep.contains(x) { try run("DELETE FROM carry WHERE id=?", [x]) }
+                }
+            }
+            // 판정을 통과한 단위의 대기열 항목은 끝남으로
+            if let project, let key, status == "done" {
+                try run("""
+                    UPDATE queue_items SET state='done', done_run=?, done_unit=?, updated=?
+                    WHERE project_id=? AND source_key=? AND (state IS NOT 'done' OR done_run IS NOT ? OR done_unit IS NOT ?)
+                    """, [runId, n, t, project, key, runId, n])
+            }
+        }
+        // 출발 카드와 고른 답
+        let cardsAny = readJSON(dir + "/cards.json")
+        if let cards = cardsAny as? [[String: Any]] ?? (cardsAny as? [String: Any])?["cards"] as? [[String: Any]] {
+            let answers = readJSON(dir + "/answers.json") as? [String: Any] ?? [:]
+            let at = mtime(dir + "/answers.json")
+            for c in cards {
+                guard let cid = c["id"] as? String else { continue }
+                let a = jtext(answers[cid])
+                written += try run("""
+                    INSERT INTO cards(run_id,card_id,def,answer,policy,answered) VALUES(?,?,?,?,NULL,?)
+                    ON CONFLICT(run_id,card_id) DO UPDATE SET def=excluded.def, answer=excluded.answer, answered=excluded.answered
+                    """, [runId, cid, jsonText(c), a, a == nil ? nil : at])
+            }
+        }
+        return written
+    }
+
+    // 일반 꼴 대기열 파일(설계 5장 7절)을 queue_items 로. 프로젝트 전용 꼴은 그 프로젝트의 변환 스크립트가 이 꼴로 바꿔 넘긴다
+    static let queueStates: Set<String> = ["open", "done", "parked", "dropped", "board"]
+    func importQueue(_ path: String, project override: String?) throws -> Int {
+        guard let j = readJSON(path) as? [String: Any], j["format"] as? String == "claude-board-queue",
+              let items = j["items"] as? [[String: Any]] else {
+            throw DBError(description: "일반 꼴 대기열 파일이 아닙니다(format \"claude-board-queue\" 와 items 배열이 있어야 함)")
+        }
+        guard let project = override ?? j["project"] as? String, validName(project) else {
+            throw DBError(description: "프로젝트 이름이 없거나 꼴이 맞지 않습니다(파일의 project 또는 --project, 영문·숫자·.-_)")
+        }
+        var seen = Set<String>(), bad: [String] = []
+        for (i, it) in items.enumerated() {
+            guard let k = it["source_key"] as? String, !k.isEmpty, (it["title"] as? String ?? "").isEmpty == false else { bad.append("\(i + 1)번째 항목에 source_key·title 이 없음"); continue }
+            if !seen.insert(k).inserted { bad.append("source_key 가 겹침: \(k)") }
+            if let s = it["state"] as? String, !RecordsDB.queueStates.contains(s) { bad.append("\(k) 의 state(\(s))는 open·done·parked·dropped·board 가운데 하나") }
+        }
+        guard bad.isEmpty else { throw DBError(description: "고칠 것 \(bad.count)개: " + bad.prefix(5).joined(separator: "; ")) }
+        try upsertProject(project, explicitRoot: j["root"] as? String, repos: j["repos"] as? [String] ?? [])
+        let t = r3(now())
+        var written = 1
+        for it in items {
+            written += try run("""
+                INSERT INTO queue_items(project_id,source_key,title,kind,grp,est_min,est_basis,depends,needs,state,done_run,done_unit,origin,
+                  story_key,task_key,note,added,updated) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(project_id,source_key) DO UPDATE SET title=excluded.title, kind=excluded.kind, grp=excluded.grp, est_min=excluded.est_min,
+                  est_basis=excluded.est_basis, depends=excluded.depends, needs=excluded.needs,
+                  state=CASE WHEN queue_items.state='done' AND excluded.state<>'done' THEN queue_items.state ELSE excluded.state END,
+                  done_run=CASE WHEN queue_items.state='done' AND excluded.state<>'done' THEN queue_items.done_run ELSE excluded.done_run END,
+                  done_unit=CASE WHEN queue_items.state='done' AND excluded.state<>'done' THEN queue_items.done_unit ELSE excluded.done_unit END,
+                  origin=excluded.origin, story_key=excluded.story_key, task_key=excluded.task_key, note=excluded.note, updated=excluded.updated
+                """, [project, it["source_key"] as? String, it["title"] as? String, it["kind"] as? String, jtext(it["grp"]), num(it["est_min"]),
+                      jtext(it["est_basis"]), (it["depends"] as? [Any]).map { jsonText($0) }, it["needs"].flatMap { $0 is NSNull ? nil : jsonText($0) },
+                      it["state"] as? String ?? "open", jtext(it["done_run"]), inum(it["done_unit"]), it["origin"] as? String ?? "import",
+                      jtext(it["story_key"]), jtext(it["task_key"]), jtext(it["note"]), num(it["added"]) ?? t, t])
+        }
+        // 대기열보다 먼저 옮긴 실행의 단위에도 예상·종류를 붙인다(이미 있는 값은 두고)
+        try run("""
+            UPDATE units SET
+              est_min=COALESCE(est_min, (SELECT q.est_min FROM queue_items q WHERE q.project_id=?1 AND q.source_key=units.source_key)),
+              est_basis=COALESCE(est_basis, (SELECT q.est_basis FROM queue_items q WHERE q.project_id=?1 AND q.source_key=units.source_key)),
+              kind=COALESCE(kind, (SELECT q.kind FROM queue_items q WHERE q.project_id=?1 AND q.source_key=units.source_key))
+            WHERE source_key IS NOT NULL AND run_id IN (SELECT id FROM runs WHERE project_id=?1)
+            """, [project])
+        return written
+    }
+}
+
 // MARK: - 엔진
 
 enum Stop { case pause, stop }
@@ -529,14 +1032,18 @@ final class Engine {
     // run.json·queue.json 의 설정 칸을 고정 값으로 되돌려 쓴다 — 누가 바꿔 놓았어도 보드가 그리는 값이 엔진이 쓰는 값과 같게
     static let settingKeys = ["title", "model", "effort", "stopline", "caps", "check_timeout_min", "check_retries", "precheck_retry_min", "background_quiet_sec",
                               "allowed_tools", "disallowed_tools", "write_roots", "network_allow", "local_binding", "env_pass", "unix_sockets",
-                              "read_deny", "sandbox_exclude", "claude_args", "claude_path"]
+                              "read_deny", "sandbox_exclude", "claude_args", "claude_path", "project", "project_root"]
     static let unitKeys = ["id", "title", "prompt", "check", "precheck", "action", "context", "cwd", "caps", "check_timeout_min", "action_timeout_min",
-                           "tickets", "review"]
+                           "tickets", "review", "source_key", "kind", "est_min", "est_basis"]
     func syncFromFrozen() {
         for k in Engine.settingKeys { run[k] = cfg[k] }
+        run["set"] = setSummary(cfg)
         for i in queue.indices { for k in Engine.unitKeys { queue[i][k] = defs[i][k] } }
         saveRun(); saveQueue()
     }
+    var isDev: Bool { cfg["dev"] as? Bool ?? run["dev"] as? Bool ?? false }
+    // 출발 때 고정한 프로젝트 자율주행 지시(pinned/set/autopilot.md 와 같은 글). 시스템 프롬프트의 공통 규칙 뒤에 붙는다
+    var instruction: String? { (cfg["set"] as? [String: Any])?["instruction"] as? String }
     func saveRun() { run["updated"] = r3(now()); writeJSON(runPath, run) }
     func saveQueue() { writeJSON(queuePath, queue) }
     func loadUnit(_ n: Int) -> [String: Any] { readJSON(unitPath(n)) as? [String: Any] ?? [:] }
@@ -578,7 +1085,7 @@ final class Engine {
         return a
     }
     // 엔진 전용 폴더: 실행 폴더 밖, 0700, 샌드박스·파일 도구 모두 읽기 금지. 복원 전 백업처럼 비밀이 든 것을 둔다
-    var enginePrivate: String { privateRoot(dev: cfg["dev"] as? Bool ?? false) + "/" + id }
+    var enginePrivate: String { privateRoot(dev: isDev) + "/" + id }
     var envPass: [String] { cfg["env_pass"] as? [String] ?? [] }
 
     func caps(_ n: Int) -> [String: Double] {
@@ -629,6 +1136,7 @@ final class Engine {
     func main() -> Never {
         let prev = state
         if ["stopped", "done", "error"].contains(prev) {   // 끝난 실행인데 다시 떴다(정리 도중 끊김) — 정리만 다시 한다
+            if run["wrapped"] == nil { wrapUp() }          // 하네스 끝 검사·기록 저장소 쓰기 전에 끊겼으면 그것부터
             cleanupAndExit()
         }
         let first = prev == "starting" || prev.isEmpty
@@ -674,11 +1182,23 @@ final class Engine {
             finish("error", "claude 를 찾지 못했습니다.")
         }
         claude = c
+        writePlugin()
         run["engine_pid"] = Int(getpid())
         if first {
             run["started"] = r3(t)
             event("engine", "자율주행을 시작합니다. 단위 \(total)개를 차례로 합니다(모델 \(model)).")
+            if let ins = instruction {
+                event("engine", "프로젝트 자율주행 지시(\(ins.count)자)를 시스템 프롬프트의 공통 규칙 뒤에 붙여 돕니다: \(short(ins, 80))")
+            } else if let set = cfg["set"] as? [String: Any] {
+                event("engine", "프로젝트 자율주행 세트에 지시(autopilot.md)가 없어 공통 규칙만으로 돕니다(세트 자리 \(set["dir"] ?? "?")).")
+            } else {
+                event("engine", "run.json 에 project 칸이 없어 프로젝트 자율주행 지시 없이 공통 규칙만으로 돕니다.")
+            }
+            if let h = run["harness"] as? [String: Any] {
+                event("engine", "하네스 사본과 지문을 남겼습니다(저장소 \((h["folders"] as? [Any])?.count ?? 0)곳, 파일 \(h["files"] ?? 0)개). 끝에 다시 재어 같은지 봅니다.")
+            }
             setState("running", "단위를 시작하는 중입니다.")
+            record("출발")
         } else if prev == "paused" {
             event("engine", "엔진이 다시 떴습니다. 사람이 일시정지한 실행이라 그대로 쉽니다.")
             saveRun()
@@ -716,7 +1236,74 @@ final class Engine {
     func finish(_ s: String, _ reason: String) -> Never {
         run["ended"] = r3(now())
         setState(s, reason)
+        wrapUp()
         cleanupAndExit()
+    }
+
+    // 끝(완료·중단·오류)의 정리: 하네스를 다시 재어 출발 때와 같은지 적고, 출발 때 없던 빈 .claude/.cc-writes 를 치우고, 기록 저장소에 끝을 쓴다.
+    // 출발 때 남긴 지문(manifest.json)만 읽으므로 고정 설정을 못 읽은 오류 끝에서도 돈다
+    func wrapUp() {
+        if var h = run["harness"] as? [String: Any] {
+            if let c = harnessCheck(manifestDir: enginePrivate + "/harness") {
+                for (k, v) in c { h[k] = v }
+                run["harness"] = h
+                let changed = c["changed"] as? [[String: Any]] ?? []
+                if changed.isEmpty {
+                    event("engine", "하네스가 출발 때와 같습니다(파일 \(h["files"] ?? 0)개).")
+                } else {
+                    let k = { (x: String) in changed.filter { $0["change"] as? String == x }.count }
+                    let some = changed.prefix(3).compactMap { $0["path"] as? String }.map { $0.hasPrefix(home + "/") ? "~/" + $0.dropFirst(home.count + 1) : $0 }
+                    event("engine", "하네스가 출발 때와 다릅니다(바뀜 \(k("changed")), 더함 \(k("added")), 없어짐 \(k("removed")): \(some.joined(separator: ", "))\(changed.count > 3 ? " 등" : "")). 실행 중에 사람이 고쳤을 수 있어 되돌리지 않았습니다. 출발 때 사본은 엔진 전용 폴더에 있습니다.")
+                }
+                let cleaned = c["cleaned"] as? [String] ?? []
+                if !cleaned.isEmpty {
+                    event("engine", "출발 때 없던 빈 임시 자리(.claude/.cc-writes, 그것만 들어 있던 .claude) \(cleaned.count)곳을 치웠습니다.")
+                }
+            } else {
+                event("engine", "출발 때 남긴 하네스 지문을 찾지 못해 끝 검사를 하지 못했습니다.")
+            }
+        }
+        run["wrapped"] = r3(now())
+        saveRun()
+        record("끝")
+    }
+
+    // 서브에이전트에 주는 규칙. --append-system-prompt 는 Agent 도구의 서브에이전트에 닿지 않아(실측) 고정 플러그인의 SubagentStart hook 이
+    // 서브에이전트가 뜰 때 같은 글을 넣는다(additionalContext). 결과 기록은 주 세션 몫이라 서브에이전트에게는 쓰지 말라고 한다
+    var subagentRules: String {
+        "이 서브에이전트는 Claude Board 자율주행 세션(사람이 지켜보지 않는 실행)이 띄웠다. 주 세션과 같은 아래 규칙을 따른다. "
+            + "다만 결과 기록(result.json)은 주 세션이 쓰므로 서브에이전트는 쓰지 않고, 보류할 것이나 사람 몫은 답에 적어 주 세션에 넘긴다.\n\n"
+            + systemPromptText + (instruction.map { "\n\n# 이 프로젝트의 자율주행 지시(보드가 출발 때 고정함)\n\n" + $0 } ?? "")
+    }
+    var pluginDir: String { dir + "/pinned/plugin" }
+    // 엔진이 뜰 때마다 고정 설정에서 다시 쓴다(pinned/ 는 모델이 쓸 수 없지만, 글은 늘 고정 설정과 같게)
+    func writePlugin() {
+        mkdirPrivate(pluginDir); mkdirPrivate(pluginDir + "/.claude-plugin"); mkdirPrivate(pluginDir + "/hooks")
+        writePrivate(pluginDir + "/.claude-plugin/plugin.json", Data(jsonText([
+            "name": "claude-board-autopilot", "version": "1.0.0",
+            "description": "Claude Board 자율주행: 서브에이전트가 뜰 때 자율주행 규칙과 프로젝트 지시를 넣는다"], pretty: true).utf8))
+        writePrivate(pluginDir + "/hooks/hooks.json", Data(jsonText([
+            "hooks": ["SubagentStart": [["hooks": [["type": "command", "command": "/bin/cat \"${CLAUDE_PLUGIN_ROOT}/subagent-start.json\""]]]]]],
+            pretty: true).utf8))
+        writePrivate(pluginDir + "/subagent-start.json", Data(jsonText([
+            "hookSpecificOutput": ["hookEventName": "SubagentStart", "additionalContext": subagentRules]]).utf8))
+    }
+
+    // 기록 저장소에 이 실행을 옮겨 적는다(출발·단위 판정 뒤·끝). 실패해도 실행은 멈추지 않고, 다음 기록 때 실행 폴더에서 통째로 다시 옮긴다
+    func record(_ when: String) {
+        do {
+            if !fm.fileExists(atPath: privateRoot(dev: isDev)) { mkdirPrivate(privateRoot(dev: isDev)) }
+            let db = try RecordsDB(recordsPath(dev: isDev))
+            // 고정 설정을 못 읽은 오류 끝(누가 바꿨다)이면 빈 값을 넘긴다 — 바뀐 pinned/frozen.json 을 기록에 옮기지 않게
+            try db.transaction { _ = try db.syncRun(RunSource(dir: dir, origin: "engine", frozen: cfg)) }
+            if run["records_error"] != nil {
+                run["records_error"] = nil; saveRun()
+                event("engine", "실행 기록 저장소에 다시 옮겨 적었습니다(\(when)).")
+            }
+        } catch {
+            run["records_error"] = "\(error)"; saveRun()
+            event("engine", "실행 기록 저장소에 쓰지 못했습니다(\(when): \(error)). 실행은 그대로 가고, 다음 기록 때 실행 폴더에서 다시 옮깁니다.")
+        }
     }
 
     // plist 를 지우고 마지막에 launchctl bootout — launchd 가 이 엔진에 SIGTERM 을 보내므로 기록은 모두 끝낸 뒤에 한다
@@ -899,6 +1486,10 @@ final class Engine {
         if fm.fileExists(atPath: dir + "/answers.json") {
             s += "- 출발 때 고른 답: \(dir)/answers.json (카드: \(dir)/cards.json). 따를 답이 있으면 따르고 decisions_applied 에 적으세요.\n"
         }
+        if let set = cfg["set"] as? [String: Any] {   // 주제로 시작의 세트: 기술 스택은 글로, 명세는 고정한 사본 자리로
+            if let st = set["stack"] { s += "- 기술 스택(출발 때 정함, 이 스택으로 구성합니다): \(jsonText(st))\n" }
+            if set["spec"] is String { s += "- 명세(요구사항과 수용 기준, 읽기 전용): `\(dir)/pinned/set/spec.md`\n" }
+        }
         s += "- 쓰기는 작업 폴더\(writeRoots.isEmpty ? "" : "와 " + writeRoots.joined(separator: ", ")), 단위 폴더, 임시 폴더만 됩니다(샌드박스). 네트워크는 허용한 곳만 나갑니다.\n"
         if unitDir(n).hasPrefix(home + "/.claude/") {
             // ~/.claude 아래는 Claude Code 의 보호 경로라 Write·Edit 도구가 묻지 않는 모드에서 거부된다. 샌드박스 Bash 는 쓸 수 있다(실측)
@@ -949,6 +1540,7 @@ final class Engine {
         let spent = "\(dur(num(u["active_sec"]) ?? 0)), \(usd(num(u["cost_usd"]) ?? 0)) USD"
         event("board", "단위 \(n)/\(total) \(unitLabel[status] ?? status): \(reason) (\(spent))")
         if !ok, status != "stopped" { event("board", "모델이 결과 기록(result.json)을 남기지 않았습니다.") }
+        record("단위 \(n) 판정 뒤")
     }
 
     func runUnit(_ n: Int) {
@@ -1079,7 +1671,10 @@ final class Engine {
         a += ["--permission-mode", "dontAsk", "--permission-prompts", "none", "--strict-mcp-config", "--settings", sandboxSettings(n),
               "--allowedTools", allowed.joined(separator: " "), "--disallowedTools", denied.joined(separator: " ")]
         for d in [unitDir(n)] + writeRoots { a += ["--add-dir", d] }
-        a += ["--append-system-prompt", systemPromptText]
+        // 프로젝트 자율주행 지시는 공통 규칙 뒤에 붙인다. 저장소 CLAUDE.md 는 사용자 메시지로 들어가므로(공식 문서) 이 지시가 시스템 프롬프트 쪽에서 앞선다
+        a += ["--append-system-prompt", systemPromptText + (instruction.map { "\n\n# 이 프로젝트의 자율주행 지시(보드가 출발 때 고정함)\n\n" + $0 } ?? "")]
+        // 서브에이전트에는 위 글이 닿지 않는다(실측) — 고정 플러그인의 SubagentStart hook 이 같은 규칙을 넣는다
+        if fm.fileExists(atPath: pluginDir + "/hooks/hooks.json") { a += ["--plugin-dir", pluginDir] }
         a += cfg["claude_args"] as? [String] ?? []    // 시험용(--dev 출발만, 예: --setting-sources project,local)
         return a
     }
@@ -1554,7 +2149,9 @@ func usage() -> Never {
     사용법: claude-autopilot start <실행 폴더> [--dev]
            claude-autopilot run <실행 폴더> <고정 설정 해시>
            claude-autopilot control <실행 폴더> pause|resume|stop
-           claude-autopilot status <실행 폴더>
+           claude-autopilot status <실행 폴더> [--dev]
+           claude-autopilot records import [--dev | --db <파일>] [--project <이름>] [--unit-key <칸 경로>] <원본…>
+             원본: 실행 폴더(run.json·queue.json 이 있는 폴더) 또는 일반 꼴 대기열 파일(format "claude-board-queue")
     """)
 }
 
@@ -1581,7 +2178,8 @@ func prepare(_ dir: String, dev: Bool) -> (problems: [String], frozen: [String: 
     }
     var f: [String: Any] = ["version": 1, "id": id, "dev": dev, "frozen_at": r3(now())]
     if let m = run["model"] as? String, !m.isEmpty { f["model"] = m } else { problems.append("run.json 에 model 이 없습니다") }
-    for k in ["effort", "stopline", "caps", "check_timeout_min", "check_retries", "precheck_retry_min", "background_quiet_sec"] where run[k] != nil { f[k] = run[k] }
+    // title 도 고정한다 — 엔진이 다시 뜰 때 run.json 설정 칸을 고정 값으로 되돌려 쓰므로, 빠지면 실행 제목이 지워졌다(엔진 고침 1차에서 찾음)
+    for k in ["title", "effort", "stopline", "caps", "check_timeout_min", "check_retries", "precheck_retry_min", "background_quiet_sec"] where run[k] != nil { f[k] = run[k] }
     func strings(_ k: String) -> [String]? {
         guard let v = run[k] else { return nil }
         guard let a = v as? [String] else { problems.append("run.json 의 \(k) 는 글자 배열이어야 합니다"); return nil }
@@ -1614,6 +2212,33 @@ func prepare(_ dir: String, dev: Bool) -> (problems: [String], frozen: [String: 
     for k in ["claude_args", "claude_path"] where run[k] != nil {
         if dev { f[k] = run[k] } else { problems.append("run.json 의 \(k) 는 시험용이라 --dev 로 출발할 때만 받습니다") }
     }
+    // 프로젝트와 자율주행 세트: 세트는 이름으로 엔진 전용 뿌리 아래에서만 찾는다(작업 폴더처럼 모델이 쓸 수 있는 자리를 가리키지 못하게).
+    // 지시 글은 고정 설정에 넣어 해시로 지키고, 출발 때 pinned/set/ 에 사본을 둔다
+    if let p = run["project"] {
+        if let name = p as? String, validName(name) {
+            f["project"] = name
+            let sd = setDir(project: name, dev: dev)
+            var set: [String: Any] = ["dir": sd]
+            if fm.fileExists(atPath: sd + "/autopilot.md") {
+                if let t = try? String(contentsOfFile: sd + "/autopilot.md", encoding: .utf8) {
+                    let tt = t.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !tt.isEmpty { set["instruction"] = tt }
+                } else { problems.append("자율주행 지시(\(sd)/autopilot.md)를 UTF-8 글로 읽지 못했습니다") }
+            }
+            if fm.fileExists(atPath: sd + "/spec.md") {
+                if let t = try? String(contentsOfFile: sd + "/spec.md", encoding: .utf8) { set["spec"] = t }
+                else { problems.append("명세(\(sd)/spec.md)를 UTF-8 글로 읽지 못했습니다") }
+            }
+            if let d = fm.contents(atPath: sd + "/stack.json") {
+                if let j = try? JSONSerialization.jsonObject(with: d) { set["stack"] = j } else { problems.append("기술 스택(\(sd)/stack.json)이 JSON 이 아닙니다") }
+            }
+            f["set"] = set
+        } else { problems.append("run.json 의 project 는 영문·숫자·.-_ 로 쓴 프로젝트 이름입니다") }
+    }
+    if let pr = run["project_root"] {
+        if let s = pr as? String, s.hasPrefix("/"), isDir(s) { f["project_root"] = canonical(s) }
+        else { problems.append("run.json 의 project_root 는 있는 폴더의 절대 경로여야 합니다") }
+    }
     var units: [[String: Any]] = []
     for (i, q) in queue.enumerated() {
         let n = i + 1
@@ -1642,11 +2267,27 @@ func prepare(_ dir: String, dev: Bool) -> (problems: [String], frozen: [String: 
         }
         if let c = q["caps"] { if c is [String: Any] { d["caps"] = c } else { problems.append("단위 \(n) 의 caps 는 객체여야 합니다") } }
         if q["tickets"] != nil, !(q["tickets"] is [Any]) { problems.append("단위 \(n) 의 tickets 는 배열이어야 합니다") }
+        // 기록 저장소에 남길 칸(원천 항목 키·종류·출발 때 예상). 판정·도구와 상관없지만 출발 뒤 바뀌지 않게 함께 고정한다
+        for k in ["source_key", "kind", "est_basis"] {
+            if let v = q[k] { if v is String { d[k] = v } else { problems.append("단위 \(n) 의 \(k) 는 글자여야 합니다") } }
+        }
+        if let v = q["est_min"] { if num(v) != nil, !(v is String) { d["est_min"] = v } else { problems.append("단위 \(n) 의 est_min 은 수여야 합니다") } }
         units.append(d)
         queue[i]["id"] = d["id"]; queue[i]["tickets"] = d["tickets"]; queue[i]["status"] = "pending"
     }
     f["units"] = units
     return (problems, f, queue)
+}
+
+// run.json 에 내놓는 세트 요약(보드가 그린다). 글 전문은 고정 설정과 pinned/set/ 에만 둔다
+func setSummary(_ f: [String: Any]) -> Any {
+    guard let set = f["set"] as? [String: Any] else { return NSNull() }
+    var o: [String: Any] = ["project": f["project"] ?? NSNull(), "dir": set["dir"] ?? NSNull(),
+                            "spec": set["spec"] != nil, "stack": set["stack"] != nil]
+    if let t = set["instruction"] as? String {
+        o["first_line"] = short(t, 200); o["chars"] = t.count; o["sha256"] = sha256(Data(t.utf8))
+    }
+    return o
 }
 
 func cmdStart(_ args: [String]) -> Never {
@@ -1678,6 +2319,20 @@ func cmdStart(_ args: [String]) -> Never {
         try? fm.createDirectory(atPath: dir + "/pinned/context", withIntermediateDirectories: true)
         do { try fm.copyItem(atPath: src, toPath: dir + "/pinned/context/\(i + 1)") } catch { fail("단위 \(i + 1) 의 근거 묶음을 복사하지 못했습니다: \(error.localizedDescription)") }
     }
+    // 프로젝트 자율주행 세트의 사본: 고정 설정에 넣은 글 그대로(보드·사람이 보는 자리. 엔진은 고정 설정의 글을 쓴다)
+    try? fm.removeItem(atPath: dir + "/pinned/set")
+    if let set = frozen["set"] as? [String: Any], set["instruction"] != nil || set["spec"] != nil || set["stack"] != nil {
+        mkdirPrivate(dir + "/pinned/set")
+        if let t = set["instruction"] as? String { writePrivate(dir + "/pinned/set/autopilot.md", Data((t + "\n").utf8)) }
+        if let t = set["spec"] as? String { writePrivate(dir + "/pinned/set/spec.md", Data(t.utf8)) }
+        if let st = set["stack"] { writePrivate(dir + "/pinned/set/stack.json", Data((jsonText(st, pretty: true) + "\n").utf8)) }
+    }
+    // 하네스 사본과 지문: 단위 작업 폴더들의 저장소 뿌리마다, 엔진 전용 폴더(모델은 읽지 못함)에 둔다. 끝에 다시 재어 같은지 적는다
+    let ep = privateRoot(dev: dev) + "/" + id
+    mkdirPrivate(privateRoot(dev: dev)); mkdirPrivate(ep)
+    let cwds = (frozen["units"] as? [[String: Any]] ?? []).compactMap { $0["cwd"] as? String }
+    run["harness"] = harnessSnapshot(harnessFolders(cwds), to: ep + "/harness")
+    run["set"] = setSummary(frozen)
     let sha = sha256(frozenData)
     writeJSON(dir + "/queue.json", queue)
     run["state"] = "starting"; run["reason"] = "엔진을 띄우는 중입니다."
@@ -1737,8 +2392,8 @@ func cmdControl(_ args: [String]) -> Never {
 }
 
 // 출발 전 실행 폴더: 확인 결과와 고정될 값, 출발 명령 한 줄
-func statusBeforeStart(_ dir: String, _ run: [String: Any]) -> Never {
-    let dev = (run["claude_args"] != nil || run["claude_path"] != nil)
+func statusBeforeStart(_ dir: String, _ run: [String: Any], dev devFlag: Bool) -> Never {
+    let dev = devFlag || run["claude_args"] != nil || run["claude_path"] != nil
     let (problems, f, _) = prepare(dir, dev: dev)
     var out = "실행 \((dir as NSString).lastPathComponent) · 출발 전\(run["title"].map { " · \($0)" } ?? "")\n"
     out += problems.isEmpty ? "출발 준비 확인: 이상 없음\n" : "출발 준비 확인: 고칠 것 \(problems.count)개\n" + problems.map { "  - \($0)\n" }.joined()
@@ -1750,6 +2405,17 @@ func statusBeforeStart(_ dir: String, _ run: [String: Any]) -> Never {
     out += "읽기 금지: \((f["read_deny"] as? [String] ?? []).count)곳 + 엔진 전용 뿌리(실제·시험 판), 모든 실행의 engine 폴더, 옛 뿌리(~/.claude/notifier/autopilot)\n"
     if let e = f["env_pass"] as? [String], !e.isEmpty { out += "더 넘길 환경 변수: \(e.joined(separator: ", "))\n" }
     if let x = f["sandbox_exclude"] as? [String], !x.isEmpty { out += "샌드박스 밖에서 돌 명령: \(x.joined(separator: ", "))\n" }
+    if let set = f["set"] as? [String: Any] {
+        if let t = set["instruction"] as? String {
+            out += "자율주행 지시: 「\(short(t, 120))」 (\(t.count)자, 공통 규칙 뒤에 붙임. 세트 \(set["dir"] ?? "?"))\n"
+        } else {
+            out += "자율주행 지시: 없음(세트 자리에 autopilot.md 가 없음: \(set["dir"] ?? "?")). 공통 규칙만으로 돕니다\n"
+        }
+        if let t = set["spec"] as? String { out += "명세: spec.md (\(t.count)자)\n" }
+        if let st = set["stack"] { out += "기술 스택: \(short(jsonText(st), 160))\n" }
+    } else {
+        out += "자율주행 지시: 없음(run.json 에 project 칸이 없음). 공통 규칙만으로 돕니다\n"
+    }
     let dc = f["caps"] as? [String: Any] ?? [:]
     for (i, d) in (f["units"] as? [[String: Any]] ?? []).enumerated() {
         let c = d["caps"] as? [String: Any] ?? [:]
@@ -1774,7 +2440,7 @@ extension String { func ifEmpty(_ s: String) -> String { isEmpty ? s : self } }
 func cmdStatus(_ args: [String]) -> Never {
     let dir = runDir(args.first)
     guard let run = readJSON(dir + "/run.json") as? [String: Any] else { fail("run.json 을 읽지 못했습니다") }
-    if run["state"] == nil { statusBeforeStart(dir, run) }
+    if run["state"] == nil { statusBeforeStart(dir, run, dev: args.contains("--dev")) }
     let queue = readJSON(dir + "/queue.json") as? [[String: Any]] ?? []
     let s = run["state"] as? String ?? "-"
     var out = "실행 \((dir as NSString).lastPathComponent) · \(stateLabel[s] ?? s)"
@@ -1815,11 +2481,85 @@ func cmdStatus(_ args: [String]) -> Never {
     exit(0)
 }
 
+// 옮겨 담을 원본의 지문: 파일이면 내용, 실행 폴더면 읽는 파일들(경로와 내용). 같은 경로·같은 지문은 다시 옮기지 않는다(imports 표)
+func sourceDigest(_ p: String) -> String {
+    guard isDir(p) else { return sha256(fm.contents(atPath: p) ?? Data()) }
+    var names = ["run.json", "queue.json", "cards.json", "answers.json"]
+    let units = ((try? fm.contentsOfDirectory(atPath: p + "/units")) ?? []).filter { Int($0) != nil }.sorted { Int($0)! < Int($1)! }
+    for u in units { names += ["units/\(u)/engine.json", "units/\(u)/result.json"] }
+    var d = Data()
+    for n in names {
+        guard let c = fm.contents(atPath: p + "/" + n) else { continue }
+        d.append(Data((n + "\u{0}").utf8)); d.append(Data(sha256(c).utf8)); d.append(0x0a)
+    }
+    return sha256(d)
+}
+
+// 실행 기록 저장소에 지난 기록을 옮겨 담는다. 원본은 읽기만 한다. 일반 꼴 대기열을 먼저 옮기고(단위의 예상을 대기열 항목에서 찾아 붙이므로) 실행 폴더를 옮긴다
+func cmdRecords(_ args: [String]) -> Never {
+    guard args.first == "import" else { usage() }
+    var dev = false, dbArg: String?, project: String?, unitKey: String?, sources: [String] = []
+    var i = 1
+    func next() -> String { i += 1; guard i < args.count else { usage() }; return args[i] }
+    while i < args.count {
+        switch args[i] {
+        case "--dev": dev = true
+        case "--db": dbArg = next()
+        case "--project": project = next()
+        case "--unit-key": unitKey = next()
+        default: sources.append(args[i])
+        }
+        i += 1
+    }
+    guard !sources.isEmpty else { usage() }
+    if let p = project, !validName(p) { fail("--project 는 영문·숫자·.-_ 로 쓴 이름입니다: \(p)") }
+    let path = dbArg.map { canonical($0) } ?? recordsPath(dev: dev)
+    if dbArg == nil { mkdirPrivate(privateRoot(dev: dev)) }
+    let db: RecordsDB
+    do { db = try RecordsDB(path) } catch { fail("실행 기록 저장소를 열지 못했습니다(\(path)): \(error)") }
+    var files: [String] = [], dirs: [String] = []
+    for s in sources {
+        let p = canonical(s)
+        if isDir(p) { dirs.append(p) } else if fm.fileExists(atPath: p) { files.append(p) } else { fail("원본이 없습니다: \(s)") }
+    }
+    print("실행 기록 저장소: \(path)")
+    var bad = 0
+    for p in files + dirs {
+        let digest = sourceDigest(p)
+        if (try? db.rows("SELECT rows FROM imports WHERE path=? AND sha256=?", [p, digest]))?.isEmpty == false {
+            print("  그대로: 같은 내용을 이미 옮겨 담았습니다: \(p)")
+            continue
+        }
+        do {
+            var n = 0
+            try db.transaction {
+                if isDir(p) {
+                    guard fm.fileExists(atPath: p + "/run.json") else { throw DBError(description: "실행 폴더가 아닙니다(run.json 없음)") }
+                    let r = readJSON(p + "/run.json") as? [String: Any] ?? [:]
+                    guard project != nil || r["project"] is String else { throw DBError(description: "프로젝트를 모릅니다(run.json 에 project 가 없으면 --project 로 줍니다)") }
+                    n = try db.syncRun(RunSource(dir: p, origin: "import", project: project, unitKey: unitKey, frozen: nil))
+                } else {
+                    n = try db.importQueue(p, project: project)
+                }
+                try db.run("INSERT INTO imports(path,sha256,rows,at) VALUES(?,?,?,?) ON CONFLICT(path,sha256) DO NOTHING", [p, digest, n, r3(now())])
+            }
+            print("  옮겨 담음: \(p) (쓴 행 \(n)개)")
+        } catch {
+            bad += 1
+            print("  옮겨 담지 못함: \(p): \(error)")
+        }
+    }
+    print("표마다 행 수: " + RecordsDB.tables.map { "\($0) \(db.count($0))" }.joined(separator: " · "))
+    db.close()
+    exit(bad == 0 ? 0 : 1)
+}
+
 let argv = Array(CommandLine.arguments.dropFirst())
 switch argv.first {
 case "start": cmdStart(Array(argv.dropFirst()))
 case "run": cmdRun(Array(argv.dropFirst()))
 case "control": cmdControl(Array(argv.dropFirst()))
 case "status": cmdStatus(Array(argv.dropFirst()))
+case "records": cmdRecords(Array(argv.dropFirst()))
 default: usage()
 }
