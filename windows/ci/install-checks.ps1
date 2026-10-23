@@ -8,7 +8,8 @@
 #   2) 등록된 hook 을 가짜 Claude Code(node.exe 를 claude.exe 로 복사) 아래에서 그대로 실행 — 세션 기록의 state·pid·cwd 등
 #   3) 같은 버전 다시 설치·옛 제거 프로그램의 제자리 실행 — 저장한 계정 금고·hook 이 남는지(nsis-hooks.nsh 의 PREUNINSTALL)
 #   4) 제거 프로그램 /S — Claude Board 의 것만 지우고 다른 hook·설정·Claude Code 로그인은 남는지
-#   5) install.ps1·uninstall.ps1 을 Windows PowerShell 5.1 에서 irm | iex 처럼(웹 호출은 가로챔)
+#   5) install.ps1·uninstall.ps1 을 Windows PowerShell 5.1 에서 irm | iex 처럼(웹 호출은 가로챔) - md-render 폴더 교체·빠진 파일 거부·되돌리기 포함
+# md-render 플러그인 다섯 파일은 설치 폴더 아래 plugins\md-render\ 에 있어야 하고(setup.exe 와 zip 모두) 제거하면 사라져야 한다
 # 확인마다 항목·기대·실제·통과를 표로 남긴다. 실패한 시나리오는 상태를 덤프하고 다음으로 가며, 하나라도 실패하면 끝에 throw 한다.
 param(
   [Parameter(Mandatory = $true)][string]$Assets,
@@ -36,6 +37,8 @@ try {
     foreach ($f in @('ClaudeBoard.exe', 'claude-board-hook.exe', 'uninstall.exe')) {
       Test-Value "설치 폴더에 $f" $true (Test-Path -LiteralPath (Join-Path $CbSetupDir $f) -PathType Leaf)
     }
+    Test-PluginFiles $CbSetupDir '설치 폴더'
+    Test-Value '설치 폴더에 THIRD_PARTY_NOTICES.txt' $true (Test-Path -LiteralPath (Join-Path $CbSetupDir 'THIRD_PARTY_NOTICES.txt') -PathType Leaf) -Info
     Test-Value '설정 > 앱 의 표시 버전(DisplayVersion)' $CbSemver (Get-RegValue $CbUninstKey 'DisplayVersion')
 
     $ver = Invoke-Native -File (Join-Path $CbSetupDir 'claude-board-hook.exe') -Arguments @('--version') -TimeoutSec 30
@@ -184,6 +187,7 @@ try {
     Test-Value '(가) Claude Board hook 명령 수' $CbHookEntryCount (Get-OurHookEntryCount)
     Test-Value '(가) 자동 실행 값' ('"{0}" --background' -f (Join-Path $CbSetupDir 'ClaudeBoard.exe')) (Get-RunValue)
     Test-Value '(가) 설치 폴더에 ClaudeBoard.exe' $true (Test-Path -LiteralPath (Join-Path $CbSetupDir 'ClaudeBoard.exe'))
+    Test-PluginFiles $CbSetupDir '(가) 설치 폴더'
 
     # (나) 새 버전 setup.exe 를 GUI 로 돌리면 PageLeaveReinstall 이 옛 제거 프로그램을 `"<설치 폴더>\uninstall.exe" _?=<설치 폴더>` 로 제자리에서 부른다.
     # 그때 $EXEDIR == $INSTDIR 이라 PREUNINSTALL 이 claude-board-hook uninstall 을 건너뛰어야 한다 — 같은 명령줄을 직접 돌린다
@@ -193,6 +197,7 @@ try {
     Test-Value '(나) 제자리 제거 종료 코드' 0 $code
     Test-Value '(나) 제거 프로그램이 돌았음 — 설치 폴더의 ClaudeBoard.exe 가 지워짐' $false (Test-Path -LiteralPath (Join-Path $inst 'ClaudeBoard.exe'))
     Test-Value '(나) 설치 폴더의 claude-board-hook.exe 가 지워짐' $false (Test-Path -LiteralPath (Join-Path $inst 'claude-board-hook.exe'))
+    Test-PluginFiles $inst '(나) 지워진 설치 폴더' -Expect $false
     Test-Value '(나) uninstall.exe 는 제자리라 남음' $true (Test-Path -LiteralPath $uninst) -Info
     Test-Value '(나) Uninstall 키가 지워짐' $false (Test-Path -LiteralPath $CbUninstKey) -Info
     Test-Value '(나) PREUNINSTALL 이 건너뜀 — 저장한 계정 금고 표지가 남음' $true (Test-Path -LiteralPath $marker)
@@ -208,6 +213,7 @@ try {
     Test-Value '(다) 이어지는 setup.exe /S 종료 코드' 0 $code
     Test-Value '(다) 같은 설치 폴더' $CbSetupDir (Get-InstallLocation)
     Test-Value '(다) 설치 폴더에 ClaudeBoard.exe' $true (Test-Path -LiteralPath (Join-Path $CbSetupDir 'ClaudeBoard.exe'))
+    Test-PluginFiles $CbSetupDir '(다) 설치 폴더'
     Test-Value '(다) Claude Board hook 명령 수' $CbHookEntryCount (Get-OurHookEntryCount)
     Test-Value '(다) 저장한 계정 금고 표지가 남음' $true (Test-Path -LiteralPath $marker)
   } -Cleanup {
@@ -226,6 +232,8 @@ try {
     Write-Utf8 (Join-Path $CbNotifier 'accounts.json') '{"accounts":[]}'
     Write-Utf8 (Join-Path $CbNotifier 'notify-position') 'top-right'
     Write-Utf8 (Join-Path $CbSessions 'ci-old.json') '{"session_id":"ci-old","state":"ended"}'
+    # 보드가 옮겨 쓴 md-render 사본 - 제거가 지워야 한다(claude-board-hook uninstall 이 notifier\plugins 를 지움)
+    New-PluginCopy
     $backupsBefore = (Get-SettingsBackups).Count
     $inst = Get-InstallLocation
 
@@ -241,13 +249,15 @@ try {
     Test-Value '제거가 90초 안에 끝남(제거 프로그램 사본 종료·설치 폴더·Uninstall 키 사라짐)' $true ([bool]$done)
     Test-Value '본 제거 프로그램 사본 프로세스' '' (@($seen) -join ', ') -Info
     Test-Value '설치 폴더가 지워짐' $false (Test-Path -LiteralPath $inst)
+    Test-PluginFiles $inst '제거 뒤 설치 폴더' -Expect $false
+    Test-Value 'notifier\plugins\md-render 사본이 지워짐' $false (Test-Path -LiteralPath $CbPluginCopy)
     Test-Value 'Uninstall 키가 지워짐' $false (Test-Path -LiteralPath $CbUninstKey)
     # NSIS 는 Run 의 "Claude Board" 만 지운다 — "ClaudeBoard" 가 사라졌다면 PREUNINSTALL 의 claude-board-hook uninstall 이 돈 것이다
     Test-Value "자동 실행 값 $CbRunValue 가 지워짐(= hook uninstall 이 돌았음)" $null (Get-RunValue)
     Test-HooksRemoved
     Test-PreservedSettings
     Test-Value 'hook 을 빼기 전 settings.json 백업이 새로 생김' $true ((Get-SettingsBackups).Count -gt $backupsBefore) -Info
-    Test-Value 'notifier 에서 지워야 할 것 중 남은 것(hook 사본·app-path·notify-position·sessions·accounts.json·accounts)' '' (@(Get-NotifierLeftovers) -join ', ')
+    Test-Value 'notifier 에서 지워야 할 것 중 남은 것(hook 사본·app-path·notify-position·sessions·accounts.json·accounts·plugins)' '' (@(Get-NotifierLeftovers) -join ', ')
     $rest = if (Test-Path -LiteralPath $CbNotifier) { (@(Get-ChildItem -LiteralPath $CbNotifier -Force | ForEach-Object { $_.Name }) -join ', ') } else { '(폴더 없음)' }
     Test-Value 'notifier 폴더에 남은 것(목록에 없는 board.log 등은 남을 수 있다)' '(폴더 없음)' $rest -Info
     foreach ($n in $CbCmdFiles) {
@@ -267,13 +277,14 @@ try {
     $installPs1 = Join-Path $Assets 'install.ps1'
     $uninstallPs1 = Join-Path $Assets 'uninstall.ps1'
     $runPs51 = {
-      param([string]$Mode, [string]$Script)
+      param([string]$Mode, [string]$Script, [string]$AssetsDir = '')
+      $assetsArg = if ($AssetsDir) { $AssetsDir } else { $Assets }
       $resultFile = Join-Path $CbTemp "ps51-$Mode.json"
       Remove-Item -LiteralPath $resultFile -ErrorAction SilentlyContinue
       $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
       $driver = Join-Path $PSScriptRoot 'ps51-install.ps1'
       # 보드의 업데이트 단추처럼 PSModulePath 를 지우고 띄운다(updater.rs) — 이 pwsh 의 PowerShell 7 모듈 경로를 물려주지 않는다
-      $r = Invoke-Native -File $ps -Arguments @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $driver, '-Mode', $Mode, '-Script', $Script, '-Assets', $Assets, '-CiVersion', $CbVersion, '-Result', $resultFile) -TimeoutSec 300 -UnsetEnv 'PSModulePath'
+      $r = Invoke-Native -File $ps -Arguments @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $driver, '-Mode', $Mode, '-Script', $Script, '-Assets', $assetsArg, '-CiVersion', $CbVersion, '-Result', $resultFile) -TimeoutSec 300 -UnsetEnv 'PSModulePath'
       Write-Host "  --- powershell.exe ($Mode) 종료 코드 $(Format-Cell $r.ExitCode), 시간 초과 $($r.TimedOut) ---"
       foreach ($l in ("$($r.Out)" -split "`r?`n")) { Write-Host "    > $l" }
       if ($r.Err) { foreach ($l in ("$($r.Err)" -split "`r?`n")) { Write-Host "    ! $l" } }
@@ -316,12 +327,23 @@ try {
       $dl = @($calls | Where-Object { $_ -like 'Invoke-WebRequest *' })
       Test-Value '(b) 받은 것: windows-v<버전> 의 zip·sha256' ("windows-v$CbVersion/ClaudeBoard-windows-x64.zip, windows-v$CbVersion/ClaudeBoard-windows-x64.zip.sha256") (($dl | ForEach-Object { ($_ -split '/download/', 2)[1] }) -join ', ')
     }
+    # 폴더 안 파일까지 상대 경로·해시(·수정 시각)를 한 줄로 - zip 을 푼 폴더와 앱 폴더를 비교한다
+    $tree = {
+      param([string]$Root, [bool]$Times = $false)
+      if (-not (Test-Path -LiteralPath $Root)) { return '(폴더 없음)' }
+      $r = $Root.TrimEnd('\')
+      return (@(Get-ChildItem -LiteralPath $Root -Recurse -File -Force | Sort-Object FullName | ForEach-Object {
+        $t = if ($Times) { "@$($_.LastWriteTimeUtc.Ticks)" } else { '' }
+        "$($_.FullName.Substring($r.Length + 1))=$((Get-FileHash -LiteralPath $_.FullName).Hash)$t"
+      }) -join ', ')
+    }
     $expected = Join-Path $CbTemp 'zip-expected'
     Remove-PathRetry $expected
     Expand-Archive -LiteralPath (Join-Path $Assets 'ClaudeBoard-windows-x64.zip') -DestinationPath $expected -Force
-    $want = @(Get-ChildItem -LiteralPath $expected -File | Sort-Object Name | ForEach-Object { "$($_.Name)=$((Get-FileHash -LiteralPath $_.FullName).Hash)" }) -join ', '
-    $have = if (Test-Path -LiteralPath $CbScriptDir) { @(Get-ChildItem -LiteralPath $CbScriptDir -File | Sort-Object Name | ForEach-Object { "$($_.Name)=$((Get-FileHash -LiteralPath $_.FullName).Hash)" }) -join ', ' } else { '(폴더 없음)' }
-    Test-Value '(b) %LOCALAPPDATA%\Programs\Claude Board 의 파일 = zip 내용(.old-* 없음)' $want $have
+    $want = & $tree $expected
+    $have = & $tree $CbScriptDir
+    Test-Value '(b) %LOCALAPPDATA%\Programs\Claude Board 의 파일 = zip 내용(plugins\md-render 포함, .old-* 없음)' $want $have
+    Test-PluginFiles $CbScriptDir '(b) 앱 폴더'
     Test-HookRegistration
     Test-PreservedSettings
     $appPath = if (Test-Path -LiteralPath $CbAppPath) { (Read-TextShared $CbAppPath).Trim() } else { $null }
@@ -336,7 +358,7 @@ try {
     Test-Value '(b) 보드가 떠 있음' $boardExe $(if ($board) { $board.Path } else { $null })
 
     # (c) .sha256 이 틀리면 throw 하고 이미 깔린 파일·떠 있는 보드는 그대로(해시 확인이 보드를 끄기 전에 있다)
-    $snap = { if (Test-Path -LiteralPath $CbScriptDir) { @(Get-ChildItem -LiteralPath $CbScriptDir -File | Sort-Object Name | ForEach-Object { "$($_.Name)=$((Get-FileHash -LiteralPath $_.FullName).Hash)@$($_.LastWriteTimeUtc.Ticks)" }) -join ', ' } else { '(폴더 없음)' } }
+    $snap = { & $tree $CbScriptDir $true }
     $before = & $snap
     $o = & $runPs51 'badsha' $installPs1
     if ($o) {
@@ -346,10 +368,63 @@ try {
     Test-Value '(c) 앱 폴더 파일이 그대로(내용·수정 시각)' $before (& $snap)
     if ($board) { Test-Value '(c) 보드가 그대로 떠 있음' $true (Test-ProcessAlive $board.Pid) }
 
-    # uninstall.ps1 — irm | iex
+    # 변형한 zip 으로 묶은 자산 폴더 - $Assets 를 복사하고 zip 만 $Mutate 로 고쳐 다시 묶는다(.sha256 도 새로 계산)
+    $makeAssets = {
+      param([string]$Name, [scriptblock]$Mutate)
+      $a = Join-Path $CbTemp $Name
+      $x = Join-Path $CbTemp "$Name-x"
+      Remove-PathRetry $a
+      Remove-PathRetry $x
+      Copy-Item -LiteralPath $Assets -Destination $a -Recurse
+      Expand-Archive -LiteralPath (Join-Path $Assets 'ClaudeBoard-windows-x64.zip') -DestinationPath $x -Force
+      & $Mutate $x
+      $zip = Join-Path $a 'ClaudeBoard-windows-x64.zip'
+      Remove-Item -LiteralPath $zip -Force
+      Compress-Archive -Path (Join-Path $x '*') -DestinationPath $zip
+      $h = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+      [IO.File]::WriteAllText("$zip.sha256", "$h  ClaudeBoard-windows-x64.zip`n", [Text.UTF8Encoding]::new($false))
+      return $a
+    }
+
+    # (d) zip 에 플러그인 파일이 빠져 있으면 아무것도 건드리기 전에 throw - 깔린 파일·떠 있는 보드는 그대로
+    $noFile = & $makeAssets 'assets-nofile' { param($x) Remove-Item -LiteralPath (Join-Path $x 'plugins\md-render\hooks\register.tsx') -Force }
+    $before = & $snap
+    $o = & $runPs51 'update' $installPs1 $noFile
+    if ($o) {
+      Test-Value '(d) throw 함' $true $o.threw
+      Add-Check -Item '(d) 안내: zip 에 hooks\register.tsx 가 없다' -Expected '…받은 zip 에 plugins\md-render\hooks\register.tsx 가 없습니다.' -Actual $o.error -Pass ("$($o.error)" -like '*plugins\md-render\hooks\register.tsx*')
+    }
+    Test-Value '(d) 앱 폴더 파일이 그대로(내용·수정 시각)' $before (& $snap)
+    if ($board) { Test-Value '(d) 보드가 그대로 떠 있음' $true (Test-ProcessAlive $board.Pid) }
+
+    # (e) 바꿔 끼우는 도중 플러그인 폴더가 막혀 실패하면 이미 바꾼 최상위 파일까지 모두 되돌린다 - 열어 둔 파일 하나가 폴더 이름 바꾸기를 막는다.
+    # zip 의 README.md(최상위, 먼저 바뀜)와 플러그인 README.md 를 다르게 만들어 두어 되돌림이 없으면 눈에 띄게 한다
+    $changed = & $makeAssets 'assets-changed' {
+      param($x)
+      Add-Content -LiteralPath (Join-Path $x 'README.md') -Value 'CI 변경'
+      Add-Content -LiteralPath (Join-Path $x 'plugins\md-render\README.md') -Value 'CI 변경'
+    }
+    $before = & $snap
+    $lockFile = Join-Path $CbScriptDir 'plugins\md-render\hooks\register.tsx'
+    $held = [IO.File]::Open($lockFile, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
+    try {
+      $o = & $runPs51 'update' $installPs1 $changed
+    } finally {
+      $held.Dispose()
+    }
+    if ($o) {
+      Test-Value '(e) throw 함' $true $o.threw
+      Add-Check -Item '(e) 안내: 원래대로 되돌렸다' -Expected '…앱 파일을 바꿔 넣지 못해 원래대로 되돌렸습니다…' -Actual $o.error -Pass ("$($o.error)" -like '*원래대로 되돌렸습니다*')
+    }
+    Test-Value '(e) 앱 폴더 파일이 처음과 같음(내용·수정 시각, .old-* 없음)' $before (& $snap)
+
+    # uninstall.ps1 — irm | iex. 보드가 옮겨 쓴 md-render 사본(notifier\plugins\md-render)도 지워야 한다
+    New-PluginCopy
     $o = & $runPs51 'uninstall' $uninstallPs1
     if ($o) { Test-Value 'uninstall.ps1 throw 하지 않음' $null $o.error }
     Test-Value 'uninstall.ps1: 앱 폴더가 지워짐' $false (Test-Path -LiteralPath $CbScriptDir)
+    Test-PluginFiles $CbScriptDir 'uninstall.ps1: 지워진 앱 폴더' -Expect $false
+    Test-Value 'uninstall.ps1: notifier\plugins\md-render 사본이 지워짐' $false (Test-Path -LiteralPath $CbPluginCopy)
     Test-HooksRemoved
     Test-PreservedSettings
     Test-Value 'uninstall.ps1: 자동 실행 값이 지워짐' $null (Get-RunValue)

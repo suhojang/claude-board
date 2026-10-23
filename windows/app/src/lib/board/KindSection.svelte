@@ -31,7 +31,7 @@
     : "터미널 창에서 도는 세션 — 더블 클릭하면 그 터미널로 이동합니다") + (collapsed ? " (누르면 펼치기)" : " (누르면 접기)")}
 >
   <span class="chev" class:open={!collapsed}><Icon name="chevron-right" size={8} /></span>
-  <Icon name={headless ? "moon-stars" : "terminal"} size={10} />
+  <Icon name={headless ? "moon-stars" : "terminal"} size={12.5} />
   <span class="name">{headless ? "백그라운드" : "터미널"}</span>
   {#each counts as c (c.st)}
     <span class="count num" use:hint={`${stateName(c.st)} ${c.n}개`}>

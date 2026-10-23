@@ -12,16 +12,17 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
-use claude_board_core::console::{self, Input};
+use claude_board_core::console;
 use claude_board_core::proc::{self, ProcessTable};
 use claude_board_core::{clock, paths, quote};
 use serde_json::json;
 
 use crate::board::Board;
+use crate::drive::{drive, steps_for, still_same_session, Purpose};
 use crate::model::{Session, TerminalApp};
+use crate::open_session;
+use crate::session_action::SessionAction;
 use crate::util::board_log;
-
-pub const CARRY_ON_PROMPT: &str = "보드에서 일시중지했던 세션을 재개합니다. 중단된 지점부터 직전 작업을 이어서 진행해 주세요.";
 
 /// claude.exe 위치 — PATH, 없으면 `~/.local/bin/claude.exe`. `claude.cmd`(npm 설치의 shim)는 cmd.exe 가 인자를
 /// 한 줄로 다시 해석하므로 일부러 고르지 않는다.
@@ -134,19 +135,22 @@ fn create_console_process(exe: &Path, args: &[String], cwd: &Path, envs: &[(&str
     Ok(())
 }
 
-/// 세션 동작 — 프론트의 session_action 과 `--action` 이 부른다. 오래 걸리는 일이 있어 스레드에서 돈다.
-pub fn perform(board: &Arc<Board>, action: &str, s: Session, confirm: bool) {
+/// 세션 동작 — 프론트의 session_action 과 `--action` 이 부른다(이름은 `SessionAction::parse`). 오래 걸리는 일이 있어 스레드에서 돈다.
+pub fn perform(board: &Arc<Board>, action: &str, carry_on: Option<bool>, s: Session, confirm: bool) {
     let board = board.clone();
-    let action = action.to_string();
-    std::thread::spawn(move || match action.as_str() {
-        "activate" => activate(&s),
-        "focus" => focus(&s),
-        "resume" => resume(&board, &s, false),
-        "reopen" => resume(&board, &s, true),
-        "pause" => pause(&board, &s),
-        "resume_paused" => resume_paused(&board, &s),
-        "stop" => stop(&board, &s, confirm),
-        other => board_log(&format!("모르는 세션 동작: {other}")),
+    let Some(parsed) = SessionAction::parse(action, carry_on) else {
+        board_log(&format!("모르는 세션 동작: {action}"));
+        return;
+    };
+    std::thread::spawn(move || match parsed {
+        SessionAction::Activate => activate_owner(&s),
+        // 명령줄 focus(confirm=false)는 보드 허브가 그 세션의 탭을 고르게 하고, 보드 안 클릭은 바로 그 터미널 창을 앞으로 가져온다
+        SessionAction::Focus if confirm => focus_session(&s),
+        SessionAction::Focus => open_session::request(&board, &s, "focus", false),
+        SessionAction::Reopen { carry_on } => reopen_session(&board, &s, carry_on),
+        SessionAction::Pause => pause_session(&board, &s),
+        SessionAction::Resume => resume_paused(&board, &s),
+        SessionAction::Stop => stop_session(&board, &s, confirm),
     });
 }
 
@@ -155,8 +159,9 @@ fn paused_mark(board: &Board, s: &Session) -> PathBuf {
 }
 
 /// 일시중지: Esc 로 지금 응답을 멈춘다. 그때까지 한 작업은 대화 기록에 남아 있으므로 재개하면 바로 이어 간다.
-fn pause(board: &Arc<Board>, s: &Session) {
-    if s.pid == 0 || !console::send_input(s.pid, &[Input::Escape]) {
+/// 키가 들어간 뒤에만 일시중지 표시를 남긴다.
+fn pause_session(board: &Arc<Board>, s: &Session) {
+    if !drive(board, s, &steps_for(SessionAction::Pause), Purpose::Keys) {
         return;
     }
     let mark = json!({"paused_at": clock::now(), "topic": s.topic});
@@ -164,50 +169,43 @@ fn pause(board: &Arc<Board>, s: &Session) {
     board.publish();
 }
 
-/// 재개: 살아 있는 세션은 그 콘솔에 이어서 진행하라는 요청을 넣고, 꺼진 세션은 새 창에서 이어 연다.
+/// 재개: 살아 있는 세션에는 이어서 진행하라는 요청을 넣는다(못 넣으면 알리기만 한다 — 같은 세션을 한 번 더 열지 않는다).
+/// 꺼진 세션은 보드 터미널에서 이어 연다.
 fn resume_paused(board: &Arc<Board>, s: &Session) {
-    let inputs = [Input::Text(CARRY_ON_PROMPT), Input::Pause(Duration::from_millis(200)), Input::Enter];
-    if s.pid > 0 && proc::alive(s.pid, s.pid_ctime) && console::send_input(s.pid, &inputs) {
+    if s.pid == 0 || !proc::alive(s.pid, s.pid_ctime) {
+        return reopen_session(board, s, true);
+    }
+    if drive(board, s, &steps_for(SessionAction::Resume), Purpose::Keys) {
         let _ = fs::remove_file(paused_mark(board, s));
         board.publish();
-        return;
+    } else {
+        board.flash("키를 넣을 수 없어 재개하지 못했습니다", true);
     }
-    resume(board, s, true);
 }
 
-/// 중단: 확인을 받은 뒤 세션을 끝낸다. 콘솔에 붙을 수 있으면 Esc → /exit, 아니면 프로세스를 끝낸다.
+/// 중단: 확인을 받은 뒤 세션을 끝낸다. 닿을 곳에 따라 Esc → /exit 를 넣거나 프로세스를 끝낸다(보드 밖에서 도는 background 는 건드리지 않는다).
 /// 대화 기록은 남으므로 "세션 다시 열기"로 이어 열 수 있다.
-fn stop(board: &Arc<Board>, s: &Session, confirm: bool) {
+fn stop_session(board: &Arc<Board>, s: &Session, confirm: bool) {
     if confirm {
         let what = if s.topic.is_empty() { s.id.clone() } else { s.topic.clone() };
-        let text = format!("{what}\n\n진행 중인 응답을 멈추고 세션을 끝냅니다. 대화 기록은 남아서 나중에 다시 열 수 있습니다.");
+        let text = format!("{what}
+
+진행 중인 응답을 멈추고 세션을 끝냅니다. 대화 기록은 남아서 나중에 다시 열 수 있습니다.");
         if !board.confirm("세션을 중단할까요?", &text, "중단", "취소") {
             return;
         }
     }
-    let _ = fs::remove_file(paused_mark(board, s));
-    let inputs = [Input::Escape, Input::Pause(Duration::from_millis(400)), Input::Text("/exit"), Input::Pause(Duration::from_millis(200)), Input::Enter];
-    if !(s.can_drive && console::send_input(s.pid, &inputs)) && s.pid > 0 {
-        proc::terminate(s.pid);
-    }
+    // 확인 창이 떠 있는 동안 세션이 끝났거나 pid 가 바뀌었을 수 있다 — 새로 읽어 같은 세션일 때만 끝낸다
+    let Some(fresh) = still_same_session(s, board.session(&s.id)) else { return };
+    let _ = fs::remove_file(paused_mark(board, &fresh));
+    drive(board, &fresh, &steps_for(SessionAction::Stop), Purpose::Stop);
     board.publish();
 }
 
-/// 이어 열기: `claude <resume_args…> [carryOn 문구]` 를 프로젝트 폴더(claude 를 띄운 폴더 — 보드 카드의 경로. cd·워크트리로 옮긴 cwd 가 아니다)에서 새 콘솔로 띄운다.
-fn resume(board: &Arc<Board>, s: &Session, carry_on: bool) {
-    let mut args = s.resume_args.clone();
-    if carry_on {
-        // 일시중지했던 세션은 첫 요청으로 이어서 진행하라는 문구를 인자 하나로 넘겨 바로 다음 작업을 시작하게 한다
-        args.push(CARRY_ON_PROMPT.to_string());
-        let _ = fs::remove_file(paused_mark(board, s));
-    }
-    let Some(claude) = find_claude() else {
-        board.flash("claude 명령을 찾지 못했습니다", true);
-        return;
-    };
-    if let Err(e) = spawn_console(&claude, &args, Path::new(&s.project_dir), &[]) {
-        board.flash(format!("세션을 다시 열지 못했습니다 — {e}"), true);
-    }
+/// 이어 열기: 보드 터미널 허브가 그 세션을 탭에서 `claude <resume_args…>` 로 이어 열게 요청한다.
+/// 일시중지 표시는 여기서 지우지 않는다 — 허브가 열기를 마친 뒤 `reopen_done` 으로 알리면 그때 지운다.
+fn reopen_session(board: &Arc<Board>, s: &Session, carry_on: bool) {
+    open_session::request(board, s, "reopen", carry_on);
     board.publish();
 }
 
@@ -220,7 +218,7 @@ fn session_window(s: &Session) -> Option<isize> {
 }
 
 /// 한 번 클릭: 그 세션의 터미널 창만 앞으로. 모르면 Windows Terminal(없으면 아무것도 안 함).
-fn activate(s: &Session) {
+fn activate_owner(s: &Session) {
     match session_window(s) {
         Some(h) => crate::win::bring_to_front(h),
         None => activate_windows_terminal(),
@@ -235,7 +233,7 @@ fn activate_windows_terminal() {
 }
 
 /// 두 번 클릭: 그 세션의 창으로. Windows Terminal 이면 콘솔 제목을 잠깐 표지로 바꿔 UI Automation 으로 그 탭을 고른다.
-fn focus(s: &Session) {
+fn focus_session(s: &Session) {
     let Some(h) = session_window(s) else { return activate_windows_terminal() };
     let host = ProcessTable::capture().name(crate::win::window_pid(h)).map(str::to_ascii_lowercase);
     if host.as_deref() == Some("windowsterminal.exe") {
@@ -277,7 +275,7 @@ fn env_dir(key: &str) -> Option<PathBuf> {
 }
 
 /// 설치 위치 — PATH 와 알려진 위치. Windows 가 아니면 늘 없음.
-fn locate(id: &str) -> Option<PathBuf> {
+pub(crate) fn locate(id: &str) -> Option<PathBuf> {
     if !cfg!(windows) {
         return None;
     }
@@ -628,7 +626,7 @@ fs.renameSync(out + '.tmp', out);
                 "--resume",
                 "탭\t문자",
                 "  앞뒤 공백  ",
-                CARRY_ON_PROMPT,
+                crate::drive::CARRY_ON_PROMPT,
             ];
             let args: Vec<String> = std::iter::once(script.to_string_lossy().into_owned()).chain(cases.map(String::from)).collect();
             let system_root = std::env::var("SystemRoot").expect("SystemRoot 환경변수");

@@ -1,9 +1,11 @@
 <script lang="ts">
-  // 경로 카드(ClaudeBoard.swift:2203-2395): 머리(접기 화살표·폴더 또는 대표 상태·이름·경로·별·X·상태별 개수, 오른쪽 클릭 메뉴),
+  // 경로 카드(ClaudeBoard.swift GroupCard): 머리(접기 화살표·폴더 또는 대표 상태·이름·경로·별·X·상태별 개수, 오른쪽 클릭 메뉴),
   // 안에 터미널/백그라운드 구역과 세션 줄, "종료된 세션 n개"(접기, 마우스를 올리면 휴지통)
   import { cubicOut } from "svelte/easing";
   import { fade, fly, slide } from "svelte/transition";
   import type { BoardSettings, Group } from "$lib/types";
+  import { place } from "$lib/terminal/hub.svelte";
+  import { DEFAULT_SESSION_COMMAND, startSession } from "$lib/terminal/launch";
   import { hideGroup, removeEnded, toggleEndedOpen, toggleKindCollapsed, togglePinGroup } from "$lib/backend";
   import HeaderButton from "./HeaderButton.svelte";
   import Icon from "./Icon.svelte";
@@ -30,8 +32,9 @@
   const pinned = $derived(settings.pinnedGroups.includes(g.id));
   const endedOpen = $derived(settings.endedOpen.includes(g.id));
   const live = $derived(g.sessions.filter((s) => s.state !== "ended"));
-  const terminal = $derived(live.filter((s) => !s.headless));
-  const background = $derived(live.filter((s) => s.headless));
+  // 구역은 세션이 도는 자리로 나눈다(mac 구역 머리글) — 보드 탭 안에서 시작한 claude -p 는 터미널 구역이다
+  const terminal = $derived(live.filter((s) => place(s).kind !== "background"));
+  const background = $derived(live.filter((s) => place(s).kind === "background"));
   const ended = $derived(g.sessions.filter((s) => s.state === "ended"));
   const termFolded = $derived(settings.kindCollapsed.includes(`${g.id}|term`));
   const bgFolded = $derived(settings.kindCollapsed.includes(`${g.id}|bg`));
@@ -59,7 +62,7 @@
   const rowIn = (i: number) => ({ y: -10, duration: 380, delay: Math.min(i, 8) * 35, easing: cubicOut });
 </script>
 
-<div class="card" class:waiting={top === "waiting"} style:--c={c}>
+<div class="card" class:waiting={top === "waiting"} class:folded={collapsed} style:--c={c}>
   <div
     class="head"
     role="button"
@@ -69,7 +72,7 @@
     oncontextmenu={contextMenu}
   >
     <span class="chev" class:open={!collapsed} use:hint={collapsed ? "경로 카드 펼치기" : "경로 카드 접기"}>
-      <Icon name="chevron-right" size={11} />
+      <Icon name="chevron-right" size={12.5} />
     </span>
     <!-- 접혀 있어도 작업 중(도는 링)·승인 대기(퍼지는 파문)가 보이게 폴더 자리에 상태 표시를 그린다 -->
     <span
@@ -79,7 +82,7 @@
       {#if collapsed && lead}
         <StateIcon state={lead.state} />
       {:else}
-        <Icon name="folder" size={14} />
+        <Icon name="folder" size={17.5} />
       {/if}
     </span>
     <div class="names">
@@ -95,6 +98,11 @@
         <div class="path"><bdi>{g.path}</bdi></div>
       {/if}
     </div>
+    <HeaderButton
+      icon="plus"
+      help={`이 경로에서 새 세션 (${DEFAULT_SESSION_COMMAND})`}
+      onclick={() => startSession(DEFAULT_SESSION_COMMAND, g.id)}
+    />
     <HeaderButton
       icon={pinned ? "star-fill" : "star"}
       tint={pinned ? "255 199 71" : null}
@@ -191,10 +199,14 @@
     background: linear-gradient(135deg, rgb(var(--c) / 0.1), rgb(255 255 255 / 0.03));
     box-shadow:
       inset 0 0 0 1px rgb(var(--c) / 0.22),
-      0 3px 8px rgb(0 0 0 / 0.25);
+      0 3px 8px rgb(0 0 0 / 0.03);
     transition:
       box-shadow 0.4s ease-in-out,
       background 0.4s ease-in-out;
+  }
+  /* 접힌 카드는 macOS 쪽이 1px 더 높다(펼친 카드는 머리 아래 2px 여백이 따로 있어 맞는다) */
+  .card.folded {
+    padding-bottom: 13px;
   }
   /* 승인 대기가 있으면 테두리와 빛이 2.4초 주기로 천천히 숨 쉰다 */
   .card.waiting {
@@ -239,6 +251,7 @@
     display: grid;
     place-items: center;
     width: 10px;
+    margin: 0 1.5px 0 -1.5px;
     flex: none;
     color: var(--fg2);
     opacity: 0.6;
@@ -267,15 +280,18 @@
     color: rgb(var(--c));
     background: rgb(var(--c) / 0.16);
   }
+  /* SwiftUI 는 이름 칸과 단추 사이에 Spacer(최소 8)와 간격 둘이 끼어 이름이 단추에서 18px 더 떨어져 잘린다 */
   .names {
     flex: 1;
     min-width: 0;
+    margin-right: 18px;
     display: flex;
     flex-direction: column;
     gap: 1px;
   }
   .name {
     font-size: 15px;
+    line-height: 19px;
     font-weight: 600;
     white-space: nowrap;
     overflow: hidden;
@@ -283,14 +299,17 @@
   }
   .path {
     font-size: 11px;
+    line-height: 14px;
     color: var(--fg2);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
     direction: rtl;
     text-align: left;
+    padding-right: 3.75px;
   }
   .doing {
+    line-height: 15px;
     display: flex;
     gap: 4px;
     font-size: 11px;
@@ -309,6 +328,7 @@
     display: flex;
     gap: 6px;
     flex: none;
+    padding-right: 1.5px;
     color: var(--fg2);
   }
   .count {
@@ -333,9 +353,9 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 5px 10px;
+    padding: 4px 10px 6px;
     border-radius: 8px;
-    min-height: 26px;
+    min-height: 25px;
     color: var(--fg2);
     opacity: 0.7;
     cursor: pointer;
@@ -347,6 +367,7 @@
   }
   .ended .label {
     flex: 1;
+    line-height: 15px;
     font-size: 11px;
     font-weight: 500;
   }

@@ -8,18 +8,19 @@
     | "hand" | "check-circle" | "pause-circle" | "minus-circle" | "trash" | "gauge"
     | "warn" | "arrow-down-circle" | "hammer" | "moon-zzz" | "half-circle"
     | "snap-right" | "shrink" | "grow" | "win-min" | "win-close" | "shells" | "seal-check"
-    | "app-forward" | "app-plus" | "nosign";
+    | "app-forward" | "app-plus" | "nosign" | "plus" | "panel-left" | "panel-right";
 </script>
 
 <script lang="ts">
   // macOS 판이 쓰는 SF Symbols 를 직접 그린 SVG — 크기는 글자 크기(size)에 맞춘다
-  let { name, size = 12, class: cls = "" }: { name: IconName; size?: number; class?: string } = $props();
+  // pad: 좌우 여백(px, 음수 가능) — SF Symbol 은 보이는 그림과 칸 폭이 달라 칸 폭을 맞출 때 쓴다
+  let { name, size = 12, pad = 0, class: cls = "" }: { name: IconName; size?: number; pad?: number; class?: string } = $props();
   // 속을 비우는 아이콘(채운 원 안의 체크 등)은 가리개(mask)를 쓰므로 인스턴스마다 다른 id
   const uid = $props.id();
   const m = `url(#${uid})`;
 </script>
 
-<svg class="icon {cls}" width={size} height={size} viewBox="0 0 16 16" aria-hidden="true">
+<svg class="icon {cls}" width={size} height={size} viewBox="0 0 16 16" aria-hidden="true" style:margin-inline={pad ? `${pad}px` : undefined}>
   {#if name === "chevron-right"}
     <path d="M6 3.2 10.8 8 6 12.8" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" />
   {:else if name === "chevron-down"}
@@ -73,11 +74,13 @@
     <path d="M3.4 9.8a4.9 4.9 0 0 0 9 1.2" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
     <path d="M2.4 12.8V9.2H6z" fill="currentColor" stroke="currentColor" stroke-width="0.6" stroke-linejoin="round" />
   {:else if name === "compress"}
-    <path d="M2.5 8h11" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
-    <path d="M8 1.5v4M6 3.8 8 5.8l2-2M8 14.5v-4M6 12.2l2-2 2 2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
+    <!-- rectangle.compress.vertical — 가운데 납작한 사각형, 위아래에서 안쪽으로 향한 화살표 -->
+    <rect x="2.2" y="6.3" width="11.6" height="3.4" rx="1.1" fill="none" stroke="currentColor" stroke-width="1.4" />
+    <path d="M8 1.2v3.4M6.1 2.9 8 4.8l1.9-1.9M8 14.8v-3.4M6.1 13.1 8 11.2l1.9 1.9" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
   {:else if name === "expand"}
-    <path d="M2.5 1.8h11M2.5 14.2h11" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
-    <path d="M8 4.2v7.6M6 6.2l2-2 2 2M6 9.8l2 2 2-2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
+    <!-- rectangle.expand.vertical — 가운데 사각형, 위아래로 바깥을 향한 화살표 -->
+    <rect x="2.2" y="5.2" width="11.6" height="5.6" rx="1.4" fill="none" stroke="currentColor" stroke-width="1.4" />
+    <path d="M8 4.2V1.2M6.1 3 8 1.1 9.9 3M8 11.8v3M6.1 13 8 14.9 9.9 13" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
   {:else if name === "pin" || name === "pin-slash"}
     <g transform={name === "pin-slash" ? "rotate(45 8 8)" : ""}>
       <path d="M5.2 1.6h5.6l-.7 1.3v3.2l2 2.4v1H3.9v-1l2-2.4V2.9z" fill={name === "pin" ? "currentColor" : "none"} stroke="currentColor" stroke-width="1.2" stroke-linejoin="round" />
@@ -114,8 +117,9 @@
     <circle cx="11.3" cy="5.6" r="2.1" fill="currentColor" />
     <path d="M10.9 9.4c2.2 0 3.7 1.3 4.1 3.6h-3.6c-.2-1.4-.6-2.6-1.4-3.5z" fill="currentColor" />
   {:else if name === "wrench"}
-    <path d="M10.6 1.6a3.3 3.3 0 0 0-3.2 4.2L2.2 11a1.4 1.4 0 0 0 2 2l5.2-5.2a3.3 3.3 0 0 0 4.2-4.2l-1.9 1.9-1.6-.4-.4-1.6z" fill="currentColor" />
-    <path d="M2.6 2.6l1.6-.8 2.6 2.6-.8.8 4.6 4.6M11.4 11.4l1.5 1.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
+    <!-- wrench.and.screwdriver.fill — 몽키와 드라이버가 엇갈린다 -->
+    <path d="M11.6 1.4a3.2 3.2 0 0 0-3.1 4.1L2.4 11.6a1.4 1.4 0 0 0 2 2l6.1-6.1a3.2 3.2 0 0 0 4.1-3.1l-1.9 1.4-1.7-.3-.3-1.7z" fill="currentColor" />
+    <path d="M3 2.2l1.3-.7 2.1 2.1-.7 1.3-1.5.3L2.4 3.7z M7.6 8.4l1.2-1.2 5.4 5.4a1 1 0 0 1-1.4 1.4z" fill="currentColor" />
   {:else if name === "brain"}
     <path d="M7.8 1.8c-3 0-5.2 2.1-5.2 4.9 0 1.4.5 2.4 1.3 3.3v3.6c0 .4.3.6.6.6h4.2c.3 0 .6-.3.6-.6v-1.4h1.6c.7 0 1.2-.5 1.2-1.2V9.3l1.1-.4c.3-.1.4-.5.2-.8l-1.3-2C12 3.7 10.3 1.8 7.8 1.8z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" />
     <path d="M5.4 6.6c0-1.1.9-1.8 1.8-1.8.4-.5 1-.7 1.6-.5M6.6 8.6c.5.4 1.3.4 1.8 0" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" />
@@ -142,6 +146,14 @@
   {:else if name === "half-circle"}
     <circle cx="8" cy="8" r="6.2" fill="none" stroke="currentColor" stroke-width="1.5" />
     <path d="M8 1.8a6.2 6.2 0 0 0 0 12.4z" fill="currentColor" />
+  {:else if name === "plus"}
+    <path d="M8 2.6v10.8M2.6 8h10.8" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+  {:else if name === "panel-left"}
+    <rect x="1.2" y="2.4" width="13.6" height="11.2" rx="2.4" fill="none" stroke="currentColor" stroke-width="1.4" />
+    <rect x="3.4" y="4.6" width="4.2" height="6.8" rx="1" fill="currentColor" />
+  {:else if name === "panel-right"}
+    <rect x="1.2" y="2.4" width="13.6" height="11.2" rx="2.4" fill="none" stroke="currentColor" stroke-width="1.4" />
+    <rect x="8.4" y="4.6" width="4.2" height="6.8" rx="1" fill="currentColor" />
   {:else if name === "snap-right"}
     <rect x="1.2" y="2.4" width="13.6" height="11.2" rx="2.4" fill="none" stroke="currentColor" stroke-width="1.4" />
     <rect x="8.4" y="4.6" width="4.2" height="6.8" rx="1" fill="currentColor" />

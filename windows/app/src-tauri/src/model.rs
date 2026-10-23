@@ -90,6 +90,21 @@ pub struct Sub {
     pub brain: Option<Brain>,
 }
 
+/// 세션 pid 가 어느 보드 터미널에서 어떻게 도는지(W2 설계 §2) — `terms/pairing.rs` 가 3초마다 채우고
+/// 세션 JSON 에 펴서(`flatten`) 실린다. 모르면 모두 None.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PidPlace {
+    /// 이 pid 의 콘솔(또는 조상)이 보드 터미널 `TermId` 인 세션이다.
+    pub tty: Option<String>,
+    /// headless 세션이 그 터미널 셸 조상 아래에서 돈다(탭이 닫히면 함께 끝난다).
+    pub tab_ancestor: Option<String>,
+    /// 시작 방식 `-p` · `--bg`.
+    pub mode: Option<&'static str>,
+    /// 보드 밖 터미널 창의 앱 이름(Windows Terminal 등).
+    pub app_name: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Session {
@@ -102,6 +117,8 @@ pub struct Session {
     pub title: String,
     pub topic: String,
     pub message: String,
+    /// Claude Code 세션 이름(`~/.claude/sessions/<pid>.json` 의 `name`, SPEC §2.3) — 없거나 종료된 세션이면 None
+    pub name: Option<String>,
     pub ctx: Option<Ctx>,
     pub brain: Option<Brain>,
     pub subagents: Vec<Sub>,
@@ -110,6 +127,8 @@ pub struct Session {
     pub muted: bool,
     pub limit_at: Option<i64>,
     pub can_drive: bool,
+    #[serde(flatten)]
+    pub place: PidPlace,
     // ── 백엔드만 쓰는 값 ──
     #[serde(skip)]
     pub pid: u32,
@@ -281,6 +300,9 @@ pub struct SettingsView {
     pub opacity: f64,
     pub auto_switch: bool,
     pub board_mini: bool,
+    pub terminal_expanded: bool,
+    pub board_side: String,
+    pub board_pane_width: f64,
     pub notify_position: String,
 }
 
@@ -305,6 +327,10 @@ pub struct Snapshot {
     pub settings: SettingsView,
     pub claude_version: Option<String>,
     pub terminals: Vec<TerminalApp>,
+    /// 지금 claude 가 도는 보드 터미널 `TermId`들.
+    pub runs_claude: Vec<String>,
+    /// 셸이 프롬프트에 있는 보드 터미널 `TermId`들.
+    pub at_prompt: Vec<String>,
 }
 
 #[cfg(test)]

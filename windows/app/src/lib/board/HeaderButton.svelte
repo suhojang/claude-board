@@ -9,6 +9,8 @@
     help,
     onclick,
   }: { icon: IconName; tint?: string | null; help: string; onclick: () => void } = $props();
+  // SF Symbol 의 보이는 크기에 맞춘 아이콘 크기(16 칸 도안 안의 여백 때문에 글자 크기와 다르다)
+  const SIZE: Partial<Record<IconName, number>> = { plus: 14, star: 17, "star-fill": 17, xmark: 17 };
 </script>
 
 <button
@@ -22,7 +24,7 @@
   ondblclick={(e) => e.stopPropagation()}
   use:hint={help}
 >
-  <Icon name={icon} size={12} />
+  <Icon name={icon} size={SIZE[icon] ?? 12} />
 </button>
 
 <style>

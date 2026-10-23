@@ -1,4 +1,4 @@
-//! 업데이트 — `Updater` (`ClaudeBoard.swift:4097-4224`, SPEC §5.8).
+//! 업데이트 — `Updater` (`ClaudeBoard.swift Updater`, SPEC §5.8).
 //!
 //! **`/releases/latest` 를 쓰지 않는다** — 그 자리는 macOS 판 릴리스가 쓴다. 릴리스 목록 API 에서
 //! `windows-v` 로 시작하는 첫 정식 릴리스를 고른다. 업데이트는 그 태그의 install.ps1 을 받아 창 없이 분리 실행한다.

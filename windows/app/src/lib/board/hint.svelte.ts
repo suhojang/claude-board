@@ -1,4 +1,4 @@
-// 마우스를 올리면 곧 뜨는 짧은 설명(macOS HintPanel, ClaudeBoard.swift:2484-2582).
+// 마우스를 올리면 곧 뜨는 짧은 설명(macOS HintPanel, ClaudeBoard.swift HintPanel).
 // 시스템 툴팁은 오래 기다려야 뜨고 1초마다 다시 그리면 기다림이 처음부터 다시 시작돼 직접 띄운다.
 // 0.35초 뒤에 뜨고, 방금(0.4초 안) 떠 있었으면 옆 단추로 옮겨도 바로 뜬다. 누르거나 스크롤하면 사라진다
 const DELAY = 350;

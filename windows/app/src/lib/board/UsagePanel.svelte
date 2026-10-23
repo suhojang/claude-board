@@ -1,5 +1,5 @@
 <script lang="ts">
-  // 사용 한도 카드(ClaudeBoard.swift:1479-1628): 5시간·주간 전체·주간 모델별 막대. 머리에 로그인 계정(눌러서 전환),
+  // 사용 한도 카드(ClaudeBoard.swift UsagePanel): 5시간·주간 전체·주간 모델별 막대. 머리에 로그인 계정(눌러서 전환),
   // 오른쪽 위 단추로 간략(한 줄)·상세를 바꾼다. 중간 화면(forceCompact)에서는 저장한 설정은 두고 한 줄로만 보인다
   import { fade, slide } from "svelte/transition";
   import type { Snapshot } from "$lib/types";
@@ -33,7 +33,7 @@
     onclick={() => setUsageCompact(!setting)}
     use:hint={setting ? "자세히 보기 — 한도마다 막대와 초기화 시각" : "간략히 보기 — 한 줄로"}
   >
-    <Icon name={setting ? "expand" : "compress"} size={11} />
+    <Icon name={setting ? "expand" : "compress"} size={15} />
   </button>
 {/snippet}
 

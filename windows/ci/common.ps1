@@ -35,8 +35,13 @@ $CbNotifier = Join-Path $CbClaudeDir 'notifier'
 $CbSessions = Join-Path $CbNotifier 'sessions'
 $CbHookCopy = Join-Path $CbNotifier 'claude-board-hook.exe'
 $CbAppPath = Join-Path $CbNotifier 'app-path'
+$CbPluginCopy = Join-Path $CbNotifier 'plugins\md-render'
 $CbLocalBin = Join-Path $env:USERPROFILE '.local\bin'
 $CbCmdFiles = @('claude-board.cmd', 'claude-board-tui.cmd')
+# md-render 플러그인 - zip·setup.exe 모두 설치 폴더 아래 plugins\md-render\ 에 같은 상대 경로로 다섯 파일이 놓인다(SPEC 8.1).
+# 보드가 시작할 때 이 폴더를 notifier\plugins\md-render 로 옮겨 쓰고 제거가 그 사본을 지운다
+$CbPluginRel = 'plugins\md-render'
+$CbPluginFiles = @('LICENSE', 'README.md', '.claude-plugin\plugin.json', 'hooks\hooks.json', 'hooks\register.tsx')
 # setup.exe — tauri.windows.conf.json 의 installMode currentUser → Tauri NSIS 템플릿이 $LOCALAPPDATA\<productName> 에 깐다
 $CbSetupDir = Join-Path $env:LOCALAPPDATA 'Claude Board'
 # install.ps1 — %LOCALAPPDATA%\Programs\Claude Board (setup.exe 로 깐 폴더가 있으면 그쪽)
@@ -542,12 +547,27 @@ function Get-SettingsBackups {
   return @(Get-ChildItem -LiteralPath $CbClaudeDir -Filter 'settings.json.bak-claude-board-*' -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTimeUtc)
 }
 
-# notifier 에서 제거가 지워야 하는 것(SPEC 3.7, setup.rs 의 uninstall) 가운데 남은 것
+# notifier 에서 제거가 지워야 하는 것(SPEC 3.7, setup.rs 의 uninstall, md-render 사본 plugins) 가운데 남은 것
 function Get-NotifierLeftovers {
-  $names = @('claude-board-hook.exe', 'app-path', 'notify-position', 'sessions', 'accounts.json', 'accounts')
+  $names = @('claude-board-hook.exe', 'app-path', 'notify-position', 'sessions', 'accounts.json', 'accounts', 'plugins')
   $left = @($names | Where-Object { Test-Path -LiteralPath (Join-Path $CbNotifier $_) })
   $left += @(Get-ChildItem -LiteralPath $CbNotifier -Filter 'claude-board-hook.old-*' -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
   return $left
+}
+
+# 설치 폴더 아래 plugins\md-render\ 의 다섯 파일이 있는지(Expect 가 false 면 없는지) 확인한다
+function Test-PluginFiles {
+  param([string]$Root, [string]$Label, [bool]$Expect = $true)
+  foreach ($f in $CbPluginFiles) {
+    Test-Value "$Label 에 $CbPluginRel\$f" $Expect (Test-Path -LiteralPath (Join-Path $Root "$CbPluginRel\$f") -PathType Leaf)
+  }
+}
+
+# 보드가 옮겨 쓴 사본을 흉내 낸다 - 다섯 파일과 Claude Code 가 플러그인 폴더에 만드는 tsconfig.json·.claude-plugin\types
+function New-PluginCopy {
+  foreach ($f in $CbPluginFiles) { Write-Utf8 (Join-Path $CbPluginCopy $f) "CI 사본 $f" }
+  Write-Utf8 (Join-Path $CbPluginCopy 'tsconfig.json') '{}'
+  Write-Utf8 (Join-Path $CbPluginCopy '.claude-plugin\types\index.d.ts') '// CI'
 }
 
 # ---------------------------------------------------------------- 가짜 Claude Code

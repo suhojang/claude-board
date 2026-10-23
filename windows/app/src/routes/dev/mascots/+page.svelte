@@ -37,6 +37,7 @@
     title: topic || "요청 전",
     topic,
     message: "",
+    name: null,
     ctx: null,
     brain: null,
     subagents: [],
@@ -45,6 +46,11 @@
     muted: false,
     limitAt: null,
     canDrive: true,
+    // 세션 짝짓기 입력(SPEC §5.12, W2) — 그리기 시험 화면은 콘솔·탭이 없어 전부 null 로 둔다
+    tty: null,
+    tabAncestor: null,
+    mode: null,
+    appName: null,
   });
   const group = (s: Session): Group[] => [{ id: s.cwd, name: "claude-board", path: "~\\claude-board", sessions: [s] }];
 

@@ -1,4 +1,4 @@
-//! 계정 전환 — `AccountStore` (`ClaudeBoard.swift:369-789`, SPEC §5.5).
+//! 계정 전환 — `AccountStore` (`ClaudeBoard.swift AccountStore`, SPEC §5.5).
 //!
 //! macOS 키체인 대신 지금 로그인은 `~/.claude/.credentials.json`, 저장한 계정 토큰은
 //! `notifier/accounts/vault/<계정 id 의 sha256 앞 16자>.bin`(Windows 는 DPAPI 로 암호화)에 둔다.
