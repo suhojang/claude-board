@@ -172,10 +172,10 @@ func safeGit(_ args: [String], cwd: String) -> String {
 }
 // 엔진이 가지를 바꾸는 git(만들기·바꾸기·병합 커밋·ref 올리기): safeGit 과 같은 보호에 종료 코드와 오류 출력까지 돌려준다.
 // 전역 설정을 읽지 않으므로 엔진이 만드는 커밋에는 사용자 신원을 명령줄로 붙인다(없으면 "Please tell me who you are")
-func gitRun(_ args: [String], cwd: String, commit: Bool = false) -> (code: Int32, out: String) {
+func gitRun(_ args: [String], cwd: String, commit: Bool = false, withErr: Bool = true) -> (code: Int32, out: String) {
     var a = gitHardenEnv + ["/usr/bin/git"] + gitHardenC
     if commit { let i = gitIdentity(cwd); a += ["-c", "user.name=\(i.name)", "-c", "user.email=\(i.email)"] }
-    let r = runTool("/usr/bin/env", a + args, cwd: cwd, timeout: 120, withErr: true)
+    let r = runTool("/usr/bin/env", a + args, cwd: cwd, timeout: 120, withErr: withErr)
     return (r.code, r.out.trimmingCharacters(in: .whitespacesAndNewlines))
 }
 // 사용자 git 신원(값만 읽는다 — git config --get 은 아무것도 실행하지 않는다). 없으면 엔진 이름
@@ -754,24 +754,76 @@ func extraRefs(_ repo: String, _ common: String) -> [String: Any] {
     let shallow = fm.contents(atPath: common + "/shallow").map { sha256($0) }
     return ["tags": tags, "replace": replace.sorted(), "shallow": shallow ?? NSNull()]
 }
-// 저장소 지역 config 의 include·includeIf·filter(보안): git config 는 include 를 따라가므로 raw config 파일을 읽는다.
-// scope(쓰기 범위) 안을 가리키는 include 는 risky — 모델이 그 파일을 고쳐 filter 를 심으면 엔진 밖 git 이 실행할 수 있다
-func configIncludes(_ common: String, scope: [String]) -> (snapshot: [String], risky: [String]) {
-    guard let text = try? String(contentsOfFile: common + "/config", encoding: .utf8) else { return ([], []) }
-    var snap: [String] = [], risky: [String] = [], section = ""
-    for raw in text.split(separator: "\n", omittingEmptySubsequences: false) {
-        let line = raw.trimmingCharacters(in: .whitespaces)
-        if line.hasPrefix("[") { section = line.lowercased(); continue }
-        guard section.hasPrefix("[include") || section.hasPrefix("[filter"), !line.isEmpty, !line.hasPrefix("#"), !line.hasPrefix(";") else { continue }
-        snap.append(section + " " + line)
-        if section.hasPrefix("[include"), line.lowercased().hasPrefix("path"), let eq = line.firstIndex(of: "=") {
-            var p = line[line.index(after: eq)...].trimmingCharacters(in: .whitespaces)
-            if p.hasPrefix("~/") { p = home + p.dropFirst(1) }
-            let abs = p.hasPrefix("/") ? canonical(p) : canonical(common + "/" + p)
-            if scope.contains(where: { abs == $0 || abs.hasPrefix($0 + "/") }) { risky.append(abs) }
+// 경로의 실제 자리: 있는 가장 깊은 조상까지 realpath 로 풀고 나머지를 붙인다(없는 파일도 /tmp → /private/tmp·바로 가기 폴더를 푼 자리로).
+// 없는 대상을 가리키는 바로 가기도 그 대상 자리로 푼다(모델이 그 대상을 만들 수 있다)
+func physicalPath(_ p: String, hops: Int = 0) -> String {
+    var head = p, tail: [String] = []
+    while true {
+        if let r = realpath(head, nil) {
+            defer { free(r) }
+            return URL(fileURLWithPath: ([String(cString: r)] + tail.reversed()).joined(separator: "/")).standardizedFileURL.path
+        }
+        if hops < 32, let dest = try? fm.destinationOfSymbolicLink(atPath: head) {
+            let target = dest.hasPrefix("/") ? dest : (head as NSString).deletingLastPathComponent + "/" + dest
+            return physicalPath(([target] + tail.reversed()).joined(separator: "/"), hops: hops + 1)
+        }
+        let up = (head as NSString).deletingLastPathComponent
+        if up == head || up.isEmpty { return URL(fileURLWithPath: p).standardizedFileURL.path }
+        tail.append((head as NSString).lastPathComponent); head = up
+    }
+}
+// include 가 가리키면 위험한 자리(모델 쓰기 범위): 단위 작업 폴더·write_roots 에 더해 저장소 git 폴더(cwd 가 작업 트리 안이면 Claude Code 가
+// 공통 .git 을 자동 허용, 실측), 따로 작업 트리 뿌리, 실행 폴더의 단위 폴더, 임시 폴더(샌드박스 기본 허용 /tmp·/var/tmp 와 사용자 TMPDIR)
+func includeScope(_ paths: [String], gitDirs: [String], runDir: String) -> [String] {
+    paths + gitDirs + [home + "/.claude-board/worktrees", runDir + "/units", "/tmp", "/private/tmp", "/var/tmp", "/private/var/tmp", "/var/folders", "/private/var/folders"]
+}
+// 저장소 config 의 include·includeIf·filter(보안): git 이 해석한 대로 읽는다(git config --file <파일> --no-includes --null --list).
+// 줄 단위로 직접 읽으면 같은 줄 키·따옴표·줄 끝 주석·줄 잇기를 git 과 다르게 읽는다(보안 검토 2026-10-22 셋째). 읽는 파일은 공통 config·config.worktree
+// 와 (작업 트리면) 그 git 폴더의 config.worktree. include 는 git 규칙대로(그 파일이 있는 폴더 기준 상대 경로, ~ 풀기) 중첩까지 따라간다(방문 집합,
+// 깊이 10 = git 상한). scope 안을 가리키면 risky — 모델이 그 파일에 filter 를 심으면 엔진 밖 git 이 실행한다. 범위 밖 파일이 다시 범위 안을
+// include 해도, git 이 읽지 못하는 파일·깊이를 넘는 중첩도 risky. snapshot 은 저장소 자리 파일의 include·filter 만(밖 파일은 사람이 고칠 수 있어 뺀다)
+func configIncludes(_ common: String, gitDir: String, scope: [String]) -> (snapshot: [String], risky: [String]) {
+    var snap: [String] = [], risky: [String] = [], seen = Set<String>()
+    let sc = Set(scope.flatMap { [$0, physicalPath($0)] }.map { $0.lowercased() })   // 대소문자를 가리지 않는 볼륨이라 소문자로 견준다
+    func inScope(_ p: String) -> Bool {
+        [URL(fileURLWithPath: p).standardizedFileURL.path, physicalPath(p)].map { $0.lowercased() }
+            .contains { f in sc.contains { f == $0 || f.hasPrefix($0 + "/") } }
+    }
+    func walk(_ file: String, _ depth: Int, root: Bool) {
+        guard fm.fileExists(atPath: file), seen.insert(physicalPath(file)).inserted else { return }
+        // 표준 오류는 섞지 않는다(경고 줄이 첫 키에 붙으면 include 를 놓친다). cwd 는 / — 저장소를 찾지 않게
+        let r = gitRun(["config", "--file", file, "--no-includes", "--null", "--list"], cwd: "/", withErr: false)
+        guard r.code == 0 else { risky.append("파일을 git 이 읽지 못해(\(file))"); return }
+        let out = r.out
+        let dir = (physicalPath(file) as NSString).deletingLastPathComponent
+        for entry in out.split(separator: "\0") {
+            let nl = entry.firstIndex(of: "\n")   // 키\n값, 값 없는 키(불리언)는 줄바꿈이 없다
+            let k = String(entry[..<(nl ?? entry.endIndex)]).lowercased(), v = nl.map { String(entry[entry.index(after: $0)...]) }
+            let inc = k == "include.path" || (k.hasPrefix("includeif.") && k.hasSuffix(".path"))
+            if root, inc || k.hasPrefix("filter.") { snap.append(file + "\t" + k + (v.map { "=" + $0 } ?? "")) }
+            guard inc, let v, !v.isEmpty else { continue }
+            let p = v.hasPrefix("~") ? (v as NSString).expandingTildeInPath : (v.hasPrefix("/") ? v : dir + "/" + v)
+            if inScope(p) { risky.append("include 가 모델 쓰기 범위 안(\(p))을 가리켜") }
+            else if depth >= 10 { risky.append("include 가 10단 넘게 겹쳐(\(p))") }
+            else { walk(p, depth + 1, root: false) }
         }
     }
+    for f in [common + "/config", common + "/config.worktree"] + (gitDir != common ? [gitDir + "/config.worktree"] : []) { walk(f, 0, root: true) }
     return (snap, risky)
+}
+// config.worktree 지문(보안 2026-10-22 셋째): extensions.worktreeConfig 가 켜진 저장소면 git 이 읽는다. 모델이 filter·fsmonitor 를 심으면 엔진 밖
+// git(남은 변경 커밋의 add 등)이 실행할 수 있어 거부 목록으로 막고, 끝 검사가 출발 때와 견준다(바로 가기·FIFO 는 따라가지 않고 1 MiB 상한)
+func worktreeConfigPrints(_ common: String, gitDir: String) -> [String: String] {
+    var d: [String: String] = [:]
+    for p in Set([common, gitDir]).map({ $0 + "/config.worktree" }) {
+        switch readHarnessFile(p, budget: harnessFileCap) {
+        case .data(let x): d[p] = sha256(x)
+        case .large(let n): d[p] = "large:\(n)"
+        case .other(let k): d[p] = k
+        case nil: d[p] = "none"
+        }
+    }
+    return d
 }
 // 저장소 하나의 가지 기록 틀(두 모드 공통). workTree 가 있으면 따로 작업 트리 모드
 func repoRecord(_ f: [String: Any], _ r: String, work: String, original: String?, workTree: String?, scope: [String]) -> [String: Any] {
@@ -786,7 +838,8 @@ func repoRecord(_ f: [String: Any], _ r: String, work: String, original: String?
         "original": original ?? NSNull(), "original_head": headOf(r, "HEAD") ?? "", "restored": NSNull(),
         "git_dir": canonical(gitDir), "common_dir": common, "common_ino": gitStat(common) ?? NSNull(),
         "dirty_start": porcelain(wtCwd), "on": work, "made": [work],
-        "includes": configIncludes(common, scope: scope).snapshot, "extra": extraRefs(r, common)]
+        "includes": configIncludes(common, gitDir: canonical(gitDir), scope: scope).snapshot,
+        "config_worktree": worktreeConfigPrints(common, gitDir: canonical(gitDir)), "extra": extraRefs(r, common)]
     if let wt = workTree { one["work_tree"] = wt; one["work_git_dir"] = canonical(gitDir); one["work_git_ino"] = gitStat(canonical(gitDir)) ?? NSNull() }
     return one
 }
@@ -840,6 +893,12 @@ func startWorktree(_ f: [String: Any], id: String, scope: [String]) -> (branches
         else { try? fm.copyItem(atPath: src, toPath: dst) }
     }
     let one = repoRecord(f, r, work: work, original: currentBranch(r), workTree: wtPath, scope: scope)
+    // 작업 트리 git 폴더의 config.worktree(git 이 원래 것을 복사해 둠)는 상대 경로의 기준 폴더가 달라 출발 준비 확인과 다르게 풀릴 수 있어 다시 본다
+    let gd = one["git_dir"] as? String ?? "", cd = one["common_dir"] as? String ?? ""
+    if let p = configIncludes(cd, gitDir: gd, scope: scope + [wtPath, cd, gd]).risky.first {
+        rollbackBranches(["repos": [r: one]])
+        return ([:], [:], "", r, "작업 트리의 git config \(p) 작업 트리를 지웠습니다")
+    }
     let branches: [String: Any] = ["repos": [r: one], "start": [r: startHeads], "stories": [:] as [String: Any]]
     let worktree: [String: Any] = ["mode": "worktree", "repo": r, "path": wtPath, "branch": work,
                                    "base": (one["base"] as? [String: Any])?["head"] ?? "",
@@ -1842,6 +1901,8 @@ final class Engine {
             out += [c + "/HEAD", g + "/HEAD", c + "/packed-refs", c + "/config"]
             // 밖에서 도는 git 이 실행할 공통 .git 설정 자리(작업 트리 모드는 공통 .git 이 쓰기 범위라 harnessDeny 가 못 덮는다, 보안 2026-10-22 둘째)
             out += [c + "/hooks", c + "/config.worktree", c + "/info", c + "/commondir", c + "/objects/info/alternates"]
+            // 작업 트리 git 폴더의 config.worktree(extensions.worktreeConfig 면 git 이 읽는다, 보안 2026-10-22 셋째). 따로 작업 트리와 원래 저장소가 작업 트리인 경우
+            if g != c { out.append(g + "/config.worktree") }
             // 보안: replace ref(검토 속이기)와 shallow(얕은 복제로 이력 가리기)
             out += [c + "/refs/replace", c + "/shallow", g + "/shallow"]
             for d in storyDirs where !on.hasPrefix(d + "/") { out.append(c + "/refs/heads/" + d) }
@@ -2024,7 +2085,7 @@ final class Engine {
         }
         b["end"] = end; b["moved"] = moved; b["created"] = created
         // 보안(2026-10-22 둘째): 실행 중에 새로 생긴 replace ref·바뀐 tag·shallow·include/filter 를 보고한다(되돌리지 않고 보여만 준다)
-        var replaceNew: [[String: Any]] = [], tagsChanged: [[String: Any]] = [], shallowChanged: [String] = [], includeChanged: [String] = []
+        var replaceNew: [[String: Any]] = [], tagsChanged: [[String: Any]] = [], shallowChanged: [String] = [], includeChanged: [String] = [], worktreeConfigChanged: [String] = []
         for r in repos {
             let i = repoInfo(r); let c = i["common_dir"] as? String ?? r + "/.git"
             let nowE = extraRefs(r, c), wasE = i["extra"] as? [String: Any] ?? [:]
@@ -2034,9 +2095,12 @@ final class Engine {
             let wasR = Set(wasE["replace"] as? [String] ?? []), nowR = Set(nowE["replace"] as? [String] ?? [])
             for x in nowR.subtracting(wasR).sorted() { replaceNew.append(["repo": r, "object": x]) }
             if jtext(wasE["shallow"]) != jtext(nowE["shallow"]) { shallowChanged.append(r) }
-            if (i["includes"] as? [String] ?? []) != configIncludes(c, scope: []).snapshot { includeChanged.append(r) }
+            let g = i["git_dir"] as? String ?? c
+            if (i["includes"] as? [String] ?? []) != configIncludes(c, gitDir: g, scope: []).snapshot { includeChanged.append(r) }
+            if let was = i["config_worktree"] as? [String: String], was != worktreeConfigPrints(c, gitDir: g) { worktreeConfigChanged.append(r) }
         }
         b["replace_new"] = replaceNew; b["tags_changed"] = tagsChanged; b["shallow_changed"] = shallowChanged; b["include_changed"] = includeChanged
+        b["config_worktree_changed"] = worktreeConfigChanged
         br = b
         let other = created.filter { $0["by"] as? String == "other" }.compactMap { $0["branch"] as? String }
         if moved.isEmpty {
@@ -2045,8 +2109,8 @@ final class Engine {
             let some = moved.prefix(3).map { "\(repoName($0["repo"] as? String ?? "")) \($0["branch"] ?? "")" }
             event("engine", "출발 때 있던 가지 \(moved.count)개가 움직였습니다(\(some.joined(separator: ", "))\(moved.count > 3 ? " 등" : "")). 되돌리지 않았습니다. 사람이 확인하세요.")
         }
-        if !replaceNew.isEmpty || !tagsChanged.isEmpty || !shallowChanged.isEmpty || !includeChanged.isEmpty {
-            event("engine", "보안: 실행 중에 replace 객체 \(replaceNew.count)개, 태그 변화 \(tagsChanged.count)개, shallow 변화 \(shallowChanged.count)곳, include/filter 변화 \(includeChanged.count)곳이 생겼습니다. 사람이 push·검토 전에 확인하세요.")
+        if !replaceNew.isEmpty || !tagsChanged.isEmpty || !shallowChanged.isEmpty || !includeChanged.isEmpty || !worktreeConfigChanged.isEmpty {
+            event("engine", "보안: 실행 중에 replace 객체 \(replaceNew.count)개, 태그 변화 \(tagsChanged.count)개, shallow 변화 \(shallowChanged.count)곳, include/filter 변화 \(includeChanged.count)곳, config.worktree 변화 \(worktreeConfigChanged.count)곳이 생겼습니다. 사람이 push·검토 전에 확인하세요.")
         }
     }
 
@@ -3014,12 +3078,19 @@ func prepare(_ dir: String, dev: Bool) -> (problems: [String], frozen: [String: 
     } else if let sd = (f["set"] as? [String: Any])?["dir"] as? String, let a = readJSON(sd + "/worktree_files.json") as? [Any] {
         f["worktree_files"] = a
     }
-    let scope = (units.compactMap { $0["cwd"] as? String } + roots)
-    for r in repos {   // 보안(2026-10-22 둘째): git config 의 include 가 쓰기 범위 안을 가리키면 모델이 그 파일로 filter 를 심을 수 있어 출발을 막는다
+    // 보안(2026-10-22 둘째·셋째): git config 의 include 가 모델 쓰기 범위 안을 가리키면 모델이 그 파일로 filter 를 심을 수 있어 출발을 막는다.
+    // 범위는 원래 경로로 잰다(따로 작업 트리도 precheck 실패면 원래 작업 트리로 떨어진다). 저장소마다 공통 .git·git 폴더를 함께 범위에 넣는다
+    var gitDirsOf: [String: (common: String, git: String)] = [:]
+    for r in repos {
         var common = gitOut(["rev-parse", "--git-common-dir"], cwd: r) ?? r + "/.git"
         if !common.hasPrefix("/") { common = canonical(r + "/" + common) }
-        for p in configIncludes(canonical(common), scope: scope).risky {
-            problems.append("\(repoName(r)) 의 git config include 가 쓰기 범위 안(\(p))을 가리킵니다. 모델이 그 파일로 명령을 심을 수 있어 출발하지 않습니다(밖으로 옮기세요)")
+        gitDirsOf[r] = (canonical(common), canonical(gitOut(["rev-parse", "--absolute-git-dir"], cwd: r) ?? common))
+    }
+    let scope = includeScope(units.compactMap { $0["cwd"] as? String } + roots, gitDirs: gitDirsOf.values.flatMap { [$0.common, $0.git] }, runDir: dir)
+    for r in repos {
+        guard let g = gitDirsOf[r] else { continue }
+        for p in configIncludes(g.common, gitDir: g.git, scope: scope).risky {
+            problems.append("\(repoName(r)) 의 git config \(p) 출발하지 않습니다(모델이 고칠 수 있는 파일로 엔진 밖 git 에 명령을 심을 수 있습니다. include 를 범위 밖으로 옮기거나 고치세요)")
         }
     }
     let forced = run["worktree_mode"] as? String ?? (f["project"] as? String).flatMap { projectSettings($0, dev: dev)?["worktree_mode"] as? String }
@@ -3110,7 +3181,7 @@ func cmdStart(_ args: [String]) -> Never {
     // 가지·작업 트리를 먼저 만들고 경로를 바꾼 뒤에 고정 설정을 쓴다(remap 이 해시에 들어가야 한다, 설계 4장 "시작과 끝").
     // 따로 작업 트리(단일 저장소)면 작업 트리를 만들고 ④ precheck 를 그 자리에서 보고, 실패하면 원래 작업 트리로 떨어진다
     var fz = frozen
-    let scope = (fz["units"] as? [[String: Any]] ?? []).compactMap { $0["cwd"] as? String } + (fz["write_roots"] as? [String] ?? [])
+    let scope = includeScope((fz["units"] as? [[String: Any]] ?? []).compactMap { $0["cwd"] as? String } + (fz["write_roots"] as? [String] ?? []), gitDirs: [], runDir: dir)
     var branches: [String: Any] = [:]
     func inPlace(_ reason: String) {
         let (b, err) = startBranches(fz, id: id, scope: scope)
