@@ -2999,6 +2999,15 @@ func prepare(_ dir: String, dev: Bool) -> (problems: [String], frozen: [String: 
             if let a = v as? [String] {
                 let earlier = units.compactMap { $0["id"] as? String }
                 for x in a where !earlier.contains(x) { problems.append("단위 \(n) 의 depends 에 적은 \(x) 는 앞선 단위의 id 가 아닙니다") }
+                // 기대는 단위는 한 스토리(설계 2장 끝, 2026-10-27): 스토리 가지는 출발 가지 머리에서 만들어 다른 스토리의 앞 단위 변경이 없다.
+                // story 가 둘 다 없으면 같음(Jira 아닌 실행은 그대로), Jira 단위와 Jira 아닌 단위 사이도 거부
+                for x in a {
+                    guard let j = units.firstIndex(where: { $0["id"] as? String == x }) else { continue }
+                    let mine = d["story"] as? String, theirs = units[j]["story"] as? String
+                    if mine != theirs {
+                        problems.append("단위 \(n) 의 depends 가 다른 스토리의 단위를 가리킵니다: 단위 \(n) 의 스토리 \(mine ?? "없음"), 기대는 단위 \(j + 1) 의 스토리 \(theirs ?? "없음"). 기대는 단위는 같은 스토리에 둡니다(스토리 가지는 출발 가지에서 따로 만들어 앞 단위의 변경이 들어오지 않습니다)")
+                    }
+                }
                 d["depends"] = a
             } else { problems.append("단위 \(n) 의 depends 는 앞선 단위 id 의 배열이어야 합니다") }
         }
@@ -3043,6 +3052,23 @@ func prepare(_ dir: String, dev: Bool) -> (problems: [String], frozen: [String: 
         if !tp.contains("{task}") { problems.append("프로젝트 설정 tickets.branch_names.task 꼴에 {task} 가 있어야 합니다") }
         if !["merge", "ff"].contains(how) { problems.append("프로젝트 설정 tickets.merge 는 merge(병합 커밋) 또는 ff(앞으로 감기)입니다") }
         f["tickets"] = ["branch_names": ["story": sp, "task": tp], "merge": how, "type_by_kind": typeByKind]
+        // 한 스토리는 같은 종류만(2026-10-27 사용자 결정): {type} 을 단위 종류로 채우면 섞인 스토리의 스토리 가지가 갈린다.
+        // 꼴에 {type} 이 없어도 같은 규칙으로 막는다. kind 가 없거나 빈 단위는 "없음" 한 값으로 센다
+        var storyOrder: [String] = [], kindsOf: [String: [(kind: String, n: Int)]] = [:]
+        for (i, u) in units.enumerated() {
+            guard let s = u["story"] as? String else { continue }
+            if kindsOf[s] == nil { storyOrder.append(s) }
+            let k = u["kind"] as? String ?? ""
+            kindsOf[s, default: []].append((k.isEmpty ? "없음" : k, i + 1))
+        }
+        for s in storyOrder {
+            let ks = kindsOf[s] ?? []
+            var kinds: [String] = []
+            for k in ks where !kinds.contains(k.kind) { kinds.append(k.kind) }
+            guard kinds.count > 1 else { continue }
+            let detail = kinds.map { k in "\(k)(단위 " + ks.filter { $0.kind == k }.map { "\($0.n)" }.joined(separator: "·") + ")" }.joined(separator: ", ")
+            problems.append("스토리 \(s) 에 단위 종류가 섞여 있습니다: \(detail). 한 스토리에는 같은 종류의 단위만 묶습니다")
+        }
         var seen = Set<String>()
         for i in units.indices {
             guard let story = units[i]["story"] as? String else { continue }
