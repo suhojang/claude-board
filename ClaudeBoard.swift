@@ -66,6 +66,9 @@ struct Sub: Identifiable, Equatable {
             let ended = (v["ended"] as? Double).map { Date(timeIntervalSince1970: $0) }
             // 끝난 서브에이전트는 10초 동안만 보여 준다
             if let ended, now.timeIntervalSince(ended) > 10 { return nil }
+            // 시작 hook 없이 생긴 기록(끝 hook 이나 도구 hook 만 옴)은 실제 서브에이전트가 아니다 — 전사 파일도 종류도 없고,
+            // 끝 hook 이 끝내 안 오면 실행 중으로 남아 세션을 계속 작업 중으로 보이게 하므로 목록에서 뺀다
+            if !(v["started_seen"] as? Bool ?? false) { return nil }
             return Sub(id: id,
                        type: v["type"] as? String ?? "",
                        desc: v["description"] as? String ?? "",

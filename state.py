@@ -162,7 +162,10 @@ def track_subagent(rec, data, state, now):
     subs = rec.setdefault("subagents", {})
     aid = data["agent_id"]
     event = data.get("hook_event_name")
-    sub = subs.setdefault(aid, {"type": data.get("agent_type") or "", "started": now, "state": "running"})
+    sub = subs.setdefault(aid, {"type": data.get("agent_type") or "", "started": now, "state": "running", "started_seen": False})
+    # 시작 hook 을 본 서브에이전트만 시작 시각을 믿는다 — 시작 없이 끝 hook 만 왔으면 시작 시각은 끝 시각을 흉내 낸 값이다
+    if event == "SubagentStart" and not sub.get("started_seen"):
+        sub.update(started=now, started_seen=True)
     if not sub.get("description"):
         meta = subagent_meta(data.get("transcript_path"), aid)
         if meta:
