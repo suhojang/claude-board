@@ -6,6 +6,7 @@ import Combine
 import CryptoKit
 import GhosttyTerminal
 import GhosttyTheme
+import SQLite3
 import SwiftUI
 
 // MARK: - 데이터
@@ -1653,9 +1654,11 @@ struct UsagePanel: View {
     @ObservedObject var accounts: AccountStore
     let now: Date
     var forceCompact = false    // 창이 낮아 중간 화면일 때 — 저장한 간략·상세 설정은 두고 한 줄로만 보인다
+    var stoplines: [String: Double]? = nil   // 자율주행 보기: 한도 id(5h·7d) → 멈출 선(%) 눈금
     let busy: () -> [Session]
     @AppStorage("usageCompact") private var compactSetting = false
-    private var compact: Bool { compactSetting || forceCompact }
+    // 자율주행 보기는 멈출 선 눈금이 보이게 상세로(간략 한 줄은 좁으면 막대를 뺀다). 중간 화면은 그래도 한 줄
+    private var compact: Bool { (compactSetting && stoplines == nil) || forceCompact }
 
     static func color(_ p: Double) -> Color {
         p < 50 ? Color(red: 0.42, green: 0.85, blue: 0.60) : p < 80 ? Color(red: 1.00, green: 0.70, blue: 0.36)
@@ -1674,7 +1677,7 @@ struct UsagePanel: View {
         HStack(spacing: 8) {
             ForEach(Array(usage.limits.enumerated()), id: \.element.id) { i, l in
                 if i > 0 { Rectangle().fill(Color.white.opacity(0.14)).frame(width: 0.5, height: 12) }
-                CompactLimit(limit: l, level: level, now: now)
+                CompactLimit(limit: l, level: level, now: now, stopline: stoplines?[l.id])
             }
         }
         .fixedSize()
@@ -1726,6 +1729,9 @@ struct UsagePanel: View {
                 HStack(spacing: 6) {
                     Text(l.label).boardFont(12, weight: .semibold).lineLimit(1).layoutPriority(1)
                     Spacer(minLength: 4)
+                    if let line = stoplines?[l.id] {
+                        Text("멈출 선 \(Int(line.rounded()))%").boardFont(10.5).foregroundStyle(.secondary).lineLimit(1).fixedSize()
+                    }
                     Text(resetText(l.resets, now)).boardFont(10.5).foregroundStyle(.secondary)
                         .monospacedDigit()
                         .lineLimit(1)
@@ -1743,6 +1749,10 @@ struct UsagePanel: View {
                             .fill(LinearGradient(colors: [c.opacity(0.65), c], startPoint: .leading, endPoint: .trailing))
                             .frame(width: max(4, geo.size.width * CGFloat(min(l.pct, 100)) / 100))
                             .shadow(color: c.opacity(0.45), radius: 4)
+                        if let line = stoplines?[l.id] {   // 자율주행 멈출 선 — 닿으면 지금 단위는 마치고 새 단위는 초기화 뒤에
+                            Rectangle().fill(Color.white.opacity(0.85)).frame(width: 1.5, height: 11)
+                                .offset(x: geo.size.width * CGFloat(min(line, 100)) / 100 - 0.75)
+                        }
                     }
                 }
                 .frame(height: 6)
@@ -1757,6 +1767,7 @@ struct CompactLimit: View {
     let limit: Limit
     let level: Int          // 0 이름·막대·비율, 1 이름·비율, 2 짧은 이름·비율
     let now: Date
+    var stopline: Double? = nil   // 자율주행 보기의 멈출 선(%) — 작은 막대에 눈금
     var body: some View {
         let c = UsagePanel.color(limit.pct)
         HStack(spacing: 4) {
@@ -1767,6 +1778,9 @@ struct CompactLimit: View {
                 ZStack(alignment: .leading) {
                     Capsule().fill(Color.white.opacity(0.10))
                     Capsule().fill(c).frame(width: max(2, 26 * CGFloat(min(limit.pct, 100)) / 100))
+                    if let s = stopline {
+                        Rectangle().fill(Color.white.opacity(0.85)).frame(width: 1, height: 7).offset(x: 26 * CGFloat(min(s, 100)) / 100 - 0.5)
+                    }
                 }
                 .frame(width: 26, height: 4)
             }
@@ -1775,7 +1789,7 @@ struct CompactLimit: View {
                 .foregroundStyle(c)
                 .contentTransition(.numericText())
         }
-        .hint("\(limit.label) \(Int(limit.pct.rounded()))% · \(resetText(limit.resets, now))")
+        .hint("\(limit.label) \(Int(limit.pct.rounded()))% · \(resetText(limit.resets, now))" + (stopline.map { " · 자율주행 멈출 선 \(Int($0.rounded()))%" } ?? ""))
     }
 }
 
@@ -2730,6 +2744,9 @@ struct GroupCard: View {
     let remove: () -> Void
     let clearEnded: () -> Void
     @ObservedObject private var hub = TerminalHub.shared
+    // 이 경로를 쓰는 자율주행 실행 — 실행 줄(기본 보기에서는 숨김)과 원래 작업 트리 표지(늘)
+    @ObservedObject private var autopilot = AutopilotStore.shared
+    @AppStorage("autopilotView") private var autopilotView = "all"
     @State private var hover = false
     @State private var endedHover = false
     // 접어 둔 구역 "<작업경로>|term" / "<작업경로>|bg" (줄바꿈으로 이음) — 앱을 다시 켜도 유지한다
@@ -2749,6 +2766,7 @@ struct GroupCard: View {
     var body: some View {
         let c = Palette.color(g.urgent)
         let here = hub.expanded && hub.workspace == workspaceKey(g.id)   // 펼친 터미널이 이 경로를 보이는 중
+        let apRuns = autopilot.runs(at: g.id)
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 10) {
                 Image(systemName: "chevron.right")
@@ -2825,6 +2843,13 @@ struct GroupCard: View {
             .contextMenu {
                 Button(pinned ? "상단 고정 풀기" : "상단에 고정", action: togglePin)
                 Button("목록에서 지우기", role: .destructive, action: remove)
+            }
+
+            // 원래 작업 트리로 자율주행이 도는 경로의 표지 — 기본 보기에서도 남긴다. 좁은 카드에서 이름이 밀리지 않게 머리 아래 줄에 둔다
+            if let r = apRuns.first(where: \.inPlace) { APInPlaceRow(run: r) }
+            // 자율주행 실행 줄 — 그 경로의 세션 카드 무리 안(와이어프레임 보드 본체 ③). 접힌 카드에서는 한 줄로
+            if autopilotView != "basic" {
+                ForEach(apRuns) { r in APRunLine(run: r, minutes: r.unitMinutes(now), compact: collapsed).equatable().transition(.opacity) }
             }
 
             if !collapsed {
@@ -4347,6 +4372,9 @@ struct BoardView: View {
     @ObservedObject private var fit = BoardFit.shared
     @State private var mediumOpen: Set<String> = []
     @ObservedObject private var updater = Updater.shared
+    // 자율주행 — 실행 줄과 자율주행 중·지난 실행 화면(보드 쪽 전체를 바꿈). 보기: 모두·기본(실행 줄 숨김)·자율주행(실행 줄만)
+    @ObservedObject private var autopilot = AutopilotStore.shared
+    @AppStorage("autopilotView") private var autopilotView = "all"
 
     private func updateHidden() {
         guard tops.viewport > 0 else { return }
@@ -4503,12 +4531,19 @@ struct BoardView: View {
     // 창 크기 단계에 따라 미니 화면 또는 전체·중간 화면
     var body: some View {
         ZStack(alignment: .bottom) {
-            if fit.tier == .mini {
-                MiniBoard(store: store, usage: usage)
-                    .background(Backdrop())
-                    .preferredColorScheme(.dark)
-            } else {
-                board
+            switch autopilot.screen {
+            case .running(let id):
+                APRunningScreen(ap: autopilot, id: id)
+            case .history(let selected):
+                APHistoryScreen(ap: autopilot, selected: selected)
+            case .board:
+                if fit.tier == .mini {
+                    MiniBoard(store: store, usage: usage)
+                        .background(Backdrop())
+                        .preferredColorScheme(.dark)
+                } else {
+                    board
+                }
             }
             TerminalNotice(hub: TerminalHub.shared)
         }
@@ -4518,6 +4553,10 @@ struct BoardView: View {
     private var board: some View {
         let tier = fit.tier
         let medium = tier == .medium
+        let runs = autopilot.runs
+        let autoOnly = autopilotView == "auto" && !runs.isEmpty   // 도는 실행이 없으면 모두 보기로 그린다
+        // 경로 카드가 없는 실행 — 자율주행 세션은 세션 파일을 남기지 않아 사람 세션이 없던 경로에는 카드가 없다
+        let orphans = autopilotView == "basic" || filter != nil ? [] : runs.filter { r in !store.groups.contains { r.covers($0.id) } }
         return VStack(alignment: .leading, spacing: 14) {
             // 윗줄은 늘 두 줄 — 제목 아래 줄에 상태 칩(왼쪽)과 단추(오른쪽).
             // 한 줄·두 줄을 폭에 따라 바꾸면 "알림 꺼짐" 글자가 생길 때마다 단추 줄이 위아래로 오간다
@@ -4528,6 +4567,7 @@ struct BoardView: View {
                     Foreman(groups: store.groups, limits: usage.limits, now: store.now)
                 }
                 headerControls
+                APBar(ap: autopilot, view: $autopilotView)
             }
             .padding(.top, 6)
 
@@ -4535,11 +4575,12 @@ struct BoardView: View {
                 UpdateBanner(updater: updater).transition(.move(edge: .top).combined(with: .opacity))
             }
 
-            UsagePanel(usage: usage, accounts: accounts, now: store.now, forceCompact: medium) {
+            UsagePanel(usage: usage, accounts: accounts, now: store.now, forceCompact: medium,
+                       stoplines: autoOnly ? autopilot.stoplines : nil) {
                 store.groups.flatMap(\.sessions).filter { $0.state == "working" || $0.state == "waiting" }
             }
 
-            if store.groups.isEmpty {
+            if store.groups.isEmpty && runs.isEmpty {
                 VStack(spacing: 10) {
                     Image(systemName: "moon.zzz.fill").font(.system(size: 30)).foregroundStyle(.secondary)
                     Text("아직 기록된 세션이 없습니다").boardFont(14, weight: .medium)
@@ -4567,7 +4608,11 @@ struct BoardView: View {
                 ScrollViewReader { proxy in
                 ScrollView(showsIndicators: true) {
                     VStack(spacing: 12) {
-                        ForEach(shownGroups) { g in
+                        // 자율주행 보기는 실행 카드만, 다른 보기는 카드 없는 실행을 맨 위에
+                        ForEach(autoOnly ? runs : orphans) { r in
+                            APRunCard(run: r, minutes: r.unitMinutes(store.now), meters: !autoOnly).equatable().transition(.opacity)
+                        }
+                        ForEach(autoOnly ? [] : shownGroups) { g in
                             GroupCard(g: g, now: store.now,
                                       collapsed: medium ? !mediumOpen.contains(g.id) : store.collapsed.contains(g.id),
                                       toggle: { if medium { mediumOpen.formSymmetricDifference([g.id]) } else { store.toggle(g.id) } },
@@ -5740,7 +5785,12 @@ final class SplitNode {
     }
 
     // 새 세션 — claude 면 보드가 세션 id 를 붙여 미리 안다. 답변 꾸미기는 새 세션 창의 체크(경로 카드 "+" 는 늘 켬) — 끄면 그 세션 id 를 기억한다
-    func startSession(_ command: String, in dir: String, mdRender: Bool = true) {
+    func startSession(_ command: String, in dir: String, mdRender: Bool = true, warned: Bool = false) {
+        // 원래 작업 트리로 자율주행이 도는 경로면 먼저 경고한다(막지는 않는다) — 경로 카드 "+"·새 세션 창 모두 여기로 온다
+        if !warned, let r = AutopilotStore.shared.inPlaceRun(covering: dir) {
+            warnAutopilotPath(r, dir: dir) { self.startSession(command, in: dir, mdRender: mdRender, warned: true) }
+            return
+        }
         let (cmd, id) = freshSessionCommand(mdRenderCommand(command, off: !mdRender))
         launch(cmd, in: dir, sessionId: id, mdRenderOff: !mdRender)
     }
@@ -7445,6 +7495,1900 @@ var terminalToggleSink: AnyCancellable?
     }
 }
 
+// MARK: - 자율주행
+
+// 보드 자율주행 모드 2단계 첫 조각: 읽기 기초·자율주행 중·지난 실행(설계 docs/자율주행/설계.md 6장 2단계, 화면은 와이어프레임 5판).
+// 실행 상태의 주인은 엔진(claude-autopilot)이다. 보드는 엔진이 남긴 실행 폴더(runs/<실행 id>/)와 기록 저장소(private/records.sqlite)를
+// 읽어 그리고, 사람이 누른 일시정지·재개·중단만 control.json 으로 남긴다 — 보드의 유일한 쓰기이고 끝난 실행에는 쓰지 않는다(엔진 control 명령과 같은 규칙).
+// 엔진 전용 자리(private/<실행 id>/, runs/*/engine/, pinned/)는 읽지 않는다
+
+// 자율주행 뿌리 — 엔진의 autopilotRoot 와 같은 자리. 시험 빌드(번들 id com.claude.board.dev)는 Claude Board Dev 뿌리라
+// 설치판의 실제 실행과 섞이지 않는다(엔진도 --dev 출발은 그 뿌리를 쓴다). 맨 위 코드의 전역 값(instanceName)보다 먼저 불릴 수 있어 계산 값으로 둔다
+var autopilotRoot: String {
+    NSHomeDirectory() + "/Library/Application Support/"
+        + (Bundle.main.bundleIdentifier == "com.claude.board.dev" ? "Claude Board Dev" : "Claude Board") + "/autopilot"
+}
+
+private func apRead(_ path: String) -> Any? {
+    FileManager.default.contents(atPath: path).flatMap { try? JSONSerialization.jsonObject(with: $0) }
+}
+private func apNum(_ v: Any?) -> Double? { (v as? NSNumber)?.doubleValue }
+private func apStamp(_ path: String) -> Double { mtime(path)?.timeIntervalSince1970 ?? 0 }
+private func apStrings(_ v: Any?) -> [String] { (v as? [Any] ?? []).map { "\($0)" } }
+private func apText(_ v: Any?) -> String? { (v as? String).flatMap { $0.isEmpty ? nil : $0 } }
+
+// 모델이 쓴 글의 긴 줄표는 보드에 그릴 때 쉼표로 바꾼다(설계: 보고서를 그릴 때 바꾼다, 사용자에게 보이는 글에는 긴 줄표를 쓰지 않는다)
+func apPlain(_ s: String) -> String {
+    s.replacingOccurrences(of: " — ", with: ", ").replacingOccurrences(of: "—", with: ", ")
+}
+
+private let apDayTime = formatter("M월 d일 HH:mm"), apDayOnly = formatter("M월 d일")
+func apDate(_ ts: Double?) -> String { ts.map { apDayTime.string(from: Date(timeIntervalSince1970: $0)) } ?? "날짜 모름" }
+func apDay(_ ts: Double?) -> String { ts.map { apDayOnly.string(from: Date(timeIntervalSince1970: $0)) } ?? "날짜 모름" }
+func apClock(_ ts: Double) -> String { clock(Date(timeIntervalSince1970: ts)) }
+// 걸린 시간 — 1분 안이면 초, 한 시간 안이면 분, 그 위는 시간·분
+func apDur(_ sec: Double) -> String {
+    let s = max(0, Int(sec))
+    if s == 0 { return "0분" }
+    if s < 60 { return "\(s)초" }
+    return s >= 3600 ? "\(s / 3600)시간 \(s % 3600 / 60)분" : "\(s / 60)분"
+}
+func apUSD(_ x: Double) -> String { String(format: "%.2f", x) }
+func apKind(_ k: String) -> String {
+    ["fix": "고침", "dev": "개발", "feature": "개발", "story": "개발", "test": "시험", "doc": "문서", "docs": "문서", "env": "환경"][k.lowercased()] ?? k
+}
+func apUnitLabel(_ s: String) -> String {
+    ["pending": "대기", "running": "진행 중", "done": "통과", "failed": "미통과", "capped": "상한에서 멈춤", "stopped": "중단", "skipped": "건너뜀"][s] ?? s
+}
+
+enum APColor {
+    static let work = Palette.color("working")
+    static let wait = Palette.color("waiting")
+    static let judge = Color(red: 0.74, green: 0.60, blue: 1.00)
+    static let limit = Color(red: 1.00, green: 0.62, blue: 0.36)
+    static let stop = Color(red: 0.98, green: 0.80, blue: 0.35)
+    static let pause = Palette.color("paused")
+    static let ok = Color(red: 0.42, green: 0.85, blue: 0.60)
+    static let fail = Color(red: 1.00, green: 0.45, blue: 0.45)
+    static let cap = Color(red: 1.00, green: 0.70, blue: 0.36)
+    static let muted = Color(white: 0.64)
+    static let jira = Color(red: 0.40, green: 0.78, blue: 0.95)
+    static let board = Color(red: 0.66, green: 0.76, blue: 1.00)
+    static let model = Color(red: 0.55, green: 0.88, blue: 0.80)
+
+    static func unit(_ s: String) -> Color {
+        switch s {
+        case "done": ok
+        case "failed": fail
+        case "capped": cap
+        case "running": work
+        default: muted
+        }
+    }
+}
+
+// 단위 상한 — 단위 시계(분)·누적 비용(USD)·주간 사용률(%p). 엔진 기본 120분·100 USD·5%p
+struct APCaps: Equatable {
+    var minutes = 120.0, usd = 100.0, pp = 5.0
+    static func from(_ j: Any?, _ base: APCaps = APCaps()) -> APCaps {
+        let o = j as? [String: Any] ?? [:]
+        return APCaps(minutes: apNum(o["minutes"]) ?? base.minutes, usd: apNum(o["usd"]) ?? base.usd, pp: apNum(o["weekly_pp"]) ?? base.pp)
+    }
+}
+
+// 단위 하나 — 정의·상태는 queue.json(엔진이 출발 때 동결), 진행은 units/<n>/engine.json(엔진이 보드에 내놓는 사본)
+struct APUnit: Equatable, Identifiable {
+    let n: Int
+    var id: Int { n }
+    var title = "", kind = "", status = "pending", cwd = "", check = "", unitId = ""
+    var tickets: [String] = []
+    var story: String?
+    var branch: String?
+    var estMin: Double?
+    var depends: [String] = []
+    var phase = "", reason = ""
+    var activeSec = 0.0, cost = 0.0, weeklyPP = 0.0
+    var tries = 0
+    var started: Double?, ended: Double?
+    var savedAt = 0.0          // engine.json 을 쓴 시각 — 단위 시계는 엔진이 5초마다(판정 중에는 시작·끝에만) 쓰므로 그 뒤로 흐른 만큼 더해 보인다
+    var caps: APCaps?
+    var merge: String?         // Jira 작업 → 스토리: merged·nothing·not_merged
+    var mergeWhy = ""
+    // Jira 작업 키 — 스토리가 있는 단위의 tickets 첫 값
+    var task: String? { story == nil ? nil : tickets.first }
+}
+
+struct APEvent: Equatable { let ts: Double; let who: String; let text: String }
+
+// 실행 하나 — run.json·queue.json·units/<n>/engine.json 을 합친 것
+struct APRun: Equatable, Identifiable {
+    let id: String
+    let dir: String
+    var title = "", state = "", reason = ""
+    var project: String?
+    var unit = 0
+    var caps = APCaps()
+    var unitCaps: APCaps?
+    var waitUntil: Double?
+    var pid: Int32 = 0
+    var alive = false
+    var started: Double?, ended: Double?
+    var five: Double?, fiveResets: Double?, seven: Double?, sevenResets: Double?
+    var stop7 = 0.80, stop5 = 0.95
+    var mode = ""                       // worktree·in_place — 없으면(저장소가 아님) 원래 자리에서 돈다
+    var repos: [String] = []            // 원래 저장소(따로 작업 트리면 그 원래 저장소 하나)
+    var worktreePath: String?
+    var work = ""                       // autopilot/<실행 id>
+    var bases: [String: String] = [:]   // 저장소 → 출발 가지
+    var originals: [String: String] = [:]
+    var existing: [String] = []         // 출발 때 있던 가지(쓰기 금지)
+    var storyBranches: [String] = []
+    var checkRetries = 2
+    var checkTimeout = 10.0
+    var controlSeen = 0.0
+    var units: [APUnit] = []
+
+    var active: Bool { !state.isEmpty && !["done", "stopped", "error"].contains(state) }
+    var jira: Bool { units.contains { $0.story != nil } }
+    var current: APUnit? { unit >= 1 && unit <= units.count ? units[unit - 1] : nil }
+    var totalCost: Double { units.reduce(0) { $0 + $1.cost } }
+    var passed: Int { units.filter { $0.status == "done" }.count }
+    var remaining: Int { units.filter { $0.status == "pending" || $0.status == "running" }.count }
+    var inPlace: Bool { mode != "worktree" }
+    var name: String { project ?? repos.first.map { ($0 as NSString).lastPathComponent } ?? id }
+    var modeLabel: String { mode == "worktree" ? "따로 작업 트리" : "원래 작업 트리" }
+
+    // 이 실행이 그 경로를 쓰는가 — 저장소 안이거나 같은 자리, 또는 그 경로가 저장소를 품은 폴더(홈은 빼고). 글자 그대로 견준다
+    func covers(_ path: String) -> Bool {
+        repos.contains { r in path == r || path.hasPrefix(r + "/") || (r.hasPrefix(path + "/") && path != NSHomeDirectory()) }
+    }
+    // 단위가 도는 저장소 이름 — 따로 작업 트리면 작업 트리 경로를 원래 저장소로 읽는다
+    func repoName(_ u: APUnit) -> String {
+        if let w = worktreePath, u.cwd == w || u.cwd.hasPrefix(w + "/"), let r = repos.first { return (r as NSString).lastPathComponent }
+        let r = repos.first { u.cwd == $0 || u.cwd.hasPrefix($0 + "/") } ?? u.cwd
+        return (r as NSString).lastPathComponent
+    }
+    // 보드 본체의 실행 줄이 쓰는 지금 단위의 단위 시계(분)
+    func unitMinutes(_ now: Date) -> Int { current.map { Int(activeSec($0, now) / 60) } ?? 0 }
+    // 단위 시계 — 엔진이 쓴 값에 마지막 저장 뒤로 흐른 시간을 더한다(일하는 중이고 엔진이 살아 있을 때만, 대기·일시정지는 세지 않는다)
+    func activeSec(_ u: APUnit, _ now: Date) -> Double {
+        guard state == "running", alive, u.status == "running", ["model", "check", "action"].contains(u.phase), u.savedAt > 0 else { return u.activeSec }
+        // 판정 중에는 엔진이 시작·끝에만 쓰므로 판정 시간 상한까지, 그 밖(5초마다 씀)은 15분까지만 더한다
+        let cap = u.phase == "check" ? checkTimeout * 60 + 60 : 900
+        return u.activeSec + min(max(0, now.timeIntervalSince1970 - u.savedAt), cap)
+    }
+
+    static func parse(id: String, dir: String) -> APRun? {
+        guard let r = apRead(dir + "/run.json") as? [String: Any] else { return nil }
+        var x = APRun(id: id, dir: dir)
+        x.title = r["title"] as? String ?? ""
+        x.state = r["state"] as? String ?? ""
+        x.reason = r["reason"] as? String ?? ""
+        x.project = apText(r["project"])
+        x.unit = Int(apNum(r["unit"]) ?? 0)
+        x.caps = APCaps.from(r["caps"])
+        if r["unit_caps"] is [String: Any] { x.unitCaps = APCaps.from(r["unit_caps"], x.caps) }
+        x.waitUntil = apNum(r["wait_until"])
+        x.pid = Int32(apNum(r["engine_pid"]) ?? 0)
+        x.started = apNum(r["started"])
+        x.ended = apNum(r["ended"])
+        let use = r["usage"] as? [String: Any] ?? [:]
+        x.five = apNum(use["five_hour"]); x.fiveResets = apNum(use["five_hour_resets"])
+        x.seven = apNum(use["seven_day"]); x.sevenResets = apNum(use["seven_day_resets"])
+        let line = r["stopline"] as? [String: Any] ?? [:]
+        x.stop7 = apNum(line["seven_day"]) ?? 0.80
+        x.stop5 = apNum(line["five_hour"]) ?? 0.95
+        x.checkRetries = Int(apNum(r["check_retries"]) ?? 2)
+        x.checkTimeout = apNum(r["check_timeout_min"]) ?? 10
+        x.controlSeen = apNum(r["control_seen"]) ?? 0
+        let br = r["branches"] as? [String: Any] ?? [:]
+        let repos = br["repos"] as? [String: Any] ?? [:]
+        for (k, v) in repos {
+            let i = v as? [String: Any] ?? [:]
+            if let b = (i["base"] as? [String: Any])?["branch"] as? String { x.bases[k] = b }
+            if let o = i["original"] as? String { x.originals[k] = o }
+            if let w = i["work"] as? String { x.work = w }
+        }
+        x.storyBranches = (br["stories"] as? [String: Any] ?? [:]).values.compactMap { ($0 as? [String: Any])?["branch"] as? String }.sorted()
+        let start = br["start"] as? [String: Any] ?? [:]
+        x.existing = Set(start.values.flatMap { ($0 as? [String: Any])?.keys.map { String($0) } ?? [] })
+            .subtracting([x.work]).subtracting(x.storyBranches).sorted()
+        let wt = r["worktree"] as? [String: Any] ?? [:]
+        x.mode = wt["mode"] as? String ?? ""
+        if x.mode == "worktree" {
+            x.repos = [wt["repo"] as? String].compactMap { $0 }
+            x.worktreePath = wt["path"] as? String
+        } else {
+            x.repos = (wt["repos"] as? [String]) ?? repos.keys.sorted()
+        }
+        if x.work.isEmpty, let b = wt["branch"] as? String { x.work = b }
+        let q = apRead(dir + "/queue.json") as? [[String: Any]] ?? []
+        for (i, d) in q.enumerated() {
+            var u = APUnit(n: i + 1)
+            u.title = d["title"] as? String ?? "단위 \(i + 1)"
+            u.kind = d["kind"] as? String ?? ""
+            u.status = d["status"] as? String ?? "pending"
+            u.cwd = d["cwd"] as? String ?? ""
+            u.check = d["check"] as? String ?? ""
+            u.unitId = d["id"] as? String ?? ""
+            u.tickets = apStrings(d["tickets"])
+            u.story = apText(d["story"])
+            u.branch = apText(d["branch"])
+            u.estMin = apNum(d["est_min"])
+            u.depends = apStrings(d["depends"])
+            let ep = dir + "/units/\(i + 1)/engine.json"
+            if let e = apRead(ep) as? [String: Any] {
+                u.phase = e["phase"] as? String ?? ""
+                u.reason = e["reason"] as? String ?? ""
+                u.activeSec = apNum(e["active_sec"]) ?? 0
+                u.cost = apNum(e["cost_usd"]) ?? 0
+                u.weeklyPP = apNum(e["weekly_pp"]) ?? 0
+                u.tries = Int(apNum(e["try"]) ?? 0)
+                u.started = apNum(e["started"])
+                u.ended = apNum(e["ended"])
+                if e["caps"] is [String: Any] { u.caps = APCaps.from(e["caps"], x.caps) }
+                if let m = e["merge"] as? [String: Any] { u.merge = m["state"] as? String; u.mergeWhy = m["why"] as? String ?? "" }
+                if let b = apText(e["branch"]) { u.branch = b }
+                u.savedAt = apStamp(ep)
+            }
+            x.units.append(u)
+        }
+        // 저장소가 아닌 작업 폴더에서 도는 실행은 가지 기록이 없다 — 단위 작업 폴더를 경로로 쓴다
+        if x.repos.isEmpty { x.repos = Array(Set(x.units.map(\.cwd).filter { !$0.isEmpty })).sorted() }
+        return x
+    }
+}
+
+enum APScreen: Equatable {
+    case board
+    case running(String)        // 실행 id
+    case history(String?)       // 고른 지난 실행(작은 크기에서 nil 이면 목록)
+}
+
+struct APSent: Equatable { let action: String; let ts: Double }
+
+// 진행 기록 묶음 — 단위 번호(출발 0, 끝 -1)와 그 줄들(오래된 것부터)
+struct APLogGroup: Identifiable {
+    let id: Int
+    var lines: [APEvent]
+}
+
+// 자율주행 읽기 — 1초마다 runs/ 를 훑는다. 파일마다 수정 시각을 기억해 바뀐 실행만 다시 풀고, 끝난 실행은 run.json 만 본다(보고 있는 실행은 빼고).
+// 진행 기록(events.jsonl)은 자율주행 중 화면이 보는 실행만 이어 읽고, 기록 저장소는 지난 실행 화면이 떠 있을 때 저장소·WAL 파일이 바뀌었을 때만 읽는다
+@MainActor final class AutopilotStore: ObservableObject {
+    static let shared = AutopilotStore()
+    @Published private(set) var runs: [APRun] = []        // 끝나지 않은 실행(출발 순)
+    @Published private(set) var viewed: APRun?            // 자율주행 중 화면이 보는 실행 — 끝난 뒤에도 그 화면에서는 끝 상태로 남는다
+    @Published private(set) var events: [APEvent] = []
+    @Published private(set) var sent: [String: APSent] = [:]   // 보낸 요청 — 엔진이 받을 때(run.json control_seen)까지 단추를 잠근다
+    @Published private(set) var history = APHistory()
+    @Published private(set) var detail: APPastDetail?
+    @Published var screen: APScreen = .board { didSet { if screen != oldValue { tick() } } }
+    private var cache: [String: (stamp: [Double], run: APRun?)] = [:]
+    private var evDir = "", evOffset: UInt64 = 0, evRest = Data()
+    private var dbStamp: [Double] = [], detailKey = ""
+    private var timer: Timer?
+
+    private init() {
+        tick()
+        let t = Timer(timeInterval: 1, repeats: true) { [weak self] _ in MainActor.assumeIsolated { self?.tick() } }
+        RunLoop.main.add(t, forMode: .common)
+        timer = t
+    }
+
+    private func stampOf(_ dir: String, units: Int) -> [Double] {
+        [apStamp(dir + "/run.json"), apStamp(dir + "/queue.json")] + (0..<units).map { apStamp(dir + "/units/\($0 + 1)/engine.json") }
+    }
+
+    func tick() {
+        let base = autopilotRoot + "/runs"
+        let names = ((try? FileManager.default.contentsOfDirectory(atPath: base)) ?? []).filter { !$0.hasPrefix(".") }
+        var viewing: String?
+        if case .running(let id) = screen { viewing = id }
+        var live: [APRun] = [], seen = Set<String>(), view: APRun?
+        for name in names {
+            let dir = base + "/" + name
+            let runM = apStamp(dir + "/run.json")
+            guard runM > 0 else { continue }
+            seen.insert(dir)
+            var run: APRun?
+            if let c = cache[dir], c.stamp.first == runM, let r = c.run, !r.active, name != viewing {
+                run = r   // 끝난 실행 — 대기열·단위 파일은 보지 않는다
+            } else {
+                let st = stampOf(dir, units: cache[dir]?.run?.units.count ?? 0)
+                if let c = cache[dir], c.stamp == st {
+                    run = c.run
+                } else {
+                    run = APRun.parse(id: name, dir: dir)
+                    cache[dir] = (stampOf(dir, units: run?.units.count ?? 0), run)
+                }
+            }
+            guard var r = run else { continue }
+            r.alive = r.pid > 0 && (kill(r.pid, 0) == 0 || errno == EPERM)
+            if r.active { live.append(r) }
+            if name == viewing { view = r }
+        }
+        cache = cache.filter { seen.contains($0.key) }
+        live.sort { ($0.started ?? .infinity, $0.id) < ($1.started ?? .infinity, $1.id) }
+        if live != runs { runs = live }
+        if view != viewed { viewed = view }
+        // 엔진이 받았거나(control_seen) 20초가 지나도 안 받으면(엔진이 꺼짐) 단추를 다시 푼다
+        let now = Date().timeIntervalSince1970
+        let keep = sent.filter { id, s in
+            guard let r = live.first(where: { $0.id == id }) ?? (view?.id == id ? view : nil), r.active else { return false }
+            return r.controlSeen + 0.0005 < s.ts && now - s.ts < 20
+        }
+        if keep != sent { sent = keep }
+        if let v = viewing { readEvents(base + "/" + v) } else if !evDir.isEmpty { evDir = ""; evOffset = 0; evRest = Data(); events = [] }
+        if case .history(let sel) = screen { readHistory(sel) }
+    }
+
+    // events.jsonl 을 이어 읽는다 — 앞에서 읽은 자리부터 새 줄만. 파일이 줄었으면 처음부터
+    private func readEvents(_ dir: String) {
+        if evDir != dir { evDir = dir; evOffset = 0; evRest = Data(); if !events.isEmpty { events = [] } }
+        guard let h = FileHandle(forReadingAtPath: dir + "/events.jsonl") else { return }
+        defer { try? h.close() }
+        let end = (try? h.seekToEnd()) ?? 0
+        if end < evOffset { evOffset = 0; evRest = Data(); events = [] }
+        guard end > evOffset else { return }
+        try? h.seek(toOffset: evOffset)
+        let chunk = (try? h.readToEnd()) ?? Data()
+        evOffset += UInt64(chunk.count)
+        var data = evRest + chunk
+        var add: [APEvent] = []
+        if let last = data.lastIndex(of: UInt8(ascii: "\n")) {
+            evRest = data[data.index(after: last)...]
+            data = data[..<last]
+        } else {
+            evRest = data
+            return
+        }
+        for line in data.split(separator: UInt8(ascii: "\n")) {
+            guard let j = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any], let text = j["text"] as? String else { continue }
+            add.append(APEvent(ts: apNum(j["ts"]) ?? 0, who: j["who"] as? String ?? "", text: text))
+        }
+        guard !add.isEmpty else { return }
+        var all = events + add
+        if all.count > 5000 { all.removeFirst(all.count - 5000) }
+        events = all
+    }
+
+    private func readHistory(_ sel: String?) {
+        let db = autopilotRoot + "/private/records.sqlite"
+        let st = [apStamp(db), apStamp(db + "-wal")]   // WAL 이라 체크포인트 전까지 본 파일 시각이 그대로다 — 둘 다 본다
+        if st != dbStamp {
+            dbStamp = st
+            history = APRecords.list(db)
+            detailKey = ""
+        }
+        let id = sel ?? history.runs.first?.id ?? ""
+        guard id != detailKey else { return }
+        detailKey = id
+        detail = id.isEmpty ? nil : history.runs.first { $0.id == id }.flatMap { APRecords.detail(db, $0) }
+    }
+
+    // 경로 카드에 들어갈 실행
+    func runs(at path: String) -> [APRun] { runs.filter { $0.covers(path) } }
+    // 원래 작업 트리로 그 경로를 쓰는 실행 — 보드 탭 새 세션 경고
+    func inPlaceRun(covering dir: String) -> APRun? { runs.first { $0.inPlace && $0.covers(dir) } }
+    // 자율주행 보기의 사용량 상자 멈출 선(%, UsagePanel 의 한도 id 로)
+    var stoplines: [String: Double]? {
+        runs.first.map { ["5h": $0.stop5 * 100, "7d": $0.stop7 * 100] }
+    }
+
+    // 일시정지·재개·중단 — control.json 을 엔진 control 명령과 같은 꼴({"action","ts"}, 임시 파일을 바꿔 넣음)로 쓴다.
+    // 쓰기 직전에 run.json 을 다시 읽어 끝난 실행이면 쓰지 않는다
+    func send(_ action: String, _ run: APRun) {
+        guard ["pause", "resume", "stop"].contains(action), sent[run.id] == nil else { return }
+        let state = (apRead(run.dir + "/run.json") as? [String: Any])?["state"] as? String ?? ""
+        guard !state.isEmpty, !["done", "stopped", "error"].contains(state) else { return }
+        let ts = (Date().timeIntervalSince1970 * 1000).rounded() / 1000
+        guard let data = try? JSONSerialization.data(withJSONObject: ["action": action, "ts": ts], options: [.prettyPrinted, .sortedKeys]) else { return }
+        let path = run.dir + "/control.json", tmp = path + ".tmp-\(getpid())"
+        guard FileManager.default.createFile(atPath: tmp, contents: data + Data("\n".utf8)), rename(tmp, path) == 0 else {
+            unlink(tmp)
+            boardLog("자율주행 \(run.id): control.json 을 쓰지 못했습니다(\(action))")
+            return
+        }
+        sent[run.id] = APSent(action: action, ts: ts)
+    }
+
+    // 진행 기록을 단위별로 묶는다. events.jsonl 에는 단위 번호가 없어 단위의 시작·끝 시각(engine.json)으로 가른다:
+    // 단위 창(시작 ~ 끝 + 1초) 안이면 그 단위, 다음 단위 시작 3초 앞의 보드 줄(스토리·작업 가지 만들기)이면 다음 단위, 그 밖의 틈(멈출 선·환경 확인 대기)은
+    // 앞 단위. 첫 단위 앞은 출발(0), 실행이 끝났다는 줄부터는 끝(-1)
+    static func groups(_ run: APRun, _ events: [APEvent]) -> [APLogGroup] {
+        let starts = run.units.compactMap { u in u.started.map { (u.n, $0, u.ended) } }.sorted { $0.1 < $1.1 }
+        let finishes = ["자율주행을 마쳤습니다", "사람이 중단해 실행을 마칩니다", "엔진 오류로 멈춥니다", "고정한 실행 설정이 출발 때와 달라"]
+        var out: [Int: [APEvent]] = [:], order: [Int] = []
+        var finished = false
+        for e in events {
+            if !run.active, !finished, finishes.contains(where: { e.text.hasPrefix($0) }) { finished = true }
+            var g = 0
+            if finished {
+                g = -1
+            } else if let i = starts.lastIndex(where: { $0.1 <= e.ts }) {
+                let s = starts[i]
+                if s.2 == nil || e.ts <= s.2! + 1 {
+                    g = s.0
+                } else if i + 1 < starts.count, e.who != "engine", starts[i + 1].1 - e.ts <= 3 {
+                    g = starts[i + 1].0
+                } else {
+                    g = s.0
+                }
+            } else if let f = starts.first, e.who != "engine", f.1 - e.ts <= 3 {
+                g = f.0
+            }
+            if out[g] == nil { order.append(g) }
+            out[g, default: []].append(e)
+        }
+        return order.map { APLogGroup(id: $0, lines: out[$0] ?? []) }
+    }
+}
+
+// MARK: 자율주행 · 기록 저장소(읽기 전용)
+
+private let apSQLiteTransient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+
+struct APChange: Equatable { let path: String; let change: String }
+
+struct APResult: Equatable {
+    var headline = ""
+    var summary: [String] = [], risks: [String] = [], tests: [String] = [], changes: [String] = []
+    static func parse(_ text: String?) -> APResult? {
+        guard let t = text, let j = (try? JSONSerialization.jsonObject(with: Data(t.utf8))) as? [String: Any] else { return nil }
+        func list(_ k: String) -> [String] { (j[k] as? [Any] ?? []).map { apPlain("\($0)") } }
+        var r = APResult()
+        r.headline = apPlain(j["headline"] as? String ?? "")
+        r.summary = list("summary")
+        r.risks = list("risks")
+        r.tests = (j["tests"] as? [[String: Any]] ?? []).map { t in
+            let res = ["pass": "통과", "fail": "실패", "skip": "건너뜀"][t["result"] as? String ?? ""] ?? (t["result"] as? String ?? "")
+            return apPlain("\(t["name"] as? String ?? "시험") \(res)")
+        }
+        r.changes = (j["changes"] as? [[String: Any]] ?? []).map { c in
+            apPlain([c["what"] as? String, c["where"] as? String].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · "))
+        }
+        return r
+    }
+}
+
+struct APPastRun: Equatable, Identifiable {
+    let id: String
+    var project: String?
+    var projectName = "", title = "", state = "", reason = "", model = "", runDir = ""
+    var started: Double?, ended: Double?
+    var total = 0, done = 0, failed = 0, capped = 0, stopped = 0, skipped = 0, stories = 0, jiraUnits = 0
+    var activeSec = 0.0, cost = 0.0
+    var mode = ""
+    var hasBranches = false
+    var harnessSame: Bool?
+    var harnessFiles = 0
+    var harnessChanged: [APChange] = []
+    var promotedInto: [String] = []
+    var discarded = false
+    var epic: String?
+    var jira: Bool { jiraUnits > 0 }
+
+    // 결과 한 줄 — "4개 중 3개 통과 · 상한 1"
+    var result: String {
+        var s = "\(total)개 중 \(done)개 통과"
+        for (n, label) in [(failed, "미통과"), (capped, "상한"), (skipped, "건너뜀"), (stopped, "중단")] where n > 0 { s += " · \(label) \(n)" }
+        return s
+    }
+    var harnessLabel: String {
+        guard let same = harnessSame else { return "하네스 기록 없음" }
+        return same ? "하네스 같음" : "하네스 바뀜 \(harnessChanged.count)"
+    }
+    // 합치기 상태(설계 판단): 버렸으면 버림, 합친 단계가 있으면 마지막으로 받은 가지, 아니면 합치기 기다림. 가지 기록이 없는 실행은 없음
+    var mergeLabel: (String, Color)? {
+        guard hasBranches else { return nil }
+        if discarded { return ("버림", APColor.muted) }
+        if let last = promotedInto.last {
+            return (["master", "main"].contains(last) ? "\(last) 까지 올림" : "\(last) 에 합침", APColor.ok)
+        }
+        return ("합치기 기다림", APColor.wait)
+    }
+    var stateLabel: (String, Color)? {
+        switch state {
+        case "stopped": ("중단됨", APColor.muted)
+        case "error": ("오류로 멈춤", APColor.fail)
+        default: nil
+        }
+    }
+}
+
+struct APPastUnit: Equatable, Identifiable {
+    let n: Int
+    var id: Int { n }
+    var title = "", kind = "", status = "", branch = ""
+    var story: String?, task: String?, merged: String?
+    var estMin: Double?
+    var activeSec = 0.0, cost = 0.0
+    var tries = 0
+    var result: APResult?
+    var dependsOn: [String] = []   // 기대는 단위(작업 키, 없으면 "단위 n") — 실행 폴더의 queue.json 이 남아 있을 때만
+}
+
+struct APCarry: Equatable, Identifiable {
+    let id: String
+    var unit = 0, kind = "", title = "", why = ""
+}
+
+struct APPastDetail: Equatable {
+    var run: APPastRun
+    var units: [APPastUnit] = []
+    var carry: [APCarry] = []
+}
+
+struct APHistory: Equatable {
+    var version = 0
+    var error: String?
+    var runs: [APPastRun] = []   // 끝난 실행(완료·중단·오류), 최근 것부터
+}
+
+// 기록 저장소 읽기 — 읽기 전용으로 열고(SQLITE_OPEN_READONLY, 만들지 않음) 읽을 때마다 닫는다(긴 읽기 트랜잭션이 엔진의 체크포인트를 막지 않게).
+// 판(user_version)이 이 보드가 아는 판보다 높으면 읽을 수 있는 만큼 읽고 "보드를 업데이트하세요"를 보인다(설계 5장 7절)
+enum APRecords {
+    static let knownVersion = 1
+
+    private static func open(_ path: String) -> OpaquePointer? {
+        guard FileManager.default.fileExists(atPath: path) else { return nil }
+        var db: OpaquePointer?
+        guard sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else { sqlite3_close_v2(db); return nil }
+        sqlite3_busy_timeout(db, 1000)
+        return db
+    }
+
+    private static func rows(_ db: OpaquePointer?, _ sql: String, _ args: [String] = [], error: inout String?) -> [[Any?]] {
+        var st: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &st, nil) == SQLITE_OK else {
+            error = String(cString: sqlite3_errmsg(db))
+            return []
+        }
+        defer { sqlite3_finalize(st) }
+        for (i, a) in args.enumerated() { sqlite3_bind_text(st, Int32(i + 1), a, -1, apSQLiteTransient) }
+        var out: [[Any?]] = []
+        while sqlite3_step(st) == SQLITE_ROW {
+            var row: [Any?] = []
+            for c in 0..<sqlite3_column_count(st) {
+                switch sqlite3_column_type(st, c) {
+                case SQLITE_INTEGER: row.append(Double(sqlite3_column_int64(st, c)))
+                case SQLITE_FLOAT: row.append(sqlite3_column_double(st, c))
+                case SQLITE_TEXT: row.append(sqlite3_column_text(st, c).map { String(cString: $0) })
+                default: row.append(nil)
+                }
+            }
+            out.append(row)
+        }
+        return out
+    }
+
+    private static func json(_ v: Any?) -> Any? { (v as? String).flatMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) } }
+
+    static func list(_ path: String) -> APHistory {
+        var h = APHistory()
+        guard let db = open(path) else { return h }
+        defer { sqlite3_close_v2(db) }
+        var err: String?
+        h.version = Int(rows(db, "PRAGMA user_version", error: &err).first?.first.flatMap { $0 as? Double } ?? 0)
+        let sql = """
+            SELECT r.id, r.project_id, COALESCE(p.name, r.project_id), r.title, r.state, r.reason, r.model, r.started, r.ended,
+              r.units_total, r.units_done, r.units_failed, r.units_capped, r.units_stopped, r.active_sec, r.cost_usd,
+              r.worktree, r.branches, r.harness, r.epic, r.run_dir,
+              (SELECT COUNT(*) FROM units u WHERE u.run_id = r.id AND u.status = 'skipped'),
+              (SELECT COUNT(*) FROM units u WHERE u.run_id = r.id AND u.story_key IS NOT NULL),
+              (SELECT COUNT(DISTINCT u.story_key) FROM units u WHERE u.run_id = r.id AND u.story_key IS NOT NULL)
+            FROM runs r LEFT JOIN projects p ON p.id = r.project_id
+            WHERE r.state IN ('done', 'stopped', 'error')
+            ORDER BY COALESCE(r.started, r.updated) DESC
+            """
+        for c in rows(db, sql, error: &err) {
+            var r = APPastRun(id: c[0] as? String ?? "?")
+            r.project = c[1] as? String
+            r.projectName = c[2] as? String ?? "프로젝트 없음"
+            r.title = c[3] as? String ?? ""
+            r.state = c[4] as? String ?? ""
+            r.reason = c[5] as? String ?? ""
+            r.model = c[6] as? String ?? ""
+            r.started = c[7] as? Double
+            r.ended = c[8] as? Double
+            r.total = Int(c[9] as? Double ?? 0)
+            r.done = Int(c[10] as? Double ?? 0)
+            r.failed = Int(c[11] as? Double ?? 0)
+            r.capped = Int(c[12] as? Double ?? 0)
+            r.stopped = Int(c[13] as? Double ?? 0)
+            r.activeSec = c[14] as? Double ?? 0
+            r.cost = c[15] as? Double ?? 0
+            r.mode = (json(c[16]) as? [String: Any])?["mode"] as? String ?? ""
+            if let b = json(c[17]) as? [String: Any] {
+                r.hasBranches = !((b["repos"] as? [String: Any]) ?? [:]).isEmpty
+                r.promotedInto = (b["promoted"] as? [[String: Any]] ?? []).compactMap { $0["into"] as? String }
+                r.discarded = !(b["discarded"] as? [Any] ?? []).isEmpty
+            }
+            if let hs = json(c[18]) as? [String: Any] {
+                r.harnessFiles = Int(apNum(hs["files"]) ?? 0)
+                if let same = hs["same"] as? Bool {
+                    r.harnessSame = same
+                    r.harnessChanged = (hs["changed"] as? [[String: Any]] ?? []).map {
+                        APChange(path: $0["path"] as? String ?? "?", change: $0["change"] as? String ?? "")
+                    }
+                }
+            }
+            r.epic = c[19] as? String
+            r.runDir = c[20] as? String ?? ""
+            r.skipped = Int(c[21] as? Double ?? 0)
+            r.jiraUnits = Int(c[22] as? Double ?? 0)
+            r.stories = Int(c[23] as? Double ?? 0)
+            h.runs.append(r)
+        }
+        h.error = err
+        return h
+    }
+
+    static func detail(_ path: String, _ run: APPastRun) -> APPastDetail? {
+        guard let db = open(path) else { return nil }
+        defer { sqlite3_close_v2(db) }
+        var err: String?
+        var d = APPastDetail(run: run)
+        // 기대는 단위는 기록 저장소에 없다 — 실행 폴더가 남아 있으면 그 queue.json 에서 읽는다(원문을 지운 실행은 비어 있다)
+        let q = apRead(run.runDir + "/queue.json") as? [[String: Any]] ?? []
+        let idToN = Dictionary(q.enumerated().compactMap { i, u in (u["id"] as? String).map { ($0, i + 1) } }, uniquingKeysWith: { a, _ in a })
+        let sql = """
+            SELECT n, title, kind, story_key, task_key, branch, status, merged, est_min, active_sec, cost_usd, tries, result
+            FROM units WHERE run_id = ? ORDER BY n
+            """
+        for c in rows(db, sql, [run.id], error: &err) {
+            var u = APPastUnit(n: Int(c[0] as? Double ?? 0))
+            u.title = c[1] as? String ?? ""
+            u.kind = c[2] as? String ?? ""
+            u.story = c[3] as? String
+            u.task = c[4] as? String
+            u.branch = c[5] as? String ?? ""
+            u.status = c[6] as? String ?? ""
+            u.merged = c[7] as? String
+            u.estMin = c[8] as? Double
+            u.activeSec = c[9] as? Double ?? 0
+            u.cost = c[10] as? Double ?? 0
+            u.tries = Int(c[11] as? Double ?? 0)
+            u.result = APResult.parse(c[12] as? String)
+            d.units.append(u)
+        }
+        for i in d.units.indices {
+            let n = d.units[i].n
+            guard n >= 1, n <= q.count else { continue }
+            let deps = apStrings(q[n - 1]["depends"]).compactMap { idToN[$0] }
+            d.units[i].dependsOn = deps.map { k in d.units.first { $0.n == k }?.task ?? "단위 \(k)" }
+        }
+        for c in rows(db, "SELECT id, unit_n, kind, title, why FROM carry WHERE run_id = ? ORDER BY unit_n, id", [run.id], error: &err) {
+            d.carry.append(APCarry(id: c[0] as? String ?? UUID().uuidString, unit: Int(c[1] as? Double ?? 0), kind: c[2] as? String ?? "",
+                                   title: apPlain(c[3] as? String ?? ""), why: apPlain(c[4] as? String ?? "")))
+        }
+        return d
+    }
+}
+
+// MARK: 자율주행 · 작은 부품
+
+// 매초 다시 그리는 잎 — 시계 글자만 다시 그리고 바깥(카드·목록)은 그대로 둔다. 자율주행 중 화면 전용이다:
+// 보드 본체에 두면 이 시계가 보드의 1초 갱신과 따로 보드 전체 배치를 다시 계산하게 해 CPU 가 늘었다(보드 본체는 Store.now 로 그린다)
+struct APTick<Content: View>: View {
+    @ViewBuilder let content: (Date) -> Content
+    var body: some View { TimelineView(.periodic(from: .now, by: 1)) { ctx in content(ctx.date) } }
+}
+
+// 매초 바뀌는 글자 — 자리는 숫자를 모두 0 으로 바꾼 숨은 글자가 잡고 실제 글자는 겹쳐 그린다(자릿수가 바뀔 때만 크기를 다시 잰다).
+// 보드 CPU 고침의 TickingText(가지 board-cpu, 이 가지에는 없음)와 같은 꼴이다 — main 을 합칠 때 하나로 줄인다
+struct APTickText: View {
+    let text: (Date) -> String
+    var body: some View {
+        APTick { now in
+            let s = text(now)
+            Text(String(s.map { $0.isWholeNumber ? "0" : $0 })).hidden()
+                .overlay(alignment: .leading) { Text(s).fixedSize() }
+        }
+    }
+}
+
+struct APChip: View {
+    let text: String
+    var color: Color = APColor.muted
+    var strong = false      // 상태 꼬리표는 진하게
+    var mono = false
+    var body: some View {
+        Text(text)
+            .boardFont(10, weight: .semibold, design: mono ? .monospaced : .default)
+            .foregroundStyle(color)
+            .padding(.horizontal, 6).padding(.vertical, 1.5)
+            .background(Capsule().fill(color.opacity(strong ? 0.20 : 0.09)))
+            .overlay(Capsule().stroke(color.opacity(strong ? 0.38 : 0.18), lineWidth: 0.5))
+            .lineLimit(1)
+            .fixedSize()
+    }
+}
+
+// 자율주행 표지 — 실행 줄 앞머리
+struct APMark: View {
+    var body: some View {
+        HStack(spacing: 3) {
+            Image(systemName: "steeringwheel").font(.system(size: 9, weight: .bold))
+            Text("자율주행")
+        }
+        .boardFont(10, weight: .bold)
+        .foregroundStyle(Palette.accent)
+        .padding(.horizontal, 6).padding(.vertical, 1.5)
+        .background(Capsule().fill(Palette.accent.opacity(0.16)))
+        .fixedSize()
+    }
+}
+
+struct APTicket: View {
+    let key: String
+    var body: some View { APChip(text: key, color: APColor.jira, mono: true) }
+}
+
+// 이름 · 값 · 막대(멈출 선 눈금)
+struct APMeter: View {
+    let label: String
+    let value: String
+    var fraction: Double? = nil
+    var tick: Double? = nil
+    var color: Color = APColor.work
+    var note: String? = nil
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 4) {
+                Text(label).foregroundStyle(.secondary).lineLimit(1)
+                Spacer(minLength: 4)
+                Text(value).fontWeight(.semibold).monospacedDigit().lineLimit(1)
+            }
+            .boardFont(10.5)
+            if let f = fraction {
+                // 막대·눈금을 Canvas 하나로 그린다 — GeometryReader 와 겹친 보기 넷보다 배치가 가볍다(보드는 매초 다시 그린다)
+                Canvas { ctx, size in
+                    let y: CGFloat = tick == nil ? 0 : 2, h: CGFloat = 5, w = size.width
+                    ctx.fill(Path(roundedRect: CGRect(x: 0, y: y, width: w, height: h), cornerRadius: h / 2), with: .color(.white.opacity(0.08)))
+                    let fw = max(3, w * CGFloat(min(max(f, 0), 1)))
+                    ctx.fill(Path(roundedRect: CGRect(x: 0, y: y, width: fw, height: h), cornerRadius: h / 2), with: .color(color))
+                    if let t = tick {
+                        ctx.fill(Path(CGRect(x: w * CGFloat(min(max(t, 0), 1)) - 0.75, y: 0, width: 1.5, height: 9)), with: .color(.white.opacity(0.8)))
+                    }
+                }
+                .frame(height: tick == nil ? 5 : 9)
+            } else if let note {
+                Text(note).boardFont(10).foregroundStyle(.secondary).monospacedDigit().lineLimit(1)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+// 작은 글자 단추(지난 실행·새 자율주행·일시정지 등) — 잠긴 단추는 흐리게, 도움말에 까닭
+struct APButton: View {
+    let title: String
+    var icon: String? = nil
+    var tint: Color? = nil
+    var primary = false
+    var enabled = true
+    var help = ""
+    var axid = ""
+    let action: @MainActor () -> Void
+    @State private var hover = false
+    var body: some View {
+        let c = tint ?? (primary ? Palette.accent : Color.white)
+        Button(action: action) {
+            HStack(spacing: 4) {
+                if let icon { Image(systemName: icon).font(.system(size: 10, weight: .bold)) }
+                Text(title).boardFont(11, weight: .semibold).lineLimit(1)
+            }
+            .fixedSize()
+            .foregroundStyle(enabled ? (tint ?? (primary ? Palette.accent : .primary)) : .secondary)
+            .padding(.horizontal, 9).frame(height: 24)
+            .background(Capsule().fill(c.opacity(enabled ? (hover ? 0.24 : (primary || tint != nil ? 0.16 : 0.08)) : 0.04)))
+            .overlay(Capsule().stroke(c.opacity(enabled ? 0.30 : 0.10), lineWidth: 0.5))
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+        .modifier(ClickableIf(active: enabled, hover: $hover))
+        .hint(help.isEmpty ? title : help)
+        .accessibilityIdentifier(axid)
+    }
+}
+
+// "← 보드" 같은 돌아가기 글자 단추
+struct APBack: View {
+    let title: String
+    let axid: String
+    let action: @MainActor () -> Void
+    @State private var hover = false
+    var body: some View {
+        Button(action: action) {
+            Text(title).boardFont(12, weight: .semibold).foregroundStyle(Palette.accent.opacity(hover ? 1 : 0.85))
+        }
+        .buttonStyle(.plain)
+        .clickable($hover)
+        .accessibilityIdentifier(axid)
+    }
+}
+
+// 실행 상태 꼬리표 — run.json state 와 지금 단위의 단계(engine.json phase)를 합친다
+func apStateChip(_ r: APRun) -> (String, Color) {
+    if r.active, r.pid > 0, !r.alive { return ("엔진 꺼짐", APColor.fail) }
+    switch r.state {
+    case "paused": return ("일시정지", APColor.pause)
+    case "waiting_limit": return ("한도 대기", APColor.limit)
+    case "waiting_stopline": return ("멈출 선 대기", APColor.stop)
+    case "waiting_precheck": return ("환경 확인 대기", APColor.stop)
+    case "done": return ("끝남", APColor.ok)
+    case "stopped": return ("중단됨", APColor.muted)
+    case "error": return ("오류로 멈춤", APColor.fail)
+    case "starting": return ("출발 중", APColor.work)
+    default:
+        switch r.current?.phase {
+        case "check": return ("판정 중", APColor.judge)
+        case "action": return ("고정 단계", APColor.judge)
+        case "limit_wait": return ("한도 대기", APColor.limit)
+        default: return ("작업 중", APColor.work)
+        }
+    }
+}
+
+// 원래 작업 트리로 도는 경로의 표지 — 기본 보기에서도 남는다(와이어프레임 보드 본체 ①)
+struct APInPlaceChip: View {
+    let run: APRun
+    var body: some View {
+        let u = run.current
+        APChip(text: "자율주행 중 · 원래 작업 트리", color: APColor.wait, strong: true)
+            .hint("이 경로는 지금 자율주행이 원래 작업 트리로 쓰고 있습니다. 가지 \(run.work)"
+                  + (run.originals.values.first.map { " (출발 때 \($0))" } ?? "")
+                  + (u.map { " · 단위 \($0.n)/\(run.units.count) \(apStateChip(run).0)" } ?? ""))
+    }
+}
+
+// 표지 줄 — 표지와 지금 걸린 가지
+struct APInPlaceRow: View {
+    let run: APRun
+    var body: some View {
+        HStack(spacing: 6) {
+            APInPlaceChip(run: run)
+            if !run.work.isEmpty {
+                Text(run.work).boardFont(10, design: .monospaced).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+            }
+        }
+    }
+}
+
+// MARK: 자율주행 · 보드 본체
+
+// 보드 본체의 실행 줄 — 경로 카드 안(카드가 없으면 실행 카드 안). 누르면 자율주행 중 화면으로.
+// 단위 시계는 보드가 매초 다시 그릴 때의 시각으로 부모가 셈한 분(minutes)으로 받는다 — 줄마다 TimelineView 를 두면 그 시계가 따로
+// 보드 전체 배치를 다시 계산해 실행이 도는 동안 보드 CPU 가 약 10%p 늘었다(2026-10-27 실측). 실행 값과 분이 같으면 다시 그리지 않는다(.equatable())
+struct APRunLine: View, Equatable {
+    let run: APRun
+    let minutes: Int        // 지금 단위의 단위 시계(분)
+    var meters = true       // 계정 사용률 막대 — 자율주행 보기에서는 위 사용량 상자로 옮긴다(와이어프레임 보드 본체 ⑤)
+    var compact = false     // 접힌 카드·작은 크기: 상태 꼬리표와 "2/4 제목" 한 줄
+    @State private var hover = false
+
+    static func == (a: APRunLine, b: APRunLine) -> Bool {
+        a.run == b.run && a.minutes == b.minutes && a.meters == b.meters && a.compact == b.compact
+    }
+
+    var body: some View {
+        Button { AutopilotStore.shared.screen = .running(run.id) } label: {
+            SwiftUI.Group { if compact { line } else { full } }
+                .padding(compact ? 6 : 9)
+                .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(hover ? 0.08 : 0.04)))
+                .overlay(RoundedRectangle(cornerRadius: 10).stroke(Palette.accent.opacity(0.28), lineWidth: 0.5))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .clickable($hover)
+        .hint("눌러서 자율주행 중 화면으로")
+        .accessibilityIdentifier("ap-runline-\(run.id)")
+    }
+
+    private var line: some View {
+        let (st, c) = apStateChip(run)
+        return HStack(spacing: 6) {
+            APMark()
+            APChip(text: st, color: c, strong: true)
+            if let u = run.current {
+                Text("\(u.n)/\(run.units.count)").boardFont(10.5, design: .monospaced).foregroundStyle(.secondary).fixedSize()
+                Text(u.title).boardFont(11.5).lineLimit(1)
+            } else {
+                Text(run.reason).boardFont(11).foregroundStyle(.secondary).lineLimit(1)
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
+    private var full: some View {
+        let (st, c) = apStateChip(run)
+        let u = run.current
+        let caps = u?.caps ?? run.unitCaps ?? run.caps
+        return VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 6) {
+                APMark()
+                Text(run.name).boardFont(12.5, weight: .bold).lineLimit(1)
+                APChip(text: st, color: c, strong: true)
+                APChip(text: run.modeLabel, color: run.inPlace ? APColor.wait : APColor.muted)
+                Spacer(minLength: 0)
+            }
+            if let u {
+                HStack(spacing: 6) {
+                    Text("\(u.n)/\(run.units.count)").boardFont(10.5, design: .monospaced).foregroundStyle(.secondary).fixedSize()
+                    if let t = u.task { APTicket(key: t) }
+                    Text(u.title).boardFont(12).lineLimit(1)
+                }
+            } else if !run.reason.isEmpty {
+                Text(run.reason).boardFont(11).foregroundStyle(.secondary).lineLimit(2)
+            }
+            APMeter(label: "단위 시계", value: "\(minutes)/\(Int(caps.minutes))분", fraction: Double(minutes) / max(caps.minutes, 1))
+            HStack(spacing: 6) {
+                Text("비용 \(apUSD(run.totalCost)) USD" + (u.map { " · 이번 단위 \(apUSD($0.cost))/\(Int(caps.usd))" } ?? "")).lineLimit(1)
+                Spacer(minLength: 4)
+                Text("\(run.passed) 통과 · \(run.remaining) 남음").fixedSize()
+            }
+            .boardFont(10.5).monospacedDigit().foregroundStyle(.secondary)
+            if meters { APUsageMeters(run: run, small: true) }
+        }
+    }
+}
+
+// 계정 사용률 두 막대(주간·5시간)와 멈출 선 눈금 — 엔진이 run.json 에 남긴 값(stream·캐시·API 가운데 엔진이 본 것)
+struct APUsageMeters: View {
+    let run: APRun
+    var small = false       // 실행 줄: 나란히, 초기화 시각 없이. 자율주행 중 화면: 위아래로, 초기화 시각까지
+    var body: some View {
+        if small {
+            HStack(alignment: .top, spacing: 10) {
+                meter("주간", run.seven, run.sevenResets, run.stop7)
+                meter("5시간", run.five, run.fiveResets, run.stop5)
+            }
+        } else {
+            VStack(alignment: .leading, spacing: 8) {
+                meter("주간", run.seven, run.sevenResets, run.stop7)
+                meter("5시간", run.five, run.fiveResets, run.stop5)
+            }
+        }
+    }
+    private func meter(_ name: String, _ v: Double?, _ resets: Double?, _ line: Double) -> some View {
+        let pct = v.map { Int(($0 * 100).rounded()) }
+        let reset = small ? "" : resets.map { " · \(apDate($0)) 초기화" } ?? ""
+        return APMeter(label: pct.map { "\(name) \($0)%" } ?? "\(name) 모름", value: "멈출 선 \(Int((line * 100).rounded()))%\(reset)",
+                       fraction: v ?? 0, tick: line, color: UsagePanel.color((v ?? 0) * 100))
+    }
+}
+
+// 경로 카드가 없는 실행의 카드(자율주행 세션은 세션 파일을 남기지 않아 사람 세션이 없던 경로에는 카드가 없다)와 자율주행 보기의 카드
+struct APRunCard: View, Equatable {
+    let run: APRun
+    let minutes: Int
+    var meters = true
+    var body: some View {
+        let path = run.repos.first ?? run.dir
+        let c = apStateChip(run).1
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                Image(systemName: "folder.fill")
+                    .font(.system(size: 13, weight: .semibold)).foregroundStyle(c)
+                    .frame(width: 30, height: 30)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(c.opacity(0.16)))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text((path as NSString).lastPathComponent + (run.repos.count > 1 ? " 외 \(run.repos.count - 1)곳" : ""))
+                        .boardFont(15, weight: .semibold).lineLimit(1)
+                    Text(path.replacingOccurrences(of: NSHomeDirectory(), with: "~"))
+                        .boardFont(11).foregroundStyle(.secondary).lineLimit(1).truncationMode(.head)
+                }
+                Spacer(minLength: 0)
+                HeaderButton(icon: "plus", tint: nil, help: "이 경로에서 새 세션 (\(defaultSessionCommand))") {
+                    TerminalHub.shared.startSession(defaultSessionCommand, in: path)
+                }
+                .accessibilityIdentifier("ap-newsession-\(run.id)")
+            }
+            if run.inPlace { APInPlaceRow(run: run) }
+            APRunLine(run: run, minutes: minutes, meters: meters).equatable()
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 16)
+            .fill(LinearGradient(colors: [Palette.accent.opacity(0.08), Color.white.opacity(0.03)], startPoint: .topLeading, endPoint: .bottomTrailing)))
+        .overlay(RoundedRectangle(cornerRadius: 16).stroke(Palette.accent.opacity(0.22), lineWidth: 1))
+    }
+}
+
+// 보드 머리 아래 줄 — 보기 고르기(모두·기본·자율주행), 지난 실행, 새 자율주행(출발 화면은 다음 조각이라 잠금)
+struct APBar: View {
+    @ObservedObject var ap: AutopilotStore
+    @Binding var view: String
+    var body: some View {
+        HStack(spacing: 6) {
+            if !ap.runs.isEmpty {
+                HStack(spacing: 2) {
+                    seg("all", "모두")
+                    seg("basic", "기본")
+                    seg("auto", "자율주행 \(ap.runs.count)")
+                }
+                .padding(2)
+                .background(Capsule().fill(Color.white.opacity(0.06)))
+            }
+            Spacer(minLength: 4)
+            APButton(title: "지난 실행", icon: "clock.arrow.circlepath", help: "끝난 자율주행 실행을 프로젝트별로 봅니다", axid: "ap-history") {
+                AutopilotStore.shared.screen = .history(nil)
+            }
+            APButton(title: "새 자율주행", icon: "plus", enabled: false, help: "출발 화면은 아직 만들지 않았습니다") {}
+        }
+    }
+    private func seg(_ v: String, _ title: String) -> some View {
+        Button { withAnimation(foldSpring) { view = v } } label: {
+            Text(title).boardFont(11, weight: .semibold).lineLimit(1).fixedSize()
+                .foregroundStyle(view == v ? .primary : .secondary)
+                .padding(.horizontal, 9).frame(height: 20)
+                .background(Capsule().fill(view == v ? Color.white.opacity(0.14) : .clear))
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .hint(["all": "세션과 자율주행 실행 줄을 함께", "basic": "지금 보드 그대로(실행 줄 숨김)", "auto": "자율주행 실행 줄만"][v] ?? "")
+        .accessibilityIdentifier("ap-view-\(v)")
+    }
+}
+
+// 원래 작업 트리로 자율주행이 도는 경로에서 보드 탭 새 세션을 열 때 경고 — 막지는 않는다(설계 2장 끝 "어디서 도는가")
+@MainActor func warnAutopilotPath(_ r: APRun, dir: String, open: @escaping @MainActor () -> Void) {
+    let a = NSAlert()
+    a.messageText = "이 경로는 지금 자율주행이 쓰고 있습니다."
+    var where_ = [dir.replacingOccurrences(of: NSHomeDirectory(), with: "~")]
+    if !r.work.isEmpty { where_.append("가지 \(r.work)" + (r.originals.values.first.map { " (출발 때 \($0))" } ?? "")) }
+    if let u = r.current { where_.append("단위 \(u.n)/\(r.units.count) \(apStateChip(r).0)") }
+    a.informativeText = "새 세션은 같은 파일과 가지를 함께 씁니다.\n\n" + where_.joined(separator: " · ")
+    a.addButton(withTitle: "그래도 열기")
+    a.addButton(withTitle: "취소")
+    DispatchQueue.main.async {
+        MainActor.assumeIsolated {
+            whenPaneSettled {
+                if window.attachedSheet == nil {
+                    a.beginSheetModal(for: window) { resp in MainActor.assumeIsolated { if resp == .alertFirstButtonReturn { open() } } }
+                } else if a.runModal() == .alertFirstButtonReturn {
+                    open()
+                }
+            }
+        }
+    }
+}
+
+// MARK: 자율주행 · 자율주행 중 화면
+
+// 보드 쪽 전체를 바꾸는 자율주행 화면들의 틀 — 보드와 같은 바탕·여백
+struct APScreenFrame<Content: View>: View {
+    let mini: Bool
+    @ViewBuilder let content: () -> Content
+    var body: some View {
+        content()
+            .padding(.horizontal, mini ? 10 : 16)
+            .padding(.top, mini ? 2 : 22)
+            .padding(.bottom, 6)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .background(Backdrop())
+            .preferredColorScheme(.dark)
+    }
+}
+
+struct APRunningScreen: View {
+    @ObservedObject var ap: AutopilotStore
+    let id: String
+    @ObservedObject private var fit = BoardFit.shared
+    @State private var opened: Set<Int> = []    // 사람이 펼친 진행 기록 묶음
+    @State private var closed: Set<Int> = []    // 사람이 접은 지금 단위 묶음
+
+    var body: some View {
+        let mini = fit.tier == .mini
+        APScreenFrame(mini: mini) {
+            if let run = ap.viewed, run.id == id {
+                if mini { small(run) } else { large(run) }
+            } else {
+                VStack(alignment: .leading, spacing: 10) {
+                    APBack(title: "← 보드", axid: "ap-back") { ap.screen = .board }
+                    Text("이 실행을 찾지 못했습니다. 실행 폴더가 지워졌을 수 있습니다.").boardFont(12).foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    // 작은 크기: 지금 단위 카드(제목·상태 꼬리표·단위 시계)와 단추만(와이어프레임 자율주행 중 ⑨)
+    private func small(_ run: APRun) -> some View {
+        let (st, c) = apStateChip(run)
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                APBack(title: "← 보드", axid: "ap-back") { ap.screen = .board }
+                Text("자율주행 · \(run.name)").boardFont(12, weight: .bold).lineLimit(1)
+                Spacer(minLength: 0)
+                APChip(text: st, color: c, strong: true)
+            }
+            if let u = run.current {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 6) {
+                        Text("단위 \(u.n)/\(run.units.count)").boardFont(10.5, design: .monospaced).foregroundStyle(.secondary).fixedSize()
+                        Text(u.title).boardFont(12, weight: .semibold).lineLimit(1)
+                    }
+                    clockMeter(run, u)
+                }
+                .padding(8)
+                .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.05)))
+            }
+            controls(run, compact: true)
+            Spacer(minLength: 0)
+        }
+    }
+
+    private func large(_ run: APRun) -> some View {
+        ScrollView(showsIndicators: true) {
+            VStack(alignment: .leading, spacing: 12) {
+                header(run)
+                if let u = run.current { unitCard(run, u) }
+                controls(run, compact: false)
+                nextBlock(run)
+                logBlock(run)
+                usageBlock(run)
+                guardBlock(run)
+            }
+            .padding(.bottom, 12)
+        }
+    }
+
+    private func header(_ run: APRun) -> some View {
+        let (st, c) = apStateChip(run)
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                APBack(title: "← 보드", axid: "ap-back") { ap.screen = .board }
+                Text("자율주행 · \(run.name)").boardFont(16, weight: .bold).lineLimit(1)
+                Spacer(minLength: 0)
+            }
+            WrapRow(spacing: 6) {
+                APChip(text: st, color: c, strong: true)
+                APChip(text: run.modeLabel, color: run.inPlace ? APColor.wait : APColor.muted)
+                if run.jira { APChip(text: "Jira 연결", color: APColor.jira) }
+                if !run.work.isEmpty && !run.jira {
+                    Text(run.work).boardFont(10.5, design: .monospaced).foregroundStyle(.secondary).fixedSize()
+                }
+                if let s = run.started {
+                    APTickText { now in
+                        let end = run.ended ?? now.timeIntervalSince1970
+                        return "\(apClock(s)) 출발 · \(apDur(end - s))" + (run.active ? "째" : " 걸림")
+                    }
+                    .boardFont(10.5).monospacedDigit().foregroundStyle(.secondary)
+                }
+            }
+            if !run.title.isEmpty {
+                Text(run.title).boardFont(11).foregroundStyle(.secondary).lineLimit(2)
+            }
+        }
+    }
+
+    private func clockMeter(_ run: APRun, _ u: APUnit) -> some View {
+        let caps = u.caps ?? run.unitCaps ?? run.caps
+        return APTick { now in
+            let a = run.activeSec(u, now)
+            APMeter(label: "단위 시계", value: "\(Int(a / 60)) / \(Int(caps.minutes))분", fraction: a / 60 / max(caps.minutes, 1))
+        }
+    }
+
+    // 지금 단위 카드 — 단위 번호·종류·제목, Jira 작업이면 작업 키·스토리·작업 가지, 단계 꼬리표, 단위 상한 셋
+    private func unitCard(_ run: APRun, _ u: APUnit) -> some View {
+        let caps = u.caps ?? run.unitCaps ?? run.caps
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text("단위 \(u.n)/\(run.units.count)").boardFont(10.5, design: .monospaced).foregroundStyle(.secondary).fixedSize()
+                if !u.kind.isEmpty { APChip(text: apKind(u.kind)) }
+                Text(u.title).boardFont(13, weight: .bold).lineLimit(2)
+            }
+            if let t = u.task {
+                HStack(spacing: 5) {
+                    APTicket(key: t)
+                    Text("스토리").boardFont(10.5).foregroundStyle(.secondary)
+                    if let s = u.story { APTicket(key: s) }
+                    Spacer(minLength: 4)
+                    Text("\(run.repoName(u)) · \(u.branch ?? "")").boardFont(10, design: .monospaced).foregroundStyle(.secondary)
+                        .lineLimit(1).truncationMode(.head)
+                }
+            }
+            stageRow(run, u)
+            Text("단위 상한").boardFont(10.5, weight: .semibold).foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 7) {
+                clockMeter(run, u)
+                APMeter(label: "비용", value: "\(apUSD(u.cost)) / \(Int(caps.usd)) USD", fraction: u.cost / max(caps.usd, 0.01))
+                APMeter(label: "주간 사용", value: String(format: "+%.1f / %g%%p", u.weeklyPP, caps.pp), fraction: u.weeklyPP / max(caps.pp, 0.01))
+            }
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 12).fill(Color.white.opacity(0.05)))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(apStateChip(run).1.opacity(0.35), lineWidth: 1))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("ap-unitcard")
+    }
+
+    private func arrow() -> some View { Text("→").boardFont(10.5).foregroundStyle(.secondary) }
+
+    // 단계 꼬리표 — 모델 작업 → 판정(→ 스토리로 합치기), 막히면 한도 대기·멈출 선 대기·일시정지.
+    // 꼬리표만 WrapRow 에 두고 설명 글은 아래 줄에 — WrapRow 는 칸마다 원래 크기로 재므로 긴 글이 그 안에 있으면 줄을 바꾸지 않고 화면을 넘는다
+    @ViewBuilder private func stageRow(_ run: APRun, _ u: APUnit) -> some View {
+        let note = { (s: String) in
+            Text(s).boardFont(10.5).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        if !run.active || u.status != "running" {
+            VStack(alignment: .leading, spacing: 4) {
+                APChip(text: apUnitLabel(u.status), color: APColor.unit(u.status), strong: true)
+                if !u.reason.isEmpty { note(apPlain(u.reason)) }
+            }
+        } else {
+            switch run.state {
+            case "paused", "waiting_limit", "waiting_stopline", "waiting_precheck":
+                let sc = apStateChip(run)
+                VStack(alignment: .leading, spacing: 4) {
+                    APChip(text: sc.0, color: sc.1, strong: true)
+                    note(run.reason)
+                }
+            default:
+                let judging = u.phase == "check"
+                let tries = "시도 \(u.tries + 1)/\(run.checkRetries + 1)"
+                VStack(alignment: .leading, spacing: 4) {
+                    WrapRow(spacing: 6) {
+                        APChip(text: u.phase == "action" ? "고정 단계" : "모델 작업", color: judging ? APColor.muted : APColor.work, strong: !judging)
+                        arrow()
+                        APChip(text: "판정", color: judging ? APColor.judge : APColor.muted, strong: judging)
+                        if run.jira { arrow(); APChip(text: "스토리로 합치기") }
+                        if !judging { Text(tries).boardFont(10.5).foregroundStyle(.secondary).fixedSize() }
+                    }
+                    if judging {
+                        let since = ap.events.last { $0.text.hasPrefix("판정 명령을 돌립니다") && $0.ts >= (u.started ?? 0) }?.ts
+                        APTick { now in
+                            note("\(u.check.count > 40 ? String(u.check.prefix(40)) + "…" : u.check) 돌리는 중"
+                                 + (since.map { " · \(apDur(now.timeIntervalSince1970 - $0))" } ?? "")
+                                 + " · 판정 시간 상한 \(Int(run.checkTimeout))분")
+                        }
+                    } else if u.tries > 0 {
+                        note("판정 \(u.tries)번째 실패 뒤 다시 맡겼습니다")
+                    }
+                }
+            }
+        }
+    }
+
+    // 단추: 일시정지(또는 재개)·중단(확인 없이, 사용자 결정)·멈추고 다시 출발(엔진과 함께 바뀌는 다음 조각이라 잠금)
+    private func controls(_ run: APRun, compact: Bool) -> some View {
+        let wait = ap.sent[run.id]
+        let can = run.active && wait == nil
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                if run.state == "paused" {
+                    APButton(title: "재개", primary: true, enabled: can, help: "같은 세션으로 이어 갑니다", axid: "ap-resume") { ap.send("resume", run) }
+                } else {
+                    APButton(title: "일시정지", enabled: can, help: "지금 단위를 멈추고 쉽니다. 재개하면 같은 세션으로 이어 갑니다", axid: "ap-pause") {
+                        ap.send("pause", run)
+                    }
+                }
+                APButton(title: "중단", tint: APColor.fail, enabled: can, help: "실행을 마칩니다. 다시 띄우지 않습니다", axid: "ap-stop") {
+                    ap.send("stop", run)
+                }
+                APButton(title: "멈추고 다시 출발", enabled: false, help: "아직 만들지 않았습니다(출발 화면과 함께)") {}
+                if !compact {
+                    Spacer(minLength: 4)
+                    Text("실행 합계 \(apUSD(run.totalCost)) USD").boardFont(10.5).monospacedDigit().foregroundStyle(.secondary).fixedSize()
+                }
+            }
+            if let w = wait {
+                Text("\(["pause": "일시정지", "resume": "재개", "stop": "중단"][w.action] ?? w.action) 요청을 보냈습니다. 엔진이 받기를 기다립니다…")
+                    .boardFont(10.5).foregroundStyle(APColor.stop)
+                    .accessibilityIdentifier("ap-sent")
+            } else if !run.active {
+                HStack(spacing: 6) {
+                    Text("이 실행은 끝났습니다.").boardFont(10.5).foregroundStyle(.secondary)
+                    APBack(title: "지난 실행에서 보기 →", axid: "ap-to-history") { ap.screen = .history(run.id) }
+                }
+            }
+        }
+        .padding(compact ? 0 : 10)
+        .background(RoundedRectangle(cornerRadius: 12).fill(Color.white.opacity(compact ? 0 : 0.04)))
+    }
+
+    private func blockTitle(_ s: String, _ note: String = "") -> some View {
+        HStack(spacing: 6) {
+            Text(s).boardFont(11.5, weight: .bold)
+            if !note.isEmpty { Text(note).boardFont(10).foregroundStyle(.secondary).lineLimit(1) }
+        }
+    }
+
+    // 다음 단위 — 예상 시간, Jira 면 작업 키·스토리·저장소
+    @ViewBuilder private func nextBlock(_ run: APRun) -> some View {
+        let next = run.units.filter { $0.status == "pending" && $0.n != run.unit }
+        if !next.isEmpty {
+            VStack(alignment: .leading, spacing: 5) {
+                blockTitle("다음")
+                ForEach(next) { u in
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 6) {
+                            Text("\(u.n)/\(run.units.count)").boardFont(10.5, design: .monospaced).foregroundStyle(.secondary).fixedSize()
+                            if let t = u.task { APTicket(key: t) }
+                            Text(u.title).boardFont(11.5).lineLimit(1)
+                            if !u.kind.isEmpty { APChip(text: apKind(u.kind)) }
+                        }
+                        let note = nextNote(run, u)
+                        if !note.isEmpty { Text(note).boardFont(10).foregroundStyle(.secondary).lineLimit(1).padding(.leading, 26) }
+                    }
+                }
+            }
+        }
+    }
+
+    private func nextNote(_ run: APRun, _ u: APUnit) -> String {
+        var s: [String] = []
+        if let st = u.story { s.append("스토리 \(st) · \(run.repoName(u))") } else if !u.tickets.isEmpty { s.append("티켓 \(u.tickets.joined(separator: ", "))") }
+        if let e = u.estMin { s.append("예상 \(Int(e))분") }
+        return s.joined(separator: " · ")
+    }
+
+    // 진행 기록 — 단위별로 접고 지금 단위만 펼친다. 최근 것이 위(와이어프레임 자율주행 중 ⑤)
+    private func logBlock(_ run: APRun) -> some View {
+        let groups = AutopilotStore.groups(run, ap.events).reversed()
+        return VStack(alignment: .leading, spacing: 5) {
+            blockTitle("진행 기록", "단위별로 접음 · 지금 단위만 펼침 · 최근 것이 위")
+            if ap.events.isEmpty {
+                Text("아직 기록이 없습니다").boardFont(11).foregroundStyle(.secondary)
+            }
+            ForEach(Array(groups)) { g in
+                let isOpen = g.id == run.unit && run.active ? !closed.contains(g.id) : opened.contains(g.id)
+                VStack(alignment: .leading, spacing: 3) {
+                    Button {
+                        withAnimation(foldSpring) {
+                            if g.id == run.unit && run.active { closed.formSymmetricDifference([g.id]) } else { opened.formSymmetricDifference([g.id]) }
+                        }
+                    } label: { groupHead(run, g, open: isOpen) }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("ap-log-\(g.id)")
+                    if isOpen {
+                        let lines = g.lines.suffix(300).reversed()
+                        ForEach(Array(lines.enumerated()), id: \.offset) { _, e in logLine(e) }
+                        if g.lines.count > 300 {
+                            Text("앞의 \(g.lines.count - 300)줄은 줄였습니다").boardFont(10).foregroundStyle(.secondary).padding(.leading, 16)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func groupHead(_ run: APRun, _ g: APLogGroup, open: Bool) -> some View {
+        let u = g.id >= 1 && g.id <= run.units.count ? run.units[g.id - 1] : nil
+        return HStack(spacing: 6) {
+            Image(systemName: "chevron.right").font(.system(size: 8, weight: .bold)).rotationEffect(.degrees(open ? 90 : 0)).frame(width: 8)
+            if let u {
+                Text("단위 \(u.n)").boardFont(10.5, design: .monospaced).foregroundStyle(.secondary).fixedSize()
+                if let t = u.task { APTicket(key: t) }
+                Text(u.title).boardFont(11.5, weight: .semibold).lineLimit(1)
+                if u.status == "running", run.active {
+                    let sc = apStateChip(run)
+                    APChip(text: sc.0, color: sc.1, strong: true)
+                } else {
+                    APChip(text: apUnitLabel(u.status), color: APColor.unit(u.status), strong: u.status != "pending")
+                }
+                if u.story != nil, u.status != "skipped", let m = u.merge {
+                    APChip(text: ["merged": "스토리로 합침", "nothing": "합칠 커밋 없음"][m] ?? "합치지 않음", color: m == "merged" ? APColor.ok : APColor.muted)
+                }
+            } else {
+                Text(g.id == 0 ? "출발" : "끝").boardFont(11.5, weight: .semibold)
+            }
+            Text("\(g.lines.count)줄").boardFont(10).foregroundStyle(.secondary).fixedSize()
+            Spacer(minLength: 0)
+        }
+        .contentShape(Rectangle())
+    }
+
+    private func logLine(_ e: APEvent) -> some View {
+        let who = ["board": ("보드", APColor.board), "model": ("모델", APColor.model), "engine": ("엔진", APColor.muted)][e.who] ?? (e.who, APColor.muted)
+        return HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Text(apClock(e.ts)).boardFont(10, design: .monospaced).foregroundStyle(.secondary).fixedSize()
+            APChip(text: who.0, color: who.1)
+            Text(e.who == "model" ? apPlain(e.text) : e.text).boardFont(11).fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.leading, 16)
+    }
+
+    private func usageBlock(_ run: APRun) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            blockTitle("계정 사용률")
+            APUsageMeters(run: run)
+        }
+    }
+
+    // 지킴 — 실행 중에 막혀 있는 것(엔진 거부 목록·샌드박스, 설계 4장)
+    private func guardBlock(_ run: APRun) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            WrapRow(spacing: 6) {
+                Text("지킴").boardFont(11.5, weight: .bold)
+                if run.jira {
+                    APChip(text: "커밋은 지금 작업 가지에만")
+                    APChip(text: "스토리 가지·기존 가지 쓰기 금지")
+                } else if !run.existing.isEmpty {
+                    APChip(text: "기존 가지 \(run.existing.count)개 쓰기 금지")
+                }
+                APChip(text: "저장소 하네스 고치기 금지")
+                APChip(text: "git push 거부")
+                APChip(text: "바깥 쓰기 도구 없음")
+            }
+            Text(guardLine(run)).boardFont(10, design: .monospaced).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func guardLine(_ run: APRun) -> String {
+        var s: [String] = []
+        if run.jira {
+            if let u = run.current, let b = u.branch { s.append("지금 작업 가지: \(run.repoName(u)) \(b)") }
+            if !run.storyBranches.isEmpty { s.append("스토리 가지 \(run.storyBranches.joined(separator: " · "))") }
+        }
+        if !run.existing.isEmpty { s.append("기존 가지: \(run.existing.prefix(8).joined(separator: " · "))\(run.existing.count > 8 ? " 등" : "")") }
+        if !run.jira, !run.work.isEmpty { s.append("커밋은 \(run.work) 에만") }
+        return s.joined(separator: " · ")
+    }
+}
+
+// MARK: 자율주행 · 지난 실행
+
+struct APHistoryScreen: View {
+    @ObservedObject var ap: AutopilotStore
+    let selected: String?
+    @ObservedObject private var fit = BoardFit.shared
+    @State private var folded: Set<String> = []     // 접은 프로젝트 묶음
+    @State private var project: String?             // 고른 프로젝트(nil 이면 모든 프로젝트)
+    @State private var reports: Set<Int> = []       // 보고서를 펼친 단위
+
+    private var shown: [APPastRun] { ap.history.runs.filter { project == nil || $0.projectName == project } }
+    // 프로젝트별 묶음 — 마지막 실행이 최근인 프로젝트부터
+    private var byProject: [(name: String, runs: [APPastRun])] {
+        var order: [String] = [], out: [String: [APPastRun]] = [:]
+        for r in shown {
+            if out[r.projectName] == nil { order.append(r.projectName) }
+            out[r.projectName, default: []].append(r)
+        }
+        return order.map { ($0, out[$0] ?? []) }
+    }
+
+    var body: some View {
+        let mini = fit.tier == .mini
+        APScreenFrame(mini: mini) {
+            if mini {
+                if let id = selected, let d = ap.detail, d.run.id == id { smallDetail(d) } else { list(mini: true) }
+            } else {
+                ScrollView(showsIndicators: true) {
+                    VStack(alignment: .leading, spacing: 12) {
+                        list(mini: false)
+                        if let d = ap.detail { detail(d) }
+                    }
+                    .padding(.bottom, 12)
+                }
+            }
+        }
+        .onChange(of: selected) { _, _ in reports = [] }
+    }
+
+    private func notices() -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if ap.history.version > APRecords.knownVersion {
+                Label("기록 저장소 판(\(ap.history.version))이 이 보드가 아는 판(\(APRecords.knownVersion))보다 새롭습니다. 보드를 업데이트하세요.",
+                      systemImage: "exclamationmark.triangle.fill")
+                    .boardFont(11).foregroundStyle(APColor.limit)
+            }
+            if let e = ap.history.error {
+                Text("기록 저장소를 다 읽지 못했습니다: \(e)").boardFont(11).foregroundStyle(APColor.fail).lineLimit(3)
+            }
+        }
+    }
+
+    private func list(mini: Bool) -> some View {
+        VStack(alignment: .leading, spacing: mini ? 4 : 8) {
+            HStack(spacing: 8) {
+                APBack(title: "← 보드", axid: "ap-back") { ap.screen = .board }
+                Text("지난 실행").boardFont(mini ? 12 : 16, weight: .bold)
+                if mini { Text("프로젝트별").boardFont(10.5).foregroundStyle(.secondary) }
+                Spacer(minLength: 0)
+                if !mini { projectMenu }
+            }
+            notices()
+            if ap.history.runs.isEmpty {
+                Text("끝난 자율주행 실행이 아직 없습니다").boardFont(11.5).foregroundStyle(.secondary)
+            } else if !mini {
+                HStack(spacing: 6) {
+                    Text("실행 \(shown.count)개").boardFont(11.5, weight: .bold)
+                    Text("프로젝트별로 묶음").boardFont(10).foregroundStyle(.secondary)
+                }
+            }
+            if mini {
+                ScrollView(showsIndicators: false) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        ForEach(byProject, id: \.name) { p in
+                            Text("\(p.name) · 실행 \(p.runs.count)").boardFont(10.5, weight: .semibold).foregroundStyle(.secondary).padding(.top, 3)
+                            ForEach(p.runs) { r in miniRow(r) }
+                        }
+                    }
+                }
+            } else {
+                ForEach(byProject, id: \.name) { p in projectGroup(p.name, p.runs) }
+            }
+        }
+    }
+
+    private var projectMenu: some View {
+        Menu {
+            Button("모든 프로젝트") { project = nil }
+            ForEach(Array(Set(ap.history.runs.map(\.projectName))).sorted(), id: \.self) { n in Button(n) { project = n } }
+        } label: {
+            Text(project ?? "모든 프로젝트").boardFont(11, weight: .semibold)
+        }
+        .menuStyle(.button)
+        .buttonStyle(.borderless)
+        .fixedSize()
+        .accessibilityIdentifier("ap-project-menu")
+    }
+
+    private func projectGroup(_ name: String, _ runs: [APPastRun]) -> some View {
+        let open = !folded.contains(name)
+        let jira = runs.contains(where: \.jira)
+        let epic = runs.compactMap(\.epic).first
+        return VStack(alignment: .leading, spacing: 4) {
+            Button { withAnimation(foldSpring) { folded.formSymmetricDifference([name]) } } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "chevron.right").font(.system(size: 8, weight: .bold)).rotationEffect(.degrees(open ? 90 : 0)).frame(width: 8)
+                    Text(name).boardFont(12.5, weight: .bold).lineLimit(1)
+                    Text("실행 \(runs.count) · 마지막 \(apDay(runs.first?.started))").boardFont(10.5).foregroundStyle(.secondary).fixedSize()
+                    if jira { APChip(text: "Jira 연결" + (epic.map { " · 에픽 \($0)" } ?? ""), color: APColor.jira) }
+                    Spacer(minLength: 0)
+                    if !open, let m = runs.first?.mergeLabel { APChip(text: m.0, color: m.1, strong: true) }
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("ap-project-\(name)")
+            if open {
+                ForEach(runs) { r in row(r) }
+            }
+        }
+    }
+
+    private func isOn(_ r: APPastRun) -> Bool { (selected ?? ap.history.runs.first?.id) == r.id }
+
+    private func row(_ r: APPastRun) -> some View {
+        Button { ap.screen = .history(r.id) } label: {
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text(apDate(r.started)).boardFont(11.5, weight: .semibold).monospacedDigit().fixedSize()
+                    if !r.mode.isEmpty { APChip(text: r.mode == "worktree" ? "따로 작업 트리" : "원래 작업 트리") }
+                    if r.jira { APChip(text: "스토리 \(r.stories)") }
+                    Spacer(minLength: 0)
+                    if let s = r.stateLabel { APChip(text: s.0, color: s.1, strong: true) }
+                    if let m = r.mergeLabel { APChip(text: m.0, color: m.1, strong: true) }
+                }
+                HStack(spacing: 10) {
+                    Text(r.result)
+                    Text(apDur(r.activeSec))
+                    Text("\(apUSD(r.cost)) USD")
+                    Text(r.harnessLabel).foregroundStyle(r.harnessSame == false ? APColor.limit : .secondary)
+                }
+                .boardFont(10.5).monospacedDigit().foregroundStyle(.secondary).lineLimit(1)
+            }
+            .padding(8)
+            .background(RoundedRectangle(cornerRadius: 9).fill(Color.white.opacity(isOn(r) ? 0.10 : 0.03)))
+            .overlay(RoundedRectangle(cornerRadius: 9).stroke(isOn(r) ? Palette.accent.opacity(0.45) : .clear, lineWidth: 1))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("ap-hist-\(r.id)")
+    }
+
+    private func miniRow(_ r: APPastRun) -> some View {
+        Button { ap.screen = .history(r.id) } label: {
+            HStack(spacing: 6) {
+                Text("\(apDate(r.started)) · \(r.total)개 중 \(r.done)개 통과").boardFont(11).monospacedDigit().lineLimit(1)
+                Spacer(minLength: 0)
+                if let m = r.mergeLabel { APChip(text: m.0, color: m.1, strong: true) } else if let s = r.stateLabel { APChip(text: s.0, color: s.1, strong: true) }
+            }
+            .padding(.horizontal, 6).frame(height: miniRowHeight - 2)
+            .background(RoundedRectangle(cornerRadius: 7).fill(Color.white.opacity(0.04)))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("ap-hist-\(r.id)")
+    }
+
+    // 작은 크기의 상세 — 단위와 판정만, 위에 "← 목록"
+    private func smallDetail(_ d: APPastDetail) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            APBack(title: "← 목록", axid: "ap-back-list") { ap.screen = .history(nil) }
+            HStack(spacing: 6) {
+                Text("\(apDay(d.run.started)) · \(d.run.projectName)").boardFont(12, weight: .bold).lineLimit(1)
+                Spacer(minLength: 0)
+                if let m = d.run.mergeLabel { APChip(text: m.0, color: m.1, strong: true) }
+            }
+            ScrollView(showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 3) {
+                    ForEach(d.units) { u in
+                        HStack(spacing: 6) {
+                            if let t = u.task { APTicket(key: t) }
+                            Text(u.title).boardFont(11).lineLimit(1)
+                            Spacer(minLength: 4)
+                            APChip(text: apUnitLabel(u.status), color: APColor.unit(u.status), strong: true)
+                        }
+                    }
+                }
+            }
+            lockedButtons
+        }
+    }
+
+    // 이어 가기·보고서 보기 — 다음 조각(출발 화면, 3단계 보고서 틀)이라 잠가 둔다
+    private var lockedButtons: some View {
+        HStack(spacing: 6) {
+            APButton(title: "이 실행 이어 가기", primary: true, enabled: false, help: "아직 만들지 않았습니다(출발 화면과 함께)") {}
+            APButton(title: "보고서 보기", enabled: false, help: "아직 만들지 않았습니다(보고서 틀과 함께)") {}
+        }
+    }
+
+    // 고른 실행의 단위별 상세 — 예상·실제·비용·판정(Jira 면 스토리별 묶음과 "스토리로"), 단위를 누르면 결과 기록(보고서)
+    private func detail(_ d: APPastDetail) -> some View {
+        let r = d.run
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Text("\(apDay(r.started)) · \(r.projectName) 단위별").boardFont(12.5, weight: .bold).lineLimit(1)
+                if r.jira { Text("스토리별로 묶음").boardFont(10).foregroundStyle(.secondary).fixedSize() }
+            }
+            if !r.title.isEmpty { Text(r.title).boardFont(11).foregroundStyle(.secondary).lineLimit(2) }
+            // 넓으면 표(와이어프레임 지난 실행 ②), 보드 폭이 좁으면 단위마다 두 줄 — 일곱 칸 표는 360pt 에서 제목 칸이 한 글자로 눌렸다
+            ViewThatFits(in: .horizontal) {
+                unitTable(d)
+                unitRows(d)
+            }
+            harnessLine(r)
+            carryBlock(d)
+            lockedButtons
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 12).fill(Color.white.opacity(0.04)))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("ap-detail")
+    }
+
+    private func cell(_ s: String, mono: Bool = false) -> some View {
+        Text(s).boardFont(10.5, design: mono ? .monospaced : .default).monospacedDigit().lineLimit(1).fixedSize()
+    }
+
+    private func judge(_ u: APPastUnit) -> some View {
+        HStack(spacing: 3) {
+            APChip(text: apUnitLabel(u.status), color: APColor.unit(u.status), strong: true)
+            if u.status == "done", u.tries > 0 { Text("\(u.tries + 1)번째").boardFont(10).foregroundStyle(.secondary).fixedSize() }
+            if u.status == "failed" { Text("\(u.tries + 1)번").boardFont(10).foregroundStyle(.secondary).fixedSize() }
+        }
+    }
+
+    private func toStory(_ u: APPastUnit) -> some View {
+        SwiftUI.Group {
+            if u.status == "skipped" {
+                Text(u.dependsOn.isEmpty ? "건너뜀" : "\(u.dependsOn.joined(separator: ", ")) 에 기댐").boardFont(10).foregroundStyle(.secondary).fixedSize()
+            } else {
+                let m = u.merged ?? "not_merged"
+                APChip(text: ["merged": "합침", "nothing": "합칠 커밋 없음"][m] ?? "합치지 않음", color: m == "merged" ? APColor.ok : APColor.muted)
+            }
+        }
+    }
+
+    // Jira 실행은 스토리 키 차례(처음 나온 차례)로 묶는다. 스토리 없는 단위는 "스토리 없음"
+    private func storyGroups(_ d: APPastDetail) -> [(key: String?, units: [APPastUnit])] {
+        guard d.run.jira else { return [(nil, d.units)] }
+        var stories: [String] = []
+        for u in d.units where !stories.contains(u.story ?? "") { stories.append(u.story ?? "") }
+        return stories.map { k in (k.isEmpty ? nil : k, d.units.filter { ($0.story ?? "") == k }) }
+    }
+
+    private func reportToggle(_ u: APPastUnit, lines: Int) -> some View {
+        Button { withAnimation(foldSpring) { reports.formSymmetricDifference([u.n]) } } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "chevron.right").font(.system(size: 7, weight: .bold))
+                    .rotationEffect(.degrees(reports.contains(u.n) ? 90 : 0))
+                Text(u.title).boardFont(11).lineLimit(lines)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .hint("눌러서 결과 기록 보기")
+        .accessibilityIdentifier("ap-unit-\(u.n)")
+    }
+
+    // 좁은 보드의 단위별 상세 — 단위마다 두 줄(작업 키·제목 / 예상·실제·비용·판정·스토리로)
+    private func unitRows(_ d: APPastDetail) -> some View {
+        let jira = d.run.jira
+        let est = d.units.compactMap(\.estMin).reduce(0, +)
+        return VStack(alignment: .leading, spacing: 7) {
+            ForEach(Array(storyGroups(d).enumerated()), id: \.offset) { _, g in
+                if jira {
+                    HStack(spacing: 5) {
+                        if let k = g.key { APTicket(key: k) } else { Text("스토리 없음").boardFont(10.5, weight: .semibold) }
+                        Text(storyNote(g.key, g.units)).boardFont(10.5).foregroundStyle(.secondary)
+                    }
+                    .padding(.top, 3)
+                }
+                ForEach(g.units) { u in
+                    VStack(alignment: .leading, spacing: 3) {
+                        HStack(spacing: 5) {
+                            SwiftUI.Group { if let t = u.task { cell(t, mono: true) } else { cell("\(u.n)", mono: true) } }.foregroundStyle(.secondary)
+                            reportToggle(u, lines: 2)
+                        }
+                        WrapRow(spacing: 6) {
+                            Text("예상 \(u.estMin.map { apDur($0 * 60) } ?? "모름") · 실제 \(apDur(u.activeSec)) · \(apUSD(u.cost)) USD")
+                                .boardFont(10.5).monospacedDigit().foregroundStyle(.secondary).fixedSize()
+                            judge(u)
+                            if jira { toStory(u) }
+                        }
+                        .padding(.leading, 14)
+                        if reports.contains(u.n) { APReport(unit: u).padding(.leading, 14) }
+                    }
+                }
+            }
+            Divider()
+            Text("합계 · 예상 \(est > 0 ? apDur(est * 60) : "모름") · 실제 \(apDur(d.units.reduce(0) { $0 + $1.activeSec })) · \(apUSD(d.units.reduce(0) { $0 + $1.cost })) USD")
+                .boardFont(10.5, weight: .semibold).monospacedDigit()
+        }
+    }
+
+    private func unitTable(_ d: APPastDetail) -> some View {
+        let jira = d.run.jira
+        let groups = storyGroups(d)
+        let est = d.units.compactMap(\.estMin).reduce(0, +)
+        return Grid(alignment: .leading, horizontalSpacing: 8, verticalSpacing: 5) {
+            GridRow {
+                head(jira ? "작업" : "")
+                head("단위")
+                head("예상").gridColumnAlignment(.trailing)
+                head("실제").gridColumnAlignment(.trailing)
+                head("비용 USD").gridColumnAlignment(.trailing)
+                head("판정")
+                if jira { head("스토리로") }
+            }
+            ForEach(Array(groups.enumerated()), id: \.offset) { _, g in
+                if jira {
+                    // 스토리 머리 줄 — 칸 밖 보기는 Grid 의 모든 열을 차지한다
+                    HStack(spacing: 5) {
+                        if let k = g.key { APTicket(key: k) } else { Text("스토리 없음").boardFont(10.5, weight: .semibold) }
+                        Text(storyNote(g.key, g.units)).boardFont(10.5).foregroundStyle(.secondary)
+                    }
+                    .padding(.top, 4)
+                }
+                ForEach(g.units) { u in
+                    GridRow {
+                        SwiftUI.Group { if let t = u.task { cell(t, mono: true) } else { cell("\(u.n)", mono: true) } }.foregroundStyle(.secondary)
+                        reportToggle(u, lines: 1)
+                            .frame(minWidth: 140, maxWidth: .infinity, alignment: .leading)
+                        cell(u.estMin.map { apDur($0 * 60) } ?? "모름")
+                        cell(apDur(u.activeSec))
+                        cell(apUSD(u.cost))
+                        judge(u)
+                        if jira { toStory(u) }
+                    }
+                    if reports.contains(u.n) {
+                        APReport(unit: u).padding(.leading, 16)
+                    }
+                }
+            }
+            Divider().gridCellUnsizedAxes(.horizontal)
+            GridRow {
+                Text("")
+                Text("합계").boardFont(10.5, weight: .semibold)
+                cell(est > 0 ? apDur(est * 60) : "모름")
+                cell(apDur(d.units.reduce(0) { $0 + $1.activeSec }))
+                cell(apUSD(d.units.reduce(0) { $0 + $1.cost }))
+                Text("")
+                if jira { Text("") }
+            }
+        }
+    }
+
+    private func head(_ s: String) -> some View {
+        Text(s).boardFont(10, weight: .semibold).foregroundStyle(.secondary).lineLimit(1).fixedSize()
+    }
+
+    // 스토리 머리 줄 — 종류 · 합친 작업 수
+    private func storyNote(_ key: String?, _ units: [APPastUnit]) -> String {
+        let kind = units.first.map { apKind($0.kind) } ?? ""
+        let merged = units.filter { $0.merged == "merged" }.count
+        return [kind, key == nil ? "" : "합친 작업 \(merged)/\(units.count)"].filter { !$0.isEmpty }.joined(separator: " · ")
+    }
+
+    // 하네스가 출발 때와 같은지 — 다르면 바뀐 파일(설계 2장 끝 "하네스 사본과 지문")
+    private func harnessLine(_ r: APPastRun) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            if let same = r.harnessSame {
+                if same {
+                    Label("하네스가 출발 때와 같습니다(파일 \(r.harnessFiles)개)", systemImage: "checkmark.shield")
+                        .boardFont(11).foregroundStyle(APColor.ok)
+                } else {
+                    Label("하네스가 출발 때와 다릅니다(\(r.harnessChanged.count)곳). 실행 중에 사람이 고쳤을 수 있어 되돌리지 않았습니다.",
+                          systemImage: "exclamationmark.shield")
+                        .boardFont(11).foregroundStyle(APColor.limit)
+                    ForEach(r.harnessChanged.prefix(10), id: \.path) { c in
+                        Text("\(["changed": "바뀜", "added": "더함", "removed": "없어짐"][c.change] ?? c.change) · \(c.path.replacingOccurrences(of: NSHomeDirectory(), with: "~"))")
+                            .boardFont(10, design: .monospaced).foregroundStyle(.secondary).padding(.leading, 18)
+                    }
+                }
+            } else {
+                Text("하네스 기록 없음(하네스 지문 전 실행이거나 끝 검사를 하지 못함)").boardFont(11).foregroundStyle(.secondary)
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("ap-harness")
+    }
+
+    // 다음 출발로 넘어갈 것 — 미룬 사람 몫(다음 출발 카드), 새로 찾은 일(대기열 후보), Jira 면 열린 채 남은 티켓
+    @ViewBuilder private func carryBlock(_ d: APPastDetail) -> some View {
+        let parked = d.carry.filter { $0.kind == "next_start" }
+        let found = d.carry.filter { $0.kind == "new_work" }
+        let open = d.units.filter { $0.task != nil && $0.status != "done" }
+        if !parked.isEmpty || !found.isEmpty || !open.isEmpty {
+            VStack(alignment: .leading, spacing: 5) {
+                Text("다음 출발로 넘어갈 것").boardFont(11.5, weight: .bold)
+                if d.run.jira, !open.isEmpty {
+                    Text("열린 채 남은 티켓 \(open.count)").boardFont(10.5, weight: .semibold).foregroundStyle(.secondary)
+                    ForEach(open) { u in
+                        HStack(spacing: 5) {
+                            if let t = u.task { APTicket(key: t) }
+                            Text(u.title).boardFont(11).lineLimit(1)
+                            APChip(text: apUnitLabel(u.status), color: APColor.unit(u.status), strong: true)
+                        }
+                    }
+                    Text("끝까지 가지 못한 단위의 티켓은 닫지 않고 둡니다.").boardFont(10).foregroundStyle(.secondary)
+                }
+                if !parked.isEmpty {
+                    Text("미룬 사람 몫 \(parked.count)").boardFont(10.5, weight: .semibold).foregroundStyle(.secondary)
+                    ForEach(parked) { c in carryLine(c) }
+                }
+                if !found.isEmpty {
+                    Text("새로 찾은 일 \(found.count)").boardFont(10.5, weight: .semibold).foregroundStyle(.secondary)
+                    ForEach(found) { c in carryLine(c) }
+                }
+            }
+        }
+    }
+
+    private func carryLine(_ c: APCarry) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text("· \(c.title)").boardFont(11).fixedSize(horizontal: false, vertical: true)
+            if !c.why.isEmpty { Text(c.why).boardFont(10).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true).padding(.leading, 10) }
+        }
+    }
+}
+
+// 단위의 결과 기록(result.json, 기록 저장소에 전문) — 한 문장 결론, 한 일, 시험, 바꾼 것, 위험. Jira 작업이면 작업 가지와 합친 결과
+struct APReport: View {
+    let unit: APPastUnit
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            if let r = unit.result {
+                if !r.headline.isEmpty { Text(r.headline).boardFont(11, weight: .semibold).fixedSize(horizontal: false, vertical: true) }
+                ForEach(Array(r.summary.enumerated()), id: \.offset) { _, s in line("· \(s)") }
+                if !r.tests.isEmpty { line("시험: " + r.tests.joined(separator: ", ")) }
+                if !r.changes.isEmpty { line("바꾼 것: " + r.changes.joined(separator: ", ")) }
+                ForEach(Array(r.risks.enumerated()), id: \.offset) { _, s in line("알아 둘 위험: \(s)").foregroundStyle(APColor.limit) }
+            } else {
+                line("결과 기록이 없습니다")
+            }
+            if !unit.branch.isEmpty { Text("가지 \(unit.branch)").boardFont(10, design: .monospaced).foregroundStyle(.secondary) }
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.white.opacity(0.05)))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("ap-report-\(unit.n)")
+    }
+    private func line(_ s: String) -> some View {
+        Text(s).boardFont(10.5).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+    }
+}
+
 // MARK: - 창
 
 var window: NSWindow!
@@ -7616,6 +9560,7 @@ struct MiniTitleBar: View {
 struct MiniBoard: View {
     @ObservedObject var store: Store
     @ObservedObject var usage: UsageStore
+    @ObservedObject private var autopilot = AutopilotStore.shared
 
     // 사용 한도 한 줄 — 앞에서 n 개만
     private func limits(_ n: Int) -> some View {
@@ -7635,12 +9580,14 @@ struct MiniBoard: View {
                 Spacer(minLength: 0)
                 Foreman(groups: store.groups, limits: usage.limits, now: store.now, compact: true)
             }
-            if store.groups.isEmpty {
+            if store.groups.isEmpty && autopilot.runs.isEmpty {
                 Text("아직 기록된 세션이 없습니다").boardFont(11).foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
             } else {
                 ScrollView(showsIndicators: false) {
                     VStack(spacing: 2) {
+                        // 작은 크기의 실행 줄 — 상태 꼬리표와 "2/4 제목" 한 줄, 막대는 뺌(와이어프레임 보드 본체 ⑧)
+                        ForEach(autopilot.runs) { r in APRunLine(run: r, minutes: r.unitMinutes(store.now), compact: true).equatable() }
                         ForEach(store.groups) { g in MiniRow(g: g, now: store.now) }
                     }
                 }
@@ -7649,6 +9596,9 @@ struct MiniBoard: View {
                 // 자리가 모자라면 한도를 앞의 둘만 — 투명도 슬라이더는 늘 보인다
                 ViewThatFits(in: .horizontal) { limits(usage.limits.count); limits(2); Color.clear.frame(width: 0, height: 0) }
                 Spacer(minLength: 4)
+                HeaderButton(icon: "clock.arrow.circlepath", tint: nil, help: "자율주행 지난 실행") { autopilot.screen = .history(nil) }
+                    .scaleEffect(0.8)
+                    .accessibilityIdentifier("ap-history-mini")
                 OpacitySlider(compact: true)
             }
         }
