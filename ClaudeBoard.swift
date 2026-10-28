@@ -4580,7 +4580,7 @@ struct BoardView: View {
                 store.groups.flatMap(\.sessions).filter { $0.state == "working" || $0.state == "waiting" }
             }
 
-            if store.groups.isEmpty && runs.isEmpty {
+            if store.groups.isEmpty && runs.isEmpty && autopilot.awaiting.isEmpty {
                 VStack(spacing: 10) {
                     Image(systemName: "moon.zzz.fill").font(.system(size: 30)).foregroundStyle(.secondary)
                     Text("아직 기록된 세션이 없습니다").boardFont(14, weight: .medium)
@@ -4608,6 +4608,10 @@ struct BoardView: View {
                 ScrollViewReader { proxy in
                 ScrollView(showsIndicators: true) {
                     VStack(spacing: 12) {
+                        // 끝났고 합치기·승격을 기다리는 실행 — 기본 보기(실행 줄 숨김)에서는 빼되, 도는 실행이 없어 보기 단추가 없을 때는 보인다
+                        if autopilotView != "basic" || runs.isEmpty {
+                            ForEach(autopilot.awaiting) { r in APEndedLine(run: r).equatable().transition(.opacity) }
+                        }
                         // 자율주행 보기는 실행 카드만, 다른 보기는 카드 없는 실행을 맨 위에
                         ForEach(autoOnly ? runs : orphans) { r in
                             APRunCard(run: r, minutes: r.unitMinutes(store.now), meters: !autoOnly).equatable().transition(.opacity)
@@ -7627,6 +7631,8 @@ struct APRun: Equatable, Identifiable {
     var checkTimeout = 10.0
     var controlSeen = 0.0
     var units: [APUnit] = []
+    var wrapped = false                 // 끝 정리(하네스 끝 검사·기록)를 마침 — 엔진 finish 가 받는 실행
+    var mergeWaiting = false            // 끝났고 합치기·승격에 남은 단계가 있음(보드 본체의 끝난 실행 줄, 2단계 5-3)
 
     var active: Bool { !state.isEmpty && !["done", "stopped", "error"].contains(state) }
     var jira: Bool { units.contains { $0.story != nil } }
@@ -7735,8 +7741,36 @@ struct APRun: Equatable, Identifiable {
         }
         // 저장소가 아닌 작업 폴더에서 도는 실행은 가지 기록이 없다 — 단위 작업 폴더를 경로로 쓴다
         if x.repos.isEmpty { x.repos = Array(Set(x.units.map(\.cwd).filter { !$0.isEmpty })).sorted() }
+        x.wrapped = r["wrapped"] != nil
+        if x.wrapped, !repos.isEmpty, !x.active {
+            x.mergeWaiting = APRun.mergeOpen(br, steps: apPromotion(x.project), stories: x.jira ? x.units.contains { $0.story == nil } : true)
+        }
         return x
     }
+
+    // 합치기·승격에 남은 것이 있는가(설계 판단, 2단계 5-3) — 엔진 finish 의 promoted·discarded 로만 본다(git 은 부르지 않는다).
+    // 합칠 쪽(자율주행 가지, Jira 면 스토리마다)이 버려지지도 승격 차례의 마지막 자율주행 단계(예 live)에 합쳐지지도 않았거나,
+    // 하나라도 그 단계에 합쳤는데 기존 가지끼리의 마지막 단계(예 master ← live)를 아직 안 했으면 남았다
+    static func mergeOpen(_ br: [String: Any], steps: [APStep], stories withAutopilot: Bool) -> Bool {
+        let promoted = br["promoted"] as? [[String: Any]] ?? []
+        let discarded = Set((br["discarded"] as? [[String: Any]] ?? []).compactMap { $0["source"] as? String })
+        func done(_ src: String?, _ into: String) -> Bool {
+            promoted.contains { $0["into"] as? String == into && (src == nil || $0["source"] as? String == src) }
+        }
+        var sources = (br["stories"] as? [String: Any] ?? [:]).keys.sorted().map { "story:" + $0 }
+        if sources.isEmpty || withAutopilot { sources.insert("autopilot", at: 0) }
+        let lastAuto = steps.last { $0.from == "autopilot" }?.into
+        func reached(_ s: String) -> Bool { lastAuto.map { done(s, $0) } ?? promoted.contains { $0["source"] as? String == s } }
+        if sources.contains(where: { !discarded.contains($0) && !reached($0) }) { return true }
+        if let last = steps.last, last.from != "autopilot", sources.contains(where: reached), !done(nil, last.into) { return true }
+        return false
+    }
+}
+
+// 프로젝트 설정의 승격 차례(projects/<프로젝트>.json promotion). 없으면 빈 목록
+func apPromotion(_ project: String?) -> [APStep] {
+    guard let p = project, let o = apRead(autopilotRoot + "/projects/\(p).json") as? [String: Any], let list = o["promotion"] as? [[String: Any]] else { return [] }
+    return list.compactMap { s in (s["from"] as? String).flatMap { f in (s["into"] as? String).map { APStep(from: f, into: $0, after: s["after"] as? String) } } }
 }
 
 enum APScreen: Equatable {
@@ -7763,8 +7797,18 @@ struct APLogGroup: Identifiable {
     @Published private(set) var sent: [String: APSent] = [:]   // 보낸 요청 — 엔진이 받을 때(run.json control_seen)까지 단추를 잠근다
     @Published private(set) var history = APHistory()
     @Published private(set) var detail: APPastDetail?
+    @Published private(set) var awaiting: [APRun] = []    // 끝났고 합치기·승격을 기다리는 실행(최근 것부터) — 보드 본체의 끝난 실행 줄
     @Published var screen: APScreen = .board { didSet { if screen != oldValue { tick() } } }
     private var cache: [String: (stamp: [Double], run: APRun?)] = [:]
+    // 합치기·승격의 "나중에" — 실행 id → 다시 보일 시각. 하루 동안 보드 본체의 끝난 실행 줄에서 숨긴다(다시 알리는 알림은 4단계)
+    private var later: [String: Double] = UserDefaults.standard.dictionary(forKey: "autopilotMergeLater") as? [String: Double] ?? [:]
+    func snooze(_ id: String) {
+        let now = Date().timeIntervalSince1970
+        later = later.filter { $0.value > now }
+        later[id] = now + 86_400
+        UserDefaults.standard.set(later, forKey: "autopilotMergeLater")
+        tick()
+    }
     private var evDir = "", evOffset: UInt64 = 0, evRest = Data()
     private var dbStamp: [Double] = [], detailKey = ""
     private var timer: Timer?
@@ -7785,7 +7829,8 @@ struct APLogGroup: Identifiable {
         let names = ((try? FileManager.default.contentsOfDirectory(atPath: base)) ?? []).filter { !$0.hasPrefix(".") }
         var viewing: String?
         if case .running(let id) = screen { viewing = id }
-        var live: [APRun] = [], seen = Set<String>(), view: APRun?
+        var live: [APRun] = [], seen = Set<String>(), view: APRun?, waiting: [APRun] = []
+        let nowTs = Date().timeIntervalSince1970
         for name in names {
             let dir = base + "/" + name
             let runM = apStamp(dir + "/run.json")
@@ -7806,11 +7851,15 @@ struct APLogGroup: Identifiable {
             guard var r = run else { continue }
             r.alive = r.pid > 0 && (kill(r.pid, 0) == 0 || errno == EPERM)
             if r.active { live.append(r) }
+            // 끝난 실행 줄은 저장소가 아직 있는 것만(장난감·지운 저장소의 옛 실행은 그리지 않는다) — 파일 있는지만 본다
+            if !r.active, r.mergeWaiting, (later[r.id] ?? 0) < nowTs, r.repos.allSatisfy({ FileManager.default.fileExists(atPath: $0) }) { waiting.append(r) }
             if name == viewing { view = r }
         }
         cache = cache.filter { seen.contains($0.key) }
         live.sort { ($0.started ?? .infinity, $0.id) < ($1.started ?? .infinity, $1.id) }
         if live != runs { runs = live }
+        waiting.sort { ($0.ended ?? 0, $0.id) > ($1.ended ?? 0, $1.id) }
+        if waiting != awaiting { awaiting = waiting }
         if view != viewed { viewed = view }
         // 엔진이 받았거나(control_seen) 20초가 지나도 안 받으면(엔진이 꺼짐) 단추를 다시 푼다
         let now = Date().timeIntervalSince1970
@@ -8497,6 +8546,55 @@ struct APRunCard: View, Equatable {
     }
 }
 
+// 끝났고 합치기·승격을 기다리는 실행의 줄(2단계 5-3, 와이어프레임 합치기·승격 ⑪ "보드의 실행 줄에서 엽니다") — 누르면 합치기·승격 시트.
+// 시계가 없고 실행 값이 같으면 다시 그리지 않는다
+struct APEndedLine: View, Equatable {
+    let run: APRun
+    var compact = false
+    @State private var hover = false
+    static func == (a: APEndedLine, b: APEndedLine) -> Bool { a.run == b.run && a.compact == b.compact }
+    var body: some View {
+        let sc = apStateChip(run)
+        Button { APMerge.shared.open(run.dir) } label: {
+            SwiftUI.Group {
+                if compact {
+                    HStack(spacing: 6) {
+                        APMark()
+                        APChip(text: "합치기 기다림", color: APColor.wait, strong: true)
+                        Text(run.name).boardFont(11.5).lineLimit(1)
+                        Spacer(minLength: 0)
+                        Text("합치기·승격 →").boardFont(11, weight: .semibold).foregroundStyle(Palette.accent).fixedSize()
+                    }
+                } else {
+                    // 보드 폭이 좁아(360pt 안팎) 두 줄 — 위: 표지·이름·끝 상태, 아래: 결과·합치기 기다림·들어가기
+                    VStack(alignment: .leading, spacing: 5) {
+                        HStack(spacing: 6) {
+                            APMark()
+                            Text(run.name).boardFont(12.5, weight: .bold).lineLimit(1)
+                            APChip(text: sc.0, color: sc.1, strong: true)
+                            Spacer(minLength: 0)
+                        }
+                        HStack(spacing: 6) {
+                            Text("\(run.units.count)개 중 \(run.passed)개 통과").boardFont(10.5).monospacedDigit().foregroundStyle(.secondary).lineLimit(1)
+                            Spacer(minLength: 4)
+                            APChip(text: "합치기 기다림", color: APColor.wait, strong: true)
+                            Text("합치기·승격 →").boardFont(11, weight: .semibold).foregroundStyle(Palette.accent).fixedSize()
+                        }
+                    }
+                }
+            }
+            .padding(compact ? 6 : 9)
+            .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(hover ? 0.08 : 0.04)))
+            .overlay(RoundedRectangle(cornerRadius: 10).stroke(APColor.wait.opacity(0.30), lineWidth: 0.5))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .clickable($hover)
+        .hint("\(run.name) 실행이 끝났습니다. 눌러서 바뀐 줄을 보고 합치기·승격")
+        .accessibilityIdentifier("ap-ended-\(run.id)")
+    }
+}
+
 // 보드 머리 아래 줄 — 보기 고르기(모두·기본·자율주행), 지난 실행, 새 자율주행(출발 준비 시트). 닫은 준비가 있으면 "출발 준비" 단추로 다시 연다
 struct APBar: View {
     @ObservedObject var ap: AutopilotStore
@@ -8790,6 +8888,9 @@ struct APRunningScreen: View {
                 HStack(spacing: 6) {
                     Text("이 실행은 끝났습니다.").boardFont(10.5).foregroundStyle(.secondary)
                     APBack(title: "지난 실행에서 보기 →", axid: "ap-to-history") { ap.screen = .history(run.id) }
+                    if run.wrapped, !run.work.isEmpty || !run.storyBranches.isEmpty {
+                        APBack(title: "합치기·승격 →", axid: "ap-to-merge") { APMerge.shared.open(run.dir) }
+                    }
                 }
             }
         }
@@ -9131,10 +9232,13 @@ struct APHistoryScreen: View {
 
     // 이 실행 이어 가기(출발 준비를 이 실행으로 엶, 2단계 5-2a) · 보고서 보기(3단계 보고서 틀이라 잠금)
     private func actionButtons(_ r: APPastRun) -> some View {
-        HStack(spacing: 6) {
+        WrapRow(spacing: 6) {
             APButton(title: "이 실행 이어 가기", primary: true, enabled: r.project != nil,
                      help: r.project == nil ? "프로젝트가 없는 실행이라 이어 갈 수 없습니다" : "남은 단위와 미룬 사람 몫을 불러와 출발 준비를 엽니다",
                      axid: "ap-continue-\(r.id)") { APStart.shared.open(continuing: r.id) }
+            APButton(title: "합치기·승격", icon: "arrow.triangle.merge", primary: r.mergeLabel?.0 == "합치기 기다림", enabled: r.hasBranches && FileManager.default.fileExists(atPath: r.runDir + "/run.json"),
+                     help: r.hasBranches ? "바뀐 줄을 보고 승격 차례대로 합치거나 버립니다" : "엔진이 만든 가지가 없는 실행입니다(또는 실행 폴더를 지웠습니다)",
+                     axid: "ap-merge-\(r.id)") { APMerge.shared.open(r.runDir) }
             APButton(title: "보고서 보기", enabled: false, help: "아직 만들지 않았습니다(보고서 틀과 함께)") {}
         }
     }
@@ -9638,6 +9742,8 @@ extension APRecords {
     @Published private(set) var startError: String?
     @Published private(set) var changedBy: String?         // 카드 답이 고른 단위를 바꿨을 때(접힌 "고른 단위" 머리 강조)
     @Published private(set) var flash = 0
+    // 이어 갈 지난 Jira 실행이 만든 스토리·작업 가지 가운데 아직 남아 출발을 막는 것(2026-10-28 사용자 결정: 먼저 합치거나 버린 뒤 이어 감, 2단계 5-3)
+    @Published private(set) var leftBranches: [String] = []
     private(set) var id = ""
     private(set) var dir = ""
     private var settings: [String: Any] = [:]
@@ -9693,6 +9799,7 @@ extension APRecords {
             if hasDraft, !preparing, !starting { dropFolder(); reset() }
             if !hasDraft { load(select: runId) }
         } else if !hasDraft { reset(); load(select: nil) }
+        checkLeftovers()
         present()
     }
     // 보드를 끄면 준비는 사라진다(메모리에만) — 보드가 처음 출발 준비를 열 때 drafts/ 에 남은 출발하지 않은 폴더를 치운다(drafts/ 는 보드만 쓴다)
@@ -9748,7 +9855,7 @@ extension APRecords {
         units = []; carryPark = []; carryNew = []; noDefs = nil; lines = []; preparing = false; prepared = false; rechecking = false
         problems = []; mode = ""; modeReason = ""; repos = []; repoInfo = [:]; storyBranch = [:]; prerunPassed = []; prerunIds = []; prerunNote = ""
         cards = []; answers = [:]; policyLoaded = []; bases = [:]; baseNote = ""; promotion = []; promotionSaved = false
-        epic = ""; stories = []; estimates = [:]; starting = false; startError = nil; changedBy = nil
+        epic = ""; stories = []; estimates = [:]; starting = false; startError = nil; changedBy = nil; leftBranches = []
         id = ""; dir = ""; settings = [:]; tickets = [:]; needNewId = false; proposedOnce = false
     }
 
@@ -9838,6 +9945,44 @@ extension APRecords {
         setText = (try? String(contentsOfFile: setPath, encoding: .utf8)).flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 }
         setAt = mtime(setPath)?.timeIntervalSince1970
         estimates = calibrate()
+        checkLeftovers()
+    }
+
+    // 지난 Jira 실행의 남은 가지 — 엔진은 이 실행이 만든 가지만 움직이므로, 같은 스토리·작업 키를 쓰는 이어 가기는 그 가지가 남아 있으면 출발 전에 거부한다.
+    // 끝나지 않은 작업이 있는 스토리의 스토리 가지와 그 끝나지 않은 작업의 작업 가지 가운데 지금 있는 것을 본다(git 은 백그라운드)
+    func checkLeftovers() {
+        guard let run = pastRun, jira else { if !leftBranches.isEmpty { leftBranches = [] }; return }
+        let rd = run.runDir, rid = run.id
+        DispatchQueue.global(qos: .userInitiated).async {
+            let left = APStart.leftovers(rd)
+            DispatchQueue.main.async { MainActor.assumeIsolated { if self.pastId == rid, self.leftBranches != left { self.leftBranches = left } } }
+        }
+    }
+    nonisolated static func leftovers(_ runDir: String) -> [String] {
+        guard let r = apRead(runDir + "/run.json") as? [String: Any] else { return [] }
+        let stories = (r["branches"] as? [String: Any])?["stories"] as? [String: Any] ?? [:]
+        let q = apRead(runDir + "/queue.json") as? [[String: Any]] ?? []
+        let open = q.filter { $0["story"] is String && ($0["status"] as? String ?? "pending") != "done" }
+        var want: [(repo: String, branch: String)] = []
+        for k in Set(open.compactMap { $0["story"] as? String }).sorted() {
+            guard let st = stories[k] as? [String: Any], let repo = st["repo"] as? String, !repo.isEmpty else { continue }
+            if let b = st["branch"] as? String { want.append((repo, b)) }
+            for u in open where u["story"] as? String == k { if let t = u["branch"] as? String { want.append((repo, t)) } }
+        }
+        var have: [String: Set<String>] = [:], out: [String] = []
+        for w in want where FileManager.default.fileExists(atPath: w.repo) {
+            if have[w.repo] == nil {
+                have[w.repo] = Set((apGit(["for-each-ref", "--format=%(refname)", "refs/heads/"], w.repo) ?? "").split(separator: "\n").map { String($0.dropFirst(11)) })
+            }
+            if have[w.repo]?.contains(w.branch) == true, !out.contains(w.branch) { out.append(w.branch) }
+        }
+        return out
+    }
+
+    // 남은 가지를 치우러 합치기·승격으로 — 출발 준비는 닫아도 남는다(합치기·승격 시트의 "출발 준비로 돌아가기"로 돌아온다)
+    func toMerge() {
+        guard let rd = pastRun?.runDir else { return }
+        APMerge.shared.open(rd, fromStart: true)
     }
 
     // 추정 보정(2026-10-22 사용자 결정, 설계 5장 7절): 같은 모델의 통과 단위만, 같은 프로젝트·같은 종류 표본이 3개 이상이면 그것, 아니면 모든 프로젝트의
@@ -10265,6 +10410,7 @@ extension APRecords {
         let left = cards.filter { answers[$0.id] == nil }.count
         if left > 0 { l.append("카드 \(cards.count)장 가운데 \(left)장이 남았습니다. 다 고르면 출발할 수 있습니다") }
         if !problems.isEmpty { l.append("엔진의 출발 전 확인에 고칠 것이 \(problems.count)개 있습니다") }
+        if !leftBranches.isEmpty { l.append("지난 실행의 스토리·작업 가지 \(leftBranches.count)개가 남아 있습니다. 합치기·승격에서 먼저 합치거나 버린 뒤 이어 갑니다") }
         if jira {
             if epic.isEmpty { l.append("에픽 번호를 넣어 주세요(출발 준비 1단계)") }
             else if epic.range(of: "^[A-Z][A-Z0-9_]*-[0-9]+$", options: .regularExpression) == nil { l.append("에픽 번호 꼴이 아닙니다(예: SHOP-10)") }
@@ -10577,6 +10723,7 @@ struct APStep1: View {
             }
             if !s.past.isEmpty { pastList }
             if s.hasDraft { pathBox }
+            if !s.leftBranches.isEmpty { APLeftBranches(s: s) }
             if s.jira { APEpicBox(s: s) }
             if s.hasDraft { importBox }
         }
@@ -10647,6 +10794,21 @@ struct APStep1: View {
             Text("\(name) \(n)").boardFont(11.5, weight: .semibold).frame(minWidth: 90, alignment: .leading).fixedSize()
             Text(titles.isEmpty ? "없음" : titles.prefix(4).joined(separator: ", ") + (titles.count > 4 ? " 외 \(titles.count - 4)" : ""))
                 .boardFont(11).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+        }
+    }
+}
+
+// 지난 Jira 실행의 남은 가지 안내(2026-10-28 사용자 결정, 2단계 5-3) — 엔진은 그대로 거부하므로 출발 준비에서 미리 알리고 합치기·승격으로 잇는다
+struct APLeftBranches: View {
+    @ObservedObject var s: APStart
+    var body: some View {
+        APBox(title: "먼저 합치거나 버릴 가지 \(s.leftBranches.count)", note: "지난 실행이 만든 스토리·작업 가지", tint: APColor.limit, axid: "ap-left-branches") {
+            ForEach(s.leftBranches.prefix(8), id: \.self) { b in Text(b).boardFont(11, design: .monospaced).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle) }
+            if s.leftBranches.count > 8 { apNote("… \(s.leftBranches.count - 8)개 더") }
+            apNote("이어 가기는 같은 스토리·작업 키를 씁니다. 엔진은 이 실행이 만든 가지만 움직이므로 지난 실행의 가지가 남아 있으면 출발하지 않습니다. "
+                   + "합치기·승격에서 그 스토리를 버리거나(dev 에 합치기 전), dev·live 에 합친 뒤 '합친 가지 지우기'와 '합치지 못한 작업 가지도 지우기'로 치운 뒤 이어 갑니다. "
+                   + "뒤 실행이 같은 이름으로 다시 만든 가지면 그 실행의 합치기·승격에서 다룹니다.")
+            APButton(title: "합치기·승격 →", primary: true, help: "지난 실행의 합치기·승격을 엽니다. 이 준비는 남습니다", axid: "ap-left-merge") { s.toMerge() }
         }
     }
 }
@@ -11236,6 +11398,1056 @@ struct APConfirm: View {
     }
 }
 
+// MARK: 자율주행 · 합치기·승격
+
+// 2단계 5-3: 끝나고 정리를 마친 실행(wrapped)의 가지 승격(설계 2장 끝 "승격", 와이어프레임 5판 merge). 단계 목록은 프로젝트 설정의
+// 승격 차례(promotion)대로이고 두 모드(따로 작업 트리·원래 작업 트리)가 같다. Jira 연결 실행은 스토리마다 한 묶음이고 기존 가지끼리의 단계(master ← live)는
+// 맨 아래 한 번이다. 보드는 git 을 읽기만 하고(커밋 수·바뀐 줄·충돌 미리 보기·받는 가지가 걸린 작업 트리), 가지를 움직이는 일은 모두 사람이 누를 때
+// 엔진 finish(merge·promote·discard·cleanup)로 한다. 엔진 문장은 그대로 보인다. 무거운 읽기는 시트를 열 때와 엔진이 한 일 뒤에만 백그라운드에서 하고
+// 시계·애니메이션은 두지 않는다(시트는 따로 창이라 보드 배치를 다시 계산하지 않는다)
+
+// git 을 부르고 종료 코드와 표준 출력을 함께 받는다(merge-tree 는 충돌이면 1 로 끝나며 충돌 파일을 낸다). apGit 과 같은 보호
+func apGitRun(_ args: [String], _ cwd: String) -> (code: Int32, out: String) {
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+    p.arguments = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "core.attributesFile=/dev/null"] + args
+    p.currentDirectoryURL = URL(fileURLWithPath: cwd)
+    var env = ProcessInfo.processInfo.environment
+    for (k, v) in [("GIT_CONFIG_NOSYSTEM", "1"), ("GIT_CONFIG_GLOBAL", "/dev/null"), ("GIT_ATTR_NOSYSTEM", "1"), ("GIT_NO_REPLACE_OBJECTS", "1")] { env[k] = v }
+    p.environment = env
+    let out = Pipe()
+    p.standardOutput = out
+    p.standardError = FileHandle.nullDevice
+    guard (try? p.run()) != nil else { return (-1, "") }
+    let d = out.fileHandleForReading.readDataToEndOfFile()
+    p.waitUntilExit()
+    return (p.terminationStatus, String(decoding: d, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines))
+}
+
+struct APPromoted: Equatable { var source = "", repo = "", branch = "", into = "", how = "", to = ""; var at: Double? }
+struct APDiffFile: Equatable { let path: String; let add: String; let del: String }
+
+// 한 단계의 저장소 하나(또는 바뀐 파일 한 범위) — 보드가 읽기만 하는 git 으로 미리 본 것. 범위는 받는 가지 머리(a)...합칠 가지 머리(b)
+struct APMergePlan: Equatable {
+    var state = "nosrc"     // nosrc(합칠 가지 없음)·nointo(받는 가지 없음, 건너뜀)·same(이미 들어 있음)·ff·merge·conflict·error
+    var commits = 0         // 받는 가지에 없는 커밋(a..b)
+    var behind = 0          // 받는 가지에만 있는 커밋(b..a) — 병합 커밋이 되는 까닭
+    var files: [APDiffFile] = []
+    var conflicts: [String] = []
+    var error = ""
+    var wt: String?         // 받는 가지가 걸린 작업 트리 — 깨끗하면 엔진이 그 자리에서 앞으로 감기로 함께 올린다
+    var wtDirty = false     // 그 작업 트리에 커밋하지 않은 추적 파일 변경이 있음 — 엔진이 합치지 않는다
+    var withBase = 0        // 출발 가지(dev)에만 있던 커밋 가운데 함께 가는 수(받는 가지..출발 머리)
+    var a = "", b = ""
+}
+
+struct APMergeTask: Equatable, Identifiable {
+    let n: Int
+    var id: Int { n }
+    var key: String?
+    var title = "", status = "", branch = "", merge = "", why = ""
+    var depends: [String] = []   // 기댄 앞 작업(작업 키, 없으면 "단위 n")
+}
+
+struct APMergeStory: Equatable, Identifiable {
+    let key: String
+    var id: String { key }
+    var repo = "", branch = "", kind = ""
+    var tasks: [APMergeTask] = []
+}
+
+// 단계 하나 — 승격 차례 한 줄을 이 실행(Jira 면 스토리)에 맞춘 것. source 는 엔진 promoted 의 source(autopilot·story:<키>·branch:<가지>)와 같다
+struct APMergeStep: Equatable, Identifiable {
+    let num: Int
+    let source: String
+    let from: String        // 보이는 합칠 쪽 이름(autopilot/<id>·스토리 가지·live)
+    let into: String
+    let after: String?
+    let refs: [String: String]   // 저장소 → 합칠 가지
+    var id: String { source + ">" + into }
+    var promote: Bool { source.hasPrefix("branch:") }
+    var story: String? { source.hasPrefix("story:") ? String(source.dropFirst(6)) : nil }
+    var ax: String { (story.map { "\($0)-" } ?? "") + "\(num)" }
+}
+
+// run.json·프로젝트 설정에서 읽은 것(시트를 열 때·엔진이 한 일 뒤)
+struct APMergeView: Equatable {
+    var run: APRun
+    var epic: String?
+    var steps: [APStep] = []
+    var promotionSaved = false
+    var repos: [String] = []                 // 엔진이 가지를 만든 저장소(branches.repos)
+    var baseHeads: [String: String] = [:]
+    var restored: [String: Bool] = [:]
+    var restoreNotes: [String: String] = [:]
+    var made: [String: [String]] = [:]
+    var endHeads: [String: [String: String]] = [:]   // 실행 끝의 가지 머리(branches.end) — 같은 이름으로 다시 만들어진 가지 가리기
+    var storyHeads: [String: String] = [:]
+    var promoted: [APPromoted] = []
+    var discarded: Set<String> = []
+    var cleaned = 0
+    var moved: [String] = []
+    var createdOther: [String] = []
+    var harnessSame: Bool?
+    var harnessFiles = 0
+    var harnessFolders: [String] = []
+    var harnessChanged: [APChange] = []
+    var stories: [APMergeStory] = []
+    var withAutopilot = true                 // 자율주행 가지 묶음을 보일지(Jira 실행은 스토리 없는 단위가 있을 때만)
+    var jira: Bool { !stories.isEmpty }
+    // 스토리·자율주행 가지가 마지막으로 합쳐지는 가지(승격 차례에서 자율주행 가지를 받는 마지막 단계, 예 live)
+    var lastAuto: String? { steps.last { $0.from == "autopilot" }?.into }
+}
+
+struct APMergeResult: Equatable { let ok: Bool; let title: String; let text: String }
+struct APRepoPlan: Identifiable { let repo: String; let plan: APMergePlan?; var id: String { repo } }
+
+@MainActor final class APMerge: ObservableObject {
+    static let shared = APMerge()
+    @Published private(set) var v: APMergeView?
+    @Published private(set) var plans: [String: APMergePlan] = [:]     // "<단계 id>|<저장소>"
+    @Published private(set) var spans: [String: APMergePlan] = [:]     // "all|<저장소>" 출발 머리...자율주행 가지, "task|<가지>" 스토리 가지...작업 가지
+    @Published private(set) var existing: [String: Set<String>] = [:]  // 저장소 → 지금 있는 가지
+    @Published private(set) var contained: Set<String> = []            // 마지막 자율주행 단계의 가지(live)에 다 들어간 가지("<저장소>|<가지>")
+    @Published private(set) var foreign: Set<String> = []              // 이 실행이 끝난 뒤 같은 이름으로 다시 만들어졌거나 바뀐 스토리·작업 가지("<저장소>|<가지>")
+    @Published private(set) var reading = false
+    @Published private(set) var busy: String?
+    @Published private(set) var result: APMergeResult?
+    @Published var confirm: String?                                    // 화면 안 확인 중인 것(discard·discard:<키>·unmerged:<키>)
+    @Published var openDiff: Set<String> = []
+    @Published private(set) var picked: [String: String] = [:]
+    @Published private(set) var patches: [String: String] = [:]
+    @Published private(set) var fromStart = false
+    @Published private(set) var shown = false
+    private(set) var dir = ""
+    private let queue = DispatchQueue(label: "claude-board.autopilot.merge")
+    private var gen = 0
+    private var sheet: NSWindow?
+    private var resizeWatch: NSObjectProtocol?
+
+    // 시트를 연다 — 출발 준비 시트가 떠 있으면 닫고(준비는 남는다) 연다. 보드를 앞으로 꺼내지 않는다
+    func open(_ runDir: String, fromStart: Bool = false) {
+        guard window != nil, !runDir.isEmpty else { return }
+        if sheet != nil {
+            if runDir == dir { return }
+            close()
+        }
+        if window.attachedSheet != nil {
+            guard APStart.shared.shown else { return }
+            APStart.shared.close()
+        }
+        if runDir != dir { plans = [:]; spans = [:]; existing = [:]; contained = []; result = nil; confirm = nil; openDiff = []; picked = [:]; patches = [:] }
+        dir = runDir
+        self.fromStart = fromStart
+        reload()
+        DispatchQueue.main.async { MainActor.assumeIsolated { self.present() } }
+    }
+
+    // 앞 시트가 아직 붙어 있으면(닫는 중) 조금 뒤 다시 본다
+    private func present(_ tries: Int = 0) {
+        guard window != nil, sheet == nil, !dir.isEmpty else { return }
+        if window.attachedSheet != nil {
+            if tries < 20 { DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { MainActor.assumeIsolated { self.present(tries + 1) } } }
+            return
+        }
+        let size = sheetSize()
+        let w = NSWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        let host = NSHostingController(rootView: APMergeSheet(m: self))
+        host.sizingOptions = []
+        w.contentViewController = host
+        w.setContentSize(size)
+        sheet = w
+        shown = true
+        window.beginSheet(w)
+        resizeWatch = NotificationCenter.default.addObserver(forName: NSWindow.didResizeNotification, object: window, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { if let s = self?.sheet { s.setContentSize(self?.sheetSize() ?? s.frame.size) } }
+        }
+    }
+    private func sheetSize() -> NSSize {
+        let c = window.contentLayoutRect.size
+        return NSSize(width: max(c.width - 8, 480), height: max(c.height - 8, 460))
+    }
+    func close() {
+        // 닫은 시트의 SwiftUI 보기를 놓는다(창이 남아 옛 단추가 접근성 나무에 남지 않게)
+        if let s = sheet { window.endSheet(s); s.orderOut(nil); s.contentViewController = nil }
+        sheet = nil
+        if let r = resizeWatch { NotificationCenter.default.removeObserver(r) }
+        resizeWatch = nil
+        shown = false
+        if APStart.shared.hasDraft { APStart.shared.checkLeftovers() }
+    }
+    // 나중에 — 보드 본체의 끝난 실행 줄을 하루 숨긴다(다시 알리는 알림은 4단계)
+    func later() {
+        if let id = v?.run.id { AutopilotStore.shared.snooze(id) }
+        close()
+    }
+    func backToStart() {
+        close()
+        apWhenNoSheet { APStart.shared.open() }
+    }
+
+    // run.json 을 다시 읽고 git 을 다시 본다
+    func reload() {
+        guard let run = APRun.parse(id: (dir as NSString).lastPathComponent, dir: dir), let r = apRead(dir + "/run.json") as? [String: Any] else { v = nil; return }
+        var m = APMergeView(run: run)
+        m.epic = apText(r["epic"])
+        let br = r["branches"] as? [String: Any] ?? [:]
+        let reposInfo = br["repos"] as? [String: Any] ?? [:]
+        m.repos = reposInfo.keys.sorted()
+        for (k, val) in reposInfo {
+            let i = val as? [String: Any] ?? [:]
+            if let h = (i["base"] as? [String: Any])?["head"] as? String { m.baseHeads[k] = h }
+            if let b = i["restored"] as? Bool { m.restored[k] = b }
+            if let n = apText(i["restore_note"]) { m.restoreNotes[k] = n }
+            m.made[k] = apStrings(i["made"])
+        }
+        for (k, val) in br["end"] as? [String: Any] ?? [:] { m.endHeads[k] = (val as? [String: Any] ?? [:]).compactMapValues { $0 as? String } }
+        for (k, val) in br["stories"] as? [String: Any] ?? [:] { if let h = (val as? [String: Any])?["head"] as? String { m.storyHeads[k] = h } }
+        m.promoted = (br["promoted"] as? [[String: Any]] ?? []).map {
+            APPromoted(source: $0["source"] as? String ?? "", repo: $0["repo"] as? String ?? "", branch: $0["branch"] as? String ?? "",
+                       into: $0["into"] as? String ?? "", how: $0["how"] as? String ?? "", to: $0["to"] as? String ?? "", at: apNum($0["at"]))
+        }
+        m.discarded = Set((br["discarded"] as? [[String: Any]] ?? []).compactMap { $0["source"] as? String })
+        m.cleaned = (br["cleaned"] as? [Any] ?? []).count
+        m.moved = (br["moved"] as? [[String: Any]] ?? []).map { "\((($0["repo"] as? String ?? "") as NSString).lastPathComponent) \($0["branch"] as? String ?? "?")" }
+        m.createdOther = (br["created"] as? [[String: Any]] ?? []).filter { $0["by"] as? String == "other" }.compactMap { $0["branch"] as? String }
+        if let hs = r["harness"] as? [String: Any] {
+            m.harnessFiles = Int(apNum(hs["files"]) ?? 0)
+            m.harnessFolders = apStrings(hs["folders"])
+            if let same = hs["same"] as? Bool {
+                m.harnessSame = same
+                m.harnessChanged = (hs["changed"] as? [[String: Any]] ?? []).map { APChange(path: $0["path"] as? String ?? "?", change: $0["change"] as? String ?? "") }
+            }
+        }
+        // 승격 차례 — 프로젝트 설정, 없으면 저장소 가지로 채운 꼴(보이기만. 엔진은 차례 없이 합치기는 하고 기존 가지끼리는 거부한다)
+        m.steps = apPromotion(run.project)
+        m.promotionSaved = !m.steps.isEmpty
+        if m.steps.isEmpty, let first = m.repos.first {
+            // 저장소 가지는 엔진이 출발 때 남긴 가지 머리(branches.start)로 본다(메인 스레드에서 git 을 부르지 않는다)
+            let b = (((br["start"] as? [String: Any])?[first] as? [String: Any]) ?? [:]).keys.sorted()
+            let n = APStart.roles(b)
+            if let d = n.dev { m.steps.append(APStep(from: "autopilot", into: d)) }
+            if let l = n.live { m.steps.append(APStep(from: "autopilot", into: l, after: n.dev)) }
+            if let ms = n.master { m.steps.append(n.live.map { APStep(from: $0, into: ms, after: $0) } ?? APStep(from: "autopilot", into: ms, after: n.dev)) }
+        }
+        // Jira 스토리 — 엔진 branches.stories(스토리 하나에 저장소 하나)와 대기열의 작업
+        let st = br["stories"] as? [String: Any] ?? [:]
+        let idToKey = Dictionary(run.units.map { ($0.unitId, $0.task ?? "단위 \($0.n)") }, uniquingKeysWith: { a, _ in a })
+        var order: [String] = []
+        for u in run.units { if let s = u.story, !order.contains(s) { order.append(s) } }
+        for k in st.keys.sorted() where !order.contains(k) { order.append(k) }
+        m.stories = order.map { k in
+            let s = st[k] as? [String: Any] ?? [:]
+            var x = APMergeStory(key: k, repo: s["repo"] as? String ?? "", branch: s["branch"] as? String ?? "")
+            let mine = run.units.filter { $0.story == k }
+            x.kind = mine.first?.kind ?? ""
+            x.tasks = mine.map { u in
+                APMergeTask(n: u.n, key: u.task, title: u.title, status: u.status, branch: u.branch ?? "", merge: u.merge ?? "", why: apPlain(u.mergeWhy),
+                            depends: u.depends.map { idToKey[$0] ?? $0 })
+            }
+            return x
+        }
+        m.withAutopilot = m.stories.isEmpty || run.units.contains { $0.story == nil }
+        v = m
+        readGit()
+    }
+
+    // 단계 — 자율주행 가지 묶음, 스토리 묶음, 기존 가지끼리의 단계
+    func autopilotSteps(_ m: APMergeView) -> [APMergeStep] {
+        m.steps.enumerated().compactMap { i, s in
+            guard s.from == "autopilot", !m.run.work.isEmpty else { return nil }
+            return APMergeStep(num: i + 1, source: "autopilot", from: m.run.work, into: s.into, after: s.after,
+                               refs: Dictionary(m.repos.map { ($0, m.run.work) }, uniquingKeysWith: { a, _ in a }))
+        }
+    }
+    func storySteps(_ m: APMergeView, _ s: APMergeStory) -> [APMergeStep] {
+        m.steps.enumerated().compactMap { i, st in
+            guard st.from == "autopilot", !s.repo.isEmpty, !s.branch.isEmpty else { return nil }
+            return APMergeStep(num: i + 1, source: "story:" + s.key, from: s.branch, into: st.into, after: st.after, refs: [s.repo: s.branch])
+        }
+    }
+    func promoteSteps(_ m: APMergeView) -> [APMergeStep] {
+        m.steps.enumerated().compactMap { i, s in
+            guard s.from != "autopilot" else { return nil }
+            return APMergeStep(num: i + 1, source: "branch:" + s.from, from: s.from, into: s.into, after: s.after,
+                               refs: Dictionary(m.repos.map { ($0, s.from) }, uniquingKeysWith: { a, _ in a }))
+        }
+    }
+    func allSteps(_ m: APMergeView) -> [APMergeStep] {
+        (m.withAutopilot ? autopilotSteps(m) : []) + m.stories.flatMap { storySteps(m, $0) } + promoteSteps(m)
+    }
+
+    // 차례 — 엔진 finish 와 같은 규칙(합치기는 같은 합칠 쪽이 after 에 합쳐졌을 때, 기존 가지끼리는 무엇이든 after 에 합쳐졌을 때)
+    func done(_ st: APMergeStep) -> APPromoted? { v?.promoted.last { $0.into == st.into && $0.source == st.source } }
+    func afterDone(_ st: APMergeStep) -> Bool {
+        guard let a = st.after else { return true }
+        return v?.promoted.contains { $0.into == a && (st.promote || $0.source == st.source) } ?? false
+    }
+    func reached(_ source: String, _ into: String?) -> Bool {
+        guard let into else { return v?.promoted.contains { $0.source == source } ?? false }
+        return v?.promoted.contains { $0.source == source && $0.into == into } ?? false
+    }
+    func plansOf(_ st: APMergeStep) -> [APRepoPlan] { st.refs.keys.sorted().map { APRepoPlan(repo: $0, plan: plans[st.id + "|" + $0]) } }
+
+    // 누를 수 없는 까닭(없으면 nil) — 엔진이 거부할 것을 미리 막는다. 막지 못한 것(그사이 바뀜)은 엔진 문장이 그대로 보인다.
+    // orderLock 은 미리 본 git 밖의 까닭(차례·끝 정리·하는 중)이고, 미리 본 것의 까닭은 저장소 줄이 따로 보인다
+    func orderLock(_ st: APMergeStep) -> String? {
+        guard let m = v else { return "실행을 읽지 못했습니다" }
+        if !m.run.wrapped { return "끝 정리를 마치지 않아 엔진이 받지 않습니다" }
+        if busy != nil { return "엔진이 하는 중입니다" }
+        if m.discarded.contains(st.source) { return "버린 가지입니다" }
+        if !afterDone(st) {
+            if st.promote, m.jira { return "\(st.after ?? "") 에 스토리를 합치면 누를 수 있습니다." }
+            let prev = m.steps.firstIndex { $0.into == st.after }.map { apCircled($0 + 1) } ?? (st.after ?? "")
+            return "\(prev) 을 마치면 누를 수 있습니다."
+        }
+        if st.promote, !m.promotionSaved { return "프로젝트 설정에 승격 차례가 없어 엔진이 기존 가지끼리는 합치지 않습니다" }
+        if let k = st.story, let s = m.stories.first(where: { $0.key == k }), foreign.contains(s.repo + "|" + s.branch) {
+            return "스토리 가지 \(s.branch) 는 이 실행이 끝난 뒤 같은 이름으로 다시 만들어졌거나 바뀌어(이어 간 실행 등) 이 실행에서는 합치지 않습니다"
+        }
+        return nil
+    }
+    func lockReason(_ st: APMergeStep) -> String? {
+        if let o = orderLock(st) { return o }
+        let ps = plansOf(st)
+        if reading || ps.contains(where: { $0.plan == nil }) { return "가지를 읽는 중입니다" }
+        let named = { (r: String) in ps.count > 1 ? (r as NSString).lastPathComponent + ": " : "" }
+        if let c = ps.first(where: { $0.plan?.state == "conflict" }) { return named(c.repo) + "합치면 충돌합니다. 보드 탭에서 그 저장소를 열어 직접 풉니다" }
+        if let c = ps.first(where: { $0.plan?.state == "error" }) { return named(c.repo) + "합칠 tree 를 만들지 못했습니다: \(c.plan?.error ?? "")" }
+        if let c = ps.first(where: { $0.plan?.wtDirty == true }) { return named(c.repo) + "\(st.into) 가 걸린 작업 트리에 커밋하지 않은 변경이 있어 엔진이 합치지 않습니다. 커밋하거나 치운 뒤 '다시 보기'를 누릅니다" }
+        if let c = ps.first(where: { $0.plan?.state == "nosrc" }) { return named(c.repo) + "합칠 가지 \(st.from) 가 없습니다(버렸거나 지워짐)" }
+        return nil
+    }
+    func discardLock(_ source: String) -> String? {
+        guard let m = v else { return "실행을 읽지 못했습니다" }
+        if !m.run.wrapped { return "끝 정리를 마치지 않아 엔진이 받지 않습니다" }
+        if busy != nil { return "엔진이 하는 중입니다" }
+        if m.discarded.contains(source) { return "이미 버렸습니다" }
+        if let p = m.promoted.first(where: { $0.source == source }) { return "\(p.into) 에 합쳐서 버릴 수 없습니다. 버리기는 합치기 전에만 합니다" }
+        return nil
+    }
+
+    // 엔진 부르기 — 한 번에 하나. 끝나면 엔진 문장을 그대로 보이고 run.json·git 을 다시 본다
+    func press(_ st: APMergeStep) {
+        guard lockReason(st) == nil else { return }
+        var args = ["finish", dir]
+        if st.promote { args += ["promote", st.from, "--into", st.into] }
+        else { args += ["merge", "--into", st.into] + (st.story.map { ["--story", $0] } ?? []) }
+        engine(args, what: "\(st.into) ← \(st.from)")
+    }
+    func discard(_ story: String?) {
+        guard discardLock(story.map { "story:" + $0 } ?? "autopilot") == nil else { return }
+        engine(["finish", dir, "discard"] + (story.map { ["--story", $0] } ?? []), what: story.map { "스토리 \($0) 버리기" } ?? "버리기")
+    }
+    func cleanup(_ story: String, unmerged: Bool) {
+        engine(["finish", dir, "cleanup", "--story", story] + (unmerged ? ["--unmerged"] : []),
+               what: unmerged ? "스토리 \(story) 의 합치지 못한 작업 가지까지 지우기" : "스토리 \(story) 의 합친 가지 지우기")
+    }
+    private func engine(_ args: [String], what: String) {
+        guard busy == nil, !dir.isEmpty else { return }
+        busy = what; result = nil; confirm = nil
+        let d = dir
+        queue.async {
+            let r = apEngine(args)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self.busy = nil
+                    guard self.dir == d else { return }
+                    self.result = APMergeResult(ok: r.code == 0, title: what, text: r.out.isEmpty ? "(엔진 출력 없음, 종료 코드 \(r.code))" : r.out)
+                    self.picked = [:]; self.patches = [:]
+                    self.reload()
+                    AutopilotStore.shared.tick()
+                }
+            }
+        }
+    }
+
+    // 보드가 읽는 git(백그라운드) — 단계마다 저장소마다 미리 보기, 바뀐 파일 범위, 지금 있는 가지, live 에 다 들어간 가지
+    private func readGit() {
+        guard let m = v else { return }
+        gen += 1
+        let g = gen, steps = allSteps(m), lastAuto = m.lastAuto
+        reading = true
+        queue.async {
+            var plans: [String: APMergePlan] = [:], spans: [String: APMergePlan] = [:], have: [String: Set<String>] = [:], contained = Set<String>()
+            var wts: [String: [String: String]] = [:], heads: [String: [String: String]] = [:], foreign = Set<String>()
+            for r in Set(m.repos + m.stories.map(\.repo)) where !r.isEmpty && FileManager.default.fileExists(atPath: r) {
+                var hs: [String: String] = [:]
+                for line in (apGit(["for-each-ref", "--format=%(refname)\t%(objectname)", "refs/heads/"], r) ?? "").split(separator: "\n") {
+                    let f = line.split(separator: "\t")
+                    if f.count == 2, f[0].hasPrefix("refs/heads/") { hs[String(f[0].dropFirst(11))] = String(f[1]) }
+                }
+                heads[r] = hs
+                have[r] = Set(hs.keys)
+                wts[r] = APMerge.checkedOut(r)
+            }
+            // 엔진 finish 와 같은 기준: 실행 끝의 머리와 지금 머리가 다르면 이 실행의 가지가 아니다
+            for s in m.stories {
+                for b in [s.branch] + s.tasks.map(\.branch) where !b.isEmpty {
+                    guard let h = heads[s.repo]?[b] else { continue }
+                    let want = m.endHeads[s.repo]?[b] ?? (b == s.branch ? m.storyHeads[s.key] : nil)
+                    if want != h { foreign.insert(s.repo + "|" + b) }
+                }
+            }
+            for st in steps {
+                for (r, src) in st.refs {
+                    let base = st.after != nil && m.run.bases[r] == st.after ? m.baseHeads[r] : nil
+                    plans[st.id + "|" + r] = have[r] == nil ? APMergePlan(state: "nosrc") : APMerge.plan(r, src: src, into: st.into, wts: wts[r] ?? [:], baseHead: base)
+                }
+            }
+            if !m.run.work.isEmpty {
+                for r in m.repos where have[r] != nil { if let b = m.baseHeads[r] { spans["all|" + r] = APMerge.span(r, b, m.run.work) } }
+            }
+            for s in m.stories where have[s.repo] != nil {
+                // 스토리 가지를 지운 뒤(합친 가지 지우기)에는 마지막 자율주행 단계의 가지(live)에 없는 커밋을 센다(엔진 cleanup 과 같은 기준)
+                let base = have[s.repo]?.contains(s.branch) == true ? s.branch : (lastAuto ?? s.branch)
+                for t in s.tasks where !t.branch.isEmpty && have[s.repo]?.contains(t.branch) == true && t.merge != "merged" {
+                    spans["task|" + t.branch] = APMerge.span(s.repo, base, t.branch)
+                }
+                if let live = lastAuto, let lh = apGit(["rev-parse", "-q", "--verify", "refs/heads/\(live)^{commit}"], s.repo), !lh.isEmpty {
+                    for b in [s.branch] + s.tasks.map(\.branch) where !b.isEmpty && have[s.repo]?.contains(b) == true {
+                        if apGitRun(["merge-base", "--is-ancestor", "refs/heads/" + b, lh], s.repo).code == 0 { contained.insert(s.repo + "|" + b) }
+                    }
+                }
+            }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard self.gen == g else { return }
+                    self.plans = plans; self.spans = spans; self.existing = have; self.contained = contained; self.foreign = foreign
+                    self.reading = false
+                }
+            }
+        }
+    }
+
+    nonisolated static func checkedOut(_ r: String) -> [String: String] {
+        var m: [String: String] = [:], wt = ""
+        for line in (apGit(["worktree", "list", "--porcelain"], r) ?? "").split(separator: "\n") {
+            if line.hasPrefix("worktree ") { wt = String(line.dropFirst(9)) }
+            if line.hasPrefix("branch refs/heads/") { m[String(line.dropFirst(18))] = wt }
+        }
+        return m
+    }
+    nonisolated static func head(_ r: String, _ b: String) -> String? {
+        apGit(["rev-parse", "-q", "--verify", "refs/heads/\(b)^{commit}"], r).flatMap { $0.isEmpty ? nil : $0 }
+    }
+    nonisolated static func numstat(_ r: String, _ a: String, _ b: String) -> [APDiffFile] {
+        (apGit(["diff", "--numstat", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", "\(a)...\(b)"], r) ?? "").split(separator: "\n").compactMap { l in
+            let f = l.split(separator: "\t", maxSplits: 2).map(String.init)
+            return f.count == 3 ? APDiffFile(path: f[2], add: f[0], del: f[1]) : nil
+        }
+    }
+    // 합치기 미리 보기 — 엔진 mergeRefs 와 같은 판단(같은 merge-tree 명령이라 미리 본 것과 엔진 판정이 어긋나지 않는다. merge-tree 는 ref 를 움직이지 않고
+    // 이름 없는 tree 객체만 남긴다)
+    nonisolated static func plan(_ r: String, src: String, into: String, wts: [String: String], baseHead: String?) -> APMergePlan {
+        var p = APMergePlan()
+        guard let sh = head(r, src) else { p.state = "nosrc"; return p }
+        guard let ih = head(r, into) else { p.state = "nointo"; return p }
+        p.a = ih; p.b = sh
+        p.commits = Int(apGit(["rev-list", "--count", "\(ih)..\(sh)"], r) ?? "") ?? 0
+        p.behind = Int(apGit(["rev-list", "--count", "\(sh)..\(ih)"], r) ?? "") ?? 0
+        if p.commits == 0 { p.state = "same" }
+        else if p.behind == 0 { p.state = "ff" }
+        else {
+            let mt = apGitRun(["merge-tree", "--write-tree", "--name-only", "--no-messages", ih, sh], r)
+            let lines = mt.out.split(separator: "\n").map(String.init)
+            switch mt.code {
+            case 0: p.state = "merge"
+            case 1: p.state = "conflict"; p.conflicts = Array(lines.dropFirst())
+            default: p.state = "error"; p.error = lines.first ?? "종료 코드 \(mt.code)"
+            }
+        }
+        if p.state != "same" { p.files = numstat(r, ih, sh) }
+        if let w = wts[into] {
+            p.wt = w
+            if p.state != "same" { p.wtDirty = !(apGit(["status", "--porcelain", "--untracked-files=no"], w) ?? "x").isEmpty }
+        }
+        if let bh = baseHead { p.withBase = Int(apGit(["rev-list", "--count", "\(ih)..\(bh)"], r) ?? "") ?? 0 }
+        return p
+    }
+    // 바뀐 파일 범위(a...b) — 커밋 수와 파일마다 더한 줄·뺀 줄
+    nonisolated static func span(_ r: String, _ a: String, _ b: String) -> APMergePlan {
+        var p = APMergePlan()
+        guard let bh = head(r, b) else { p.state = "nosrc"; return p }
+        let ah = head(r, a) ?? a
+        p.state = "span"; p.a = ah; p.b = bh
+        p.commits = Int(apGit(["rev-list", "--count", "\(ah)..\(bh)"], r) ?? "") ?? 0
+        p.files = numstat(r, ah, bh)
+        return p
+    }
+
+    // 바뀐 줄 — 파일을 누를 때만 읽는다(400줄까지)
+    func toggleDiff(_ key: String) { if openDiff.contains(key) { openDiff.remove(key) } else { openDiff.insert(key) } }
+    func pick(_ key: String, _ file: String, repo: String, _ p: APMergePlan) {
+        picked[key] = file
+        let pk = key + "|" + file
+        guard patches[pk] == nil, !p.a.isEmpty, !p.b.isEmpty else { return }
+        queue.async {
+            let t = apGit(["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", "\(p.a)...\(p.b)", "--", file], repo) ?? ""
+            let lines = t.split(separator: "\n", omittingEmptySubsequences: false)
+            let text = t.isEmpty ? "(바뀐 줄을 읽지 못했습니다)" : lines.prefix(400).joined(separator: "\n") + (lines.count > 400 ? "\n… \(lines.count - 400)줄 더 있음" : "")
+            DispatchQueue.main.async { MainActor.assumeIsolated { self.patches[pk] = text } }
+        }
+    }
+
+    // 충돌 — 그 저장소를 보드 탭(셸)으로 열어 사람이 직접 푼다
+    func openTab(_ repo: String) {
+        close()
+        DispatchQueue.main.async {
+            MainActor.assumeIsolated {
+                if !TerminalHub.shared.expanded { setTerminalExpanded(true) }
+                TerminalHub.shared.openShell(in: repo)   // 사람이 시트에서 누른 것이라 보드는 이미 앞에 있다(앞으로 꺼내지 않는다)
+            }
+        }
+    }
+}
+
+// 창에 붙은 시트가 떨어진 뒤에 한다(닫는 중인 시트가 있으면 조금 뒤 다시 본다)
+@MainActor func apWhenNoSheet(_ tries: Int = 0, _ f: @escaping @MainActor () -> Void) {
+    if window.attachedSheet == nil || tries >= 20 { f(); return }
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { MainActor.assumeIsolated { apWhenNoSheet(tries + 1, f) } }
+}
+
+func apCircled(_ n: Int) -> String { n >= 1 && n <= 10 ? String(Array("①②③④⑤⑥⑦⑧⑨⑩")[n - 1]) : "\(n)." }
+func apHome(_ p: String) -> String { p.replacingOccurrences(of: NSHomeDirectory(), with: "~") }
+
+// 합치기·승격 시트 — 창 전체를 덮는다(와이어프레임 합치기·승격 ⑪, 크기와 상관없음)
+struct APMergeSheet: View {
+    @ObservedObject var m: APMerge
+    var body: some View {
+        VStack(spacing: 0) {
+            head
+            Divider().opacity(0.35)
+            ScrollView(showsIndicators: true) {
+                SwiftUI.Group {
+                    if let v = m.v { content(v) } else { apNote("이 실행을 읽지 못했습니다. 실행 폴더가 지워졌을 수 있습니다.", APColor.fail) }
+                }
+                .padding(16)
+                .frame(maxWidth: 1000, alignment: .leading)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+            }
+            Divider().opacity(0.35)
+            foot.padding(.horizontal, 16).padding(.vertical, 10)
+        }
+        .frame(minWidth: 460, minHeight: 440)
+        .background(Backdrop())
+        .preferredColorScheme(.dark)
+        .boardFont(13)
+    }
+
+    private var head: some View {
+        let v = m.v
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                APMark()
+                Text("합치기·승격").boardFont(15, weight: .bold).fixedSize()
+                if let r = v?.run {
+                    let sc = apStateChip(r)
+                    APChip(text: sc.0, color: sc.1, strong: true)
+                }
+                Spacer(minLength: 4)
+                if m.reading { APChip(text: "가지를 읽는 중", color: APColor.muted) }
+                if let b = m.busy { APChip(text: "엔진이 하는 중: \(b)", color: APColor.work, strong: true).lineLimit(1) }
+                if m.fromStart, APStart.shared.hasDraft {
+                    APButton(title: "출발 준비로 돌아가기", enabled: m.busy == nil, help: "닫아 둔 출발 준비를 다시 엽니다", axid: "ap-merge-to-start") { m.backToStart() }
+                }
+                APButton(title: "다시 보기", icon: "arrow.clockwise", enabled: m.busy == nil && !m.reading, help: "run.json 과 가지를 다시 읽습니다(저장소에서 사람이 고친 뒤)", axid: "ap-merge-reload") { m.reload() }
+                APButton(title: "닫기", enabled: m.busy == nil, help: "가지는 그대로 남습니다", axid: "ap-merge-close") { m.close() }
+            }
+            if let r = v?.run {
+                WrapRow(spacing: 6) {
+                    Text(r.name).boardFont(12.5, weight: .bold).lineLimit(1)
+                    Text("\(apDate(r.started)) → \(r.ended.map { apDay($0) == apDay(r.started) ? apClock($0) : apDate($0) } ?? "?")").boardFont(11, design: .monospaced).foregroundStyle(.secondary).fixedSize()
+                    APChip(text: r.modeLabel, color: r.inPlace ? APColor.wait : APColor.muted)
+                    if v?.jira == true { APChip(text: "Jira 연결" + (v?.epic.map { " · 에픽 \($0)" } ?? ""), color: APColor.jira) }
+                    if let p = r.project, p != r.name { APChip(text: p, color: APColor.board) }
+                }
+                apNote("실행이 끝나도 가지는 그대로 남고, 사람이 바뀐 줄을 본 뒤 단계마다 합칩니다. 자동으로 합치지 않습니다.")
+            }
+        }
+        .padding(.horizontal, 16).padding(.top, 12).padding(.bottom, 8)
+    }
+
+    private var foot: some View {
+        HStack(spacing: 8) {
+            apNote(m.v?.jira == true ? "자동으로 합치지 않습니다 · 버리기는 스토리마다, dev 에 합치기 전에만" : "자동으로 합치지 않습니다 · 버리기는 합치기 전에만")
+                .frame(maxWidth: .infinity, alignment: .leading)
+            APButton(title: "나중에", enabled: m.busy == nil, help: "보드의 끝난 실행 줄을 하루 동안 숨깁니다. 하루 뒤 다시 보입니다", axid: "ap-merge-later") { m.later() }
+        }
+    }
+
+    @ViewBuilder private func content(_ v: APMergeView) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if let r = m.result { resultBox(r) }
+            if v.run.active { apNote("이 실행은 아직 끝나지 않았습니다. 끝난 뒤에 합칩니다.", APColor.limit) }
+            else if !v.run.wrapped { apNote("이 실행은 끝 정리(하네스 끝 검사·기록)를 마치지 않아 엔진이 합치기·버리기를 받지 않습니다. 엔진이 다시 뜨면 이어서 정리합니다.", APColor.limit) }
+            if v.repos.isEmpty {
+                apNote("이 실행에는 엔진이 만든 가지가 없습니다(git 저장소에서 돌지 않았거나 가지 기능 전의 실행).", APColor.limit)
+            } else if !v.repos.allSatisfy({ FileManager.default.fileExists(atPath: $0) }) {
+                apNote("저장소를 찾지 못했습니다: " + v.repos.filter { !FileManager.default.fileExists(atPath: $0) }.map(apHome).joined(separator: ", "), APColor.fail)
+            }
+            summaryBox(v)
+            harnessBox(v)
+            headsBox(v)
+            if v.jira {
+                ForEach(v.stories) { s in storyBox(v, s) }
+                if v.withAutopilot { stepsBox(v, title: "스토리 없는 단위 · 자율주행 가지", steps: m.autopilotSteps(v)); discardBox(v) }
+                else { unusedAutopilot(v) }
+                let ps = m.promoteSteps(v)
+                if !ps.isEmpty {
+                    APBox(title: "기존 가지 올리기", note: "스토리와 상관없이 한 번 · \(v.lastAuto ?? "live") 에 스토리를 하나라도 합친 뒤에만", axid: "ap-merge-promote") {
+                        ForEach(ps) { st in stepView(v, st) }
+                    }
+                }
+            } else {
+                if !v.discarded.contains("autopilot") { filesBox(v) }
+                unpassedBox(v)
+                stepsBox(v, title: "합치기·승격", steps: m.autopilotSteps(v) + m.promoteSteps(v))
+                discardBox(v)
+            }
+        }
+    }
+
+    private func resultBox(_ r: APMergeResult) -> some View {
+        APBox(title: r.ok ? "엔진이 한 일" : "엔진이 하지 않았습니다", note: r.title + " · 엔진 문장 그대로", tint: r.ok ? APColor.ok : APColor.fail, axid: "ap-merge-result") {
+            Text(r.text).boardFont(11, design: .monospaced).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    // ① 요약 — 단위 결과 수, 일한 시간, 비용, 보고서 보기(3단계라 잠금)
+    private func summaryBox(_ v: APMergeView) -> some View {
+        let u = v.run.units
+        func n(_ s: String) -> Int { u.filter { $0.status == s }.count }
+        return APBox(title: "요약", axid: "ap-merge-summary") {
+            WrapRow(spacing: 6) {
+                APChip(text: "통과 \(n("done"))", color: APColor.ok, strong: true)
+                APChip(text: "미통과 \(n("failed"))", color: n("failed") > 0 ? APColor.fail : APColor.muted)
+                APChip(text: "상한에서 멈춤 \(n("capped"))", color: n("capped") > 0 ? APColor.cap : APColor.muted)
+                if n("skipped") > 0 { APChip(text: "건너뜀 \(n("skipped"))") }
+                if n("stopped") + n("pending") + n("running") > 0 { APChip(text: "끝까지 못 감 \(n("stopped") + n("pending") + n("running"))") }
+                Text("일한 시간 \(apDur(u.reduce(0) { $0 + $1.activeSec })) · \(apUSD(v.run.totalCost)) USD").boardFont(11).monospacedDigit().foregroundStyle(.secondary).fixedSize()
+                APButton(title: "보고서 보기", enabled: false, help: "아직 만들지 않았습니다(보고서 틀과 함께)") {}
+            }
+        }
+    }
+
+    // ② 하네스 — 출발 때 지문과 끝을 견준 엔진 기록. 다르면 되돌리지 않고 바뀐 파일만
+    private func harnessBox(_ v: APMergeView) -> some View {
+        APBox(title: "하네스", axid: "ap-merge-harness") {
+            if let same = v.harnessSame {
+                if same {
+                    Label("출발 때와 같음 · " + (v.run.mode == "worktree" ? "자율주행 가지 기준 · 파일 \(v.harnessFiles)개"
+                                              : (v.harnessFolders.count > 1 ? "저장소 \(v.harnessFolders.count)개 모두 같음 · " + v.harnessFolders.map { ($0 as NSString).lastPathComponent }.joined(separator: " · ") : "파일 \(v.harnessFiles)개")),
+                          systemImage: "checkmark.shield").boardFont(11.5).foregroundStyle(APColor.ok)
+                } else {
+                    Label("출발 때와 다릅니다(\(v.harnessChanged.count)곳). 실행 중에 사람이 고쳤을 수 있어 되돌리지 않았습니다. 합치기 전에 바뀐 줄을 봅니다.", systemImage: "exclamationmark.shield")
+                        .boardFont(11.5).foregroundStyle(APColor.limit)
+                    ForEach(v.harnessChanged.prefix(10), id: \.path) { c in
+                        Text("\(["changed": "바뀜", "added": "더함", "removed": "없어짐"][c.change] ?? c.change) · \(apHome(c.path))").boardFont(10.5, design: .monospaced).foregroundStyle(.secondary)
+                    }
+                }
+            } else {
+                apNote("하네스 기록 없음(하네스 지문 전 실행이거나 끝 검사를 하지 못함)")
+            }
+        }
+    }
+
+    // ③ 가지 머리 — 움직인 기존 가지(0 이어야 함), 새 가지, 출발 가지. 원래 작업 트리면 ⑨ 원래 가지로 되돌렸는지
+    private func headsBox(_ v: APMergeView) -> some View {
+        let bases = Set(v.run.bases.values).sorted().joined(separator: "·")
+        let commits = v.repos.compactMap { m.spans["all|" + $0]?.commits }.reduce(0, +)
+        return APBox(title: "가지 머리", axid: "ap-merge-heads") {
+            HStack(spacing: 6) {
+                APChip(text: "움직인 기존 가지 \(v.moved.count)", color: v.moved.isEmpty ? APColor.ok : APColor.fail, strong: true)
+                if !v.moved.isEmpty { apNote(v.moved.joined(separator: ", "), APColor.fail) }
+            }
+            if v.jira {
+                let made = Set(v.made.values.flatMap { $0 })
+                apNote("새 가지: 스토리 가지 \(v.stories.filter { made.contains($0.branch) }.count) · 작업 가지 \(v.stories.flatMap(\.tasks).filter { made.contains($0.branch) }.count) · 출발 가지 \(bases)")
+            } else if !v.run.work.isEmpty {
+                Text(v.run.work).boardFont(11.5, weight: .semibold, design: .monospaced).lineLimit(1).truncationMode(.middle)
+                apNote("새 가지" + (v.repos.count > 1 ? " · 저장소 \(v.repos.count)개" : "") + (m.spans.isEmpty ? "" : " · 커밋 \(commits)개") + " · 출발 가지 \(bases)")
+            }
+            if !v.createdOther.isEmpty { apNote("엔진이 만들지 않은 새 가지 \(v.createdOther.count)개: " + v.createdOther.joined(separator: ", ") + ". 엔진은 움직이지 않습니다.", APColor.limit) }
+            if v.run.inPlace, !v.restored.isEmpty {
+                let back = v.repos.filter { v.restored[$0] == true }
+                if back.count == v.repos.count {
+                    apNote("끝나서 원래 가지로 되돌렸습니다: " + v.repos.map { "\(($0 as NSString).lastPathComponent) · \(v.run.originals[$0] ?? "?")" }.joined(separator: "  ")
+                           + ". 자율주행 커밋은 이 실행의 가지에 남아 있습니다.")
+                } else {
+                    ForEach(v.repos.filter { v.restored[$0] != true }, id: \.self) { r in
+                        apNote("\((r as NSString).lastPathComponent): 원래 가지(\(v.run.originals[r] ?? "?"))로 되돌리지 않았습니다. " + (v.restoreNotes[r] ?? ""), APColor.limit)
+                    }
+                }
+            }
+        }
+    }
+
+    // ④⑤ 바뀐 파일 — 출발 가지 머리에서 자율주행 가지까지(저장소마다). 파일을 누르면 바뀐 줄
+    private func filesBox(_ v: APMergeView) -> some View {
+        APBox(title: "바뀐 파일", note: "출발 가지에서 자율주행 가지까지 · 파일을 누르면 바뀐 줄", axid: "ap-merge-files") {
+            if m.spans.isEmpty, m.reading { apNote("읽는 중입니다") }
+            ForEach(v.repos, id: \.self) { r in
+                if let p = m.spans["all|" + r] {
+                    diffPanel("all|" + r, repo: r, p, title: v.repos.count > 1 ? (r as NSString).lastPathComponent : nil, ax: "all-" + (r as NSString).lastPathComponent)
+                }
+            }
+        }
+    }
+
+    // ⑥ 통과하지 못한 단위 — 그때까지 한 것은 자율주행 가지에 커밋되어 합치면 함께 간다(설계 판단: 와이어프레임의 "상한에서 멈춘 단위"를 미통과·중단까지)
+    @ViewBuilder private func unpassedBox(_ v: APMergeView) -> some View {
+        let bad = v.run.units.filter { ["failed", "capped", "stopped"].contains($0.status) }
+        if !bad.isEmpty {
+            APBox(title: "통과하지 못한 단위 \(bad.count)", tint: APColor.limit, axid: "ap-merge-unpassed") {
+                ForEach(bad) { u in
+                    HStack(spacing: 6) {
+                        APChip(text: apUnitLabel(u.status), color: APColor.unit(u.status), strong: true)
+                        Text(u.title).boardFont(11.5).lineLimit(1)
+                        if let c = u.caps ?? v.run.unitCaps, u.status == "capped" { Text("\(Int(c.minutes))분 상한").boardFont(10.5).foregroundStyle(.secondary).fixedSize() }
+                    }
+                }
+                apNote("그때까지 한 것은 자율주행 가지에 커밋되어 있어 합치면 함께 갑니다. 더 쪼갤지, 상한을 늘릴지, 다시 할지는 다음 출발 카드로 넘어갑니다.")
+            }
+        }
+    }
+
+    private func stepsBox(_ v: APMergeView, title: String, steps: [APMergeStep]) -> some View {
+        APBox(title: title, note: "프로젝트 설정 '승격 차례'대로" + (v.repos.count > 1 ? ", 저장소마다 함께" : "") + ", 사람이 누를 때만", axid: "ap-merge-steps") {
+            if steps.contains(where: { v.discarded.contains($0.source) }) {
+                apNote("이 실행의 가지를 버렸습니다. 실행 기록과 보고서는 지난 실행에 남습니다.")
+            } else if steps.isEmpty { apNote("승격할 가지(dev·live·master)가 없습니다", APColor.limit) }
+            if !v.promotionSaved, !steps.isEmpty { apNote("프로젝트 설정에 승격 차례가 없어 저장소 가지로 채웠습니다. 엔진은 차례 없이 합치기는 하지만 기존 가지끼리 올리기는 거부합니다.", APColor.limit) }
+            ForEach(steps.filter { !v.discarded.contains($0.source) }) { st in stepView(v, st) }
+            if !steps.isEmpty, steps.allSatisfy({ m.done($0) != nil }) { apNote("모든 단계를 마쳤습니다.", APColor.ok) }
+        }
+    }
+
+    // 단계 하나 — 머리(번호·받는 가지 ← 합칠 쪽·커밋 수·차례), 바뀐 줄 보기, 합치기 단추 또는 한 일, 저장소마다 미리 본 것
+    private func stepView(_ v: APMergeView, _ st: APMergeStep) -> some View {
+        let did = m.done(st)
+        let lock = m.lockReason(st), shownLock = m.orderLock(st)
+        let ps = m.plansOf(st)
+        let total = ps.compactMap { $0.plan?.commits }.reduce(0, +)
+        let many = ps.count > 1
+        var info: [String] = []
+        if !m.plans.isEmpty, did == nil { info.append("커밋 \(total)" + (many ? " · " + ps.map { "\(($0.repo as NSString).lastPathComponent) \($0.plan?.commits ?? 0)" }.joined(separator: " · ") : "개")) }
+        if let a = st.after { info.append("\(a) 에 합친 뒤에만") }
+        return VStack(alignment: .leading, spacing: 5) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(apCircled(st.num)).boardFont(13, weight: .bold).foregroundStyle(did != nil ? APColor.ok : (lock == nil ? Palette.accent : .secondary))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("\(st.into) ← \(st.from)").boardFont(12, weight: .semibold, design: .monospaced).lineLimit(1).truncationMode(.middle)
+                    if !info.isEmpty {
+                        Text(info.joined(separator: " · "))
+                            .boardFont(10.5).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                Spacer(minLength: 4)
+                APButton(title: m.openDiff.contains(st.id) ? "바뀐 줄 닫기" : "바뀐 줄 보기", enabled: !m.plans.isEmpty, help: "이 단계에서 \(st.into) 로 갈 바뀐 줄", axid: "ap-merge-diff-\(st.ax)") { m.toggleDiff(st.id) }
+                if did != nil {
+                    APChip(text: st.promote ? "올림" : "합침", color: APColor.ok, strong: true)
+                } else {
+                    APButton(title: st.promote ? "올리기" : "합치기", primary: true, enabled: lock == nil, help: lock ?? "엔진 finish 로 \(st.into) 에 합칩니다", axid: "ap-merge-do-\(st.ax)") { m.press(st) }
+                }
+            }
+            if let d = did {
+                let how = ["ff": "앞으로 감기", "merge": "병합 커밋", "same": "이미 들어 있어 그대로"][d.how] ?? d.how
+                apNote("\(d.at.map(apClock) ?? "?") 에 \(st.promote ? "올렸습니다" : "합쳤습니다") · \(how)" + (d.how == "merge" ? " \(d.to.prefix(7))" : ""), APColor.ok)
+            } else if let shownLock { apNote(shownLock, shownLock.hasSuffix("누를 수 있습니다.") || shownLock.contains("읽는 중") ? .secondary : APColor.limit) }
+            // 차례에 막힌 단계의 "그대로"는 앞 단계 뒤에 달라지므로 보이지 않는다
+            ForEach(ps) { rp in
+                if let p = rp.plan, did == nil, !(p.state == "same" && !m.afterDone(st)) { planLine(st, rp.repo, p, named: many) }
+            }
+            if did == nil, ps.contains(where: { ($0.plan?.withBase ?? 0) > 0 }) {
+                let parts = ps.filter { ($0.plan?.withBase ?? 0) > 0 }
+                apNote("출발 가지가 \(st.after ?? "dev") 라 \(st.after ?? "dev") 에만 있던 커밋 \(parts.map { $0.plan!.withBase }.reduce(0, +))개"
+                       + (many ? "(" + parts.map { "\(($0.repo as NSString).lastPathComponent) \($0.plan!.withBase)" }.joined(separator: " · ") + ")" : "")
+                       + "가 함께 갑니다. 경고만 합니다. '바뀐 줄 보기'에 그 커밋도 함께 보입니다.", APColor.limit)
+            }
+            if m.openDiff.contains(st.id) {
+                ForEach(ps) { rp in
+                    if let p = rp.plan { diffPanel(st.id + "|" + rp.repo, repo: rp.repo, p, title: many ? (rp.repo as NSString).lastPathComponent : nil, ax: st.ax + (many ? "-" + (rp.repo as NSString).lastPathComponent : "")) }
+                }
+            }
+        }
+        .padding(9)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(did != nil ? 0.03 : 0.05)))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("ap-merge-step-\(st.ax)")
+    }
+
+    @ViewBuilder private func planLine(_ st: APMergeStep, _ r: String, _ p: APMergePlan, named: Bool) -> some View {
+        let name = named ? (r as NSString).lastPathComponent + ": " : ""
+        switch p.state {
+        case "nosrc": apNote(name + "\(st.from) 가지가 없습니다(버렸거나 지워짐)", APColor.limit)
+        case "nointo": apNote(name + "\(st.into) 가지가 없어 이 저장소는 건너뜁니다")
+        case "same": apNote(name + "바뀐 것이 없어(이미 들어 있음) 엔진이 '그대로'로 적고 이 단계를 마친 것으로 칩니다")
+        case "ff", "merge":
+            VStack(alignment: .leading, spacing: 3) {
+                apNote(name + (p.state == "ff" ? "앞으로 감기로 합칠 수 있습니다. \(st.into) 가 그대로라 커밋 \(p.commits)개를 그대로 얹습니다."
+                                               : "병합 커밋으로 합칩니다. \(st.into) 에 이 가지에 없는 커밋 \(p.behind)개가 있어 앞으로 감기가 안 됩니다. 단위 커밋 \(p.commits)개는 하나로 뭉치지 않고 그대로 남깁니다."))
+                if let w = p.wt {
+                    if p.wtDirty { apNote("\(st.into) 가 걸린 작업 트리(\(apHome(w)))에 커밋하지 않은 변경이 있어 엔진이 합치지 않습니다. 커밋하거나 치운 뒤 '다시 보기'를 누릅니다.", APColor.fail) }
+                    else { apNote("\(st.into) 가 걸린 작업 트리(\(apHome(w)))도 그 자리에서 앞으로 감기로 함께 바뀝니다.") }
+                }
+            }
+        case "conflict":
+            VStack(alignment: .leading, spacing: 3) {
+                apNote(name + "충돌 \(p.conflicts.count)개 파일이라 합치지 않습니다: " + p.conflicts.prefix(6).joined(separator: " · "), APColor.fail)
+                HStack(spacing: 6) {
+                    APButton(title: "보드 탭에서 열기", icon: "terminal", help: "그 저장소를 보드 탭(셸)으로 열어 직접 풉니다. 이 시트는 닫힙니다", axid: "ap-merge-opentab-\(st.ax)") { m.openTab(r) }
+                    apNote("그 저장소를 보드 탭으로 열어 직접 풉니다. 푼 뒤 합치기·승격을 다시 열면 이 단계를 다시 봅니다.")
+                }
+            }
+        case "error": apNote(name + "합칠 tree 를 만들지 못했습니다: \(p.error)", APColor.fail)
+        default: EmptyView()
+        }
+    }
+
+    // 바뀐 파일 목록과 고른 파일의 바뀐 줄(와이어프레임 ④⑤)
+    private func diffPanel(_ key: String, repo: String, _ p: APMergePlan, title: String?, ax: String) -> some View {
+        let add = p.files.compactMap { Int($0.add) }.reduce(0, +), del = p.files.compactMap { Int($0.del) }.reduce(0, +)
+        return VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                if let title { Text(title).boardFont(11, weight: .bold) }
+                Text("파일 \(p.files.count)개 · 커밋 \(p.commits)개").boardFont(11, weight: .semibold)
+                Text("+\(add)").boardFont(10.5, design: .monospaced).foregroundStyle(APColor.ok)
+                Text("−\(del)").boardFont(10.5, design: .monospaced).foregroundStyle(APColor.fail)
+            }
+            if p.state == "nosrc" { apNote("가지가 없습니다(버렸거나 지워짐)") }
+            else if p.files.isEmpty { apNote("바뀐 파일이 없습니다") }
+            ForEach(Array(p.files.prefix(60).enumerated()), id: \.offset) { i, f in
+                Button { m.pick(key, f.path, repo: repo, p) } label: {
+                    HStack(spacing: 6) {
+                        Text(f.path).boardFont(11, design: .monospaced).lineLimit(1).truncationMode(.middle)
+                        Spacer(minLength: 4)
+                        Text(f.add == "-" ? "바이너리" : "+\(f.add)").boardFont(10.5, design: .monospaced).foregroundStyle(APColor.ok).fixedSize()
+                        if f.add != "-" { Text("−\(f.del)").boardFont(10.5, design: .monospaced).foregroundStyle(APColor.fail).fixedSize() }
+                    }
+                    .padding(.horizontal, 6).padding(.vertical, 2)
+                    .background(RoundedRectangle(cornerRadius: 5).fill(Color.white.opacity(m.picked[key] == f.path ? 0.12 : 0.03)))
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("ap-merge-file-\(ax)-\(i)")
+            }
+            if p.files.count > 60 { apNote("… 파일 \(p.files.count - 60)개 더") }
+            if let f = m.picked[key] {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(f).boardFont(11, weight: .bold, design: .monospaced)
+                    if let t = m.patches[key + "|" + f] { APPatch(text: t) } else { apNote("읽는 중입니다") }
+                }
+                .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color.black.opacity(0.25)))
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("ap-merge-patch-\(ax)")
+            }
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.white.opacity(0.03)))
+    }
+
+    // ⑧ 버리기 — 어느 단계도 합치기 전에만, 화면 안 확인 뒤
+    private func discardBox(_ v: APMergeView) -> some View {
+        let lock = m.discardLock("autopilot")
+        let commits = v.repos.compactMap { m.spans["all|" + $0]?.commits }.reduce(0, +)
+        return APBox(title: "버리기", note: "어느 단계도 합치기 전에만", axid: "ap-merge-discard-box") {
+            if m.confirm == "discard" {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(v.run.mode == "worktree" ? "가지와 작업 트리를 지웁니다." : "가지를 지웁니다.").boardFont(12, weight: .bold)
+                    apNote((v.repos.count > 1 ? "저장소 \(v.repos.count)개의 " : "") + "\(v.run.work) 가지의 커밋 \(commits)개" + (v.run.mode == "worktree" ? "와 작업 트리가" : "가")
+                           + " 사라지고 되돌릴 수 없습니다. " + (v.run.inPlace ? "원래 작업 트리는 이미 출발 때 가지로 돌아와 있습니다. " : "") + "실행 기록과 보고서는 지난 실행에 남습니다.")
+                    HStack(spacing: 6) {
+                        APButton(title: "지우기", tint: APColor.fail, enabled: lock == nil, axid: "ap-merge-discard-yes") { m.discard(nil) }
+                        APButton(title: "취소", axid: "ap-merge-discard-no") { m.confirm = nil }
+                    }
+                }
+                .padding(8)
+                .background(RoundedRectangle(cornerRadius: 8).fill(APColor.fail.opacity(0.10)))
+            } else {
+                HStack(spacing: 8) {
+                    APButton(title: "버리기", icon: "trash", tint: APColor.fail, enabled: lock == nil, help: lock ?? "가지(따로 작업 트리면 작업 트리도)를 지웁니다. 확인을 한 번 더 받습니다", axid: "ap-merge-discard") { m.confirm = "discard" }
+                    apNote(lock ?? "자율주행 가지\(v.run.mode == "worktree" ? "와 작업 트리" : "")를 지웁니다. 실행 기록은 남습니다.")
+                }
+            }
+        }
+    }
+
+    // Jira 단위만 있는 실행의 autopilot/<실행 id> — 엔진이 저장소마다 만들지만 커밋 없이 출발 가지 머리에 남는다. 남아 있으면 지울 길(엔진 discard)을 준다
+    @ViewBuilder private func unusedAutopilot(_ v: APMergeView) -> some View {
+        let left = v.repos.filter { m.existing[$0]?.contains(v.run.work) == true }
+        let commits = left.compactMap { m.spans["all|" + $0]?.commits }.reduce(0, +)
+        // 엔진 discard 는 실행의 따로 작업 트리를 강제로 지우므로, 작업 트리가 남아 있으면(스토리를 아직 합치거나 버리지 않음) 누르지 못하게 한다
+        let wtLeft = v.run.worktreePath.map { FileManager.default.fileExists(atPath: $0) } ?? false
+        if !v.run.work.isEmpty, !left.isEmpty, !v.discarded.contains("autopilot"), m.discardLock("autopilot") == nil {
+            HStack(spacing: 8) {
+                APButton(title: "이 가지 지우기", icon: "trash", enabled: commits == 0 && !wtLeft && m.busy == nil && !m.reading,
+                         help: commits > 0 ? "커밋이 있어 여기서 지우지 않습니다" : wtLeft ? "작업 트리가 남아 있습니다. 스토리를 합치거나 버린 뒤 지웁니다" : "엔진 finish discard 로 지웁니다(커밋 없음)",
+                         axid: "ap-merge-unused") { m.discard(nil) }
+                apNote("\(v.run.work) 는 Jira 단위만 있는 실행이라 쓰이지 않았습니다(커밋 \(commits)개). 엔진이 만든 가지라 지워도 됩니다." + (wtLeft ? " 작업 트리가 남아 있어 스토리를 합치거나 버린 뒤 지웁니다." : ""))
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.03)))
+        }
+    }
+
+    // 스토리 묶음(와이어프레임 ⑫⑬⑭) — 머리, ① dev ② live, 합치지 못한 작업, 스토리 버리기 또는 합친 가지 지우기
+    private func storyBox(_ v: APMergeView, _ s: APMergeStory) -> some View {
+        let merged = s.tasks.filter { $0.merge == "merged" }.count
+        let left = s.tasks.filter { $0.merge != "merged" && $0.merge != "nothing" }
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                APTicket(key: s.key)
+                if !s.kind.isEmpty { APChip(text: apKind(s.kind)) }
+                Text(s.branch.isEmpty ? "스토리 가지 없음" : s.branch).boardFont(11, design: .monospaced).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                Spacer(minLength: 4)
+                Text("합친 작업 \(merged)/\(s.tasks.count)").boardFont(10.5).foregroundStyle(.secondary).fixedSize()
+            }
+            if !v.discarded.contains("story:" + s.key) {
+                ForEach(m.storySteps(v, s)) { st in stepView(v, st) }
+            }
+            if !left.isEmpty, !v.discarded.contains("story:" + s.key) {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 6) {
+                        Text("합치지 못한 작업 \(left.count)").boardFont(11.5, weight: .bold)
+                        apNote("스토리 가지에 들어가지 않았습니다")
+                    }
+                    ForEach(left) { t in taskRow(s, t) }
+                    apNote("이 티켓들은 열린 채 남고, 이 실행을 이어 가면 같은 티켓으로 다시 돕니다. 이어 가려면 먼저 이 스토리를 합치거나 버려 남은 가지를 치웁니다.")
+                }
+                .padding(8)
+                .background(RoundedRectangle(cornerRadius: 8).fill(APColor.limit.opacity(0.07)))
+            }
+            storyFoot(v, s)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 12).fill(Color.white.opacity(0.04)))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(APColor.jira.opacity(0.22), lineWidth: 0.5))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("ap-merge-story-\(s.key)")
+    }
+
+    private func taskRow(_ s: APMergeStory, _ t: APMergeTask) -> some View {
+        let other = m.foreign.contains(s.repo + "|" + t.branch)
+        let has = !t.branch.isEmpty && m.existing[s.repo]?.contains(t.branch) == true && !other
+        let p = m.spans["task|" + t.branch]
+        let key = "task|" + t.branch
+        return VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 6) {
+                if let k = t.key { APTicket(key: k) }
+                Text(t.title).boardFont(11.5).lineLimit(1)
+                APChip(text: apUnitLabel(t.status), color: APColor.unit(t.status), strong: true)
+                Spacer(minLength: 4)
+                if has, p != nil { APButton(title: m.openDiff.contains(key) ? "바뀐 줄 닫기" : "바뀐 줄 보기", axid: "ap-merge-task-\(t.key ?? "\(t.n)")") { m.toggleDiff(key) } }
+            }
+            if t.status == "skipped" {
+                apNote((t.depends.isEmpty ? "시작하지 않음" : "\(t.depends.joined(separator: ", ")) 에 기대어 시작하지 않음") + (has ? " · \(t.branch)" : " · 가지 없음"))
+            } else if has {
+                apNote("\(t.branch) · 커밋 \(p?.commits ?? 0)" + (t.why.isEmpty || t.why == apUnitLabel(t.status) ? "" : " · " + t.why))
+            } else if other {
+                apNote("\(t.branch) · 이 실행이 끝난 뒤 같은 이름으로 다시 만들어진 가지(이 실행에서 움직이지 않음)")
+            } else {
+                apNote(t.branch.isEmpty ? "가지 없음" : "\(t.branch) · 지웠음")
+            }
+            if has, let p, m.openDiff.contains(key) { diffPanel(key, repo: s.repo, p, title: nil, ax: "task-\(t.key ?? "\(t.n)")") }
+        }
+    }
+
+    // 스토리 버리기(dev 에 합치기 전에만) 또는 합친 가지 지우기(스토리가 live 에 합쳐진 뒤, 누를 때만)
+    @ViewBuilder private func storyFoot(_ v: APMergeView, _ s: APMergeStory) -> some View {
+        let source = "story:" + s.key
+        let target = v.promotionSaved ? v.lastAuto : v.promoted.last(where: { $0.source == source })?.into
+        let live = target.map { m.reached(source, $0) } ?? false
+        let have = m.existing[s.repo] ?? []
+        let mine = ([s.branch] + s.tasks.map(\.branch)).filter { !$0.isEmpty && have.contains($0) && (v.made[s.repo] ?? []).contains($0) && !m.foreign.contains(s.repo + "|" + $0) }
+        let others = ([s.branch] + s.tasks.map(\.branch)).filter { !$0.isEmpty && m.foreign.contains(s.repo + "|" + $0) }
+        if !others.isEmpty {
+            apNote("같은 이름의 가지 \(others.count)개(\(others.joined(separator: ", ")))는 이 실행이 끝난 뒤 다시 만들어진 것이라 이 실행에서 움직이지 않습니다. 이어 간 실행의 합치기·승격에서 다룹니다.", APColor.limit)
+        }
+        let mergedLeft = mine.filter { m.contained.contains(s.repo + "|" + $0) }
+        let unmergedLeft = mine.filter { !m.contained.contains(s.repo + "|" + $0) && $0 != s.branch }
+        let unmergedCommits = unmergedLeft.compactMap { m.spans["task|" + $0]?.commits }.reduce(0, +)
+        if v.discarded.contains(source) {
+            apNote("이 스토리를 버렸습니다(스토리 가지와 작업 가지를 지움).")
+        } else if !m.reached(source, nil), mine.isEmpty {
+            apNote("이 실행이 만든 이 스토리의 가지가 남아 있지 않습니다.")
+        } else if !m.reached(source, nil) {
+            if m.confirm == "discard:" + s.key {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("스토리 \(s.key) 의 가지를 지웁니다.").boardFont(12, weight: .bold)
+                    apNote("스토리 가지와 작업 가지 \(mine.count - (mine.contains(s.branch) ? 1 : 0))개(합치지 못한 작업 가지 포함)가 사라지고 되돌릴 수 없습니다. 실행 기록은 지난 실행에 남습니다.")
+                    HStack(spacing: 6) {
+                        APButton(title: "지우기", tint: APColor.fail, enabled: m.discardLock(source) == nil, axid: "ap-merge-discard-\(s.key)-yes") { m.discard(s.key) }
+                        APButton(title: "취소", axid: "ap-merge-discard-\(s.key)-no") { m.confirm = nil }
+                    }
+                }
+                .padding(8)
+                .background(RoundedRectangle(cornerRadius: 8).fill(APColor.fail.opacity(0.10)))
+            } else {
+                HStack(spacing: 8) {
+                    APButton(title: "이 스토리 버리기", icon: "trash", tint: APColor.fail, enabled: m.discardLock(source) == nil, help: m.discardLock(source) ?? "확인을 한 번 더 받습니다", axid: "ap-merge-discard-\(s.key)") { m.confirm = "discard:" + s.key }
+                    apNote("dev 에 합치기 전에만 · 스토리 가지와 작업 가지 \(max(0, mine.count - 1))개를 지웁니다")
+                }
+            }
+        } else if !live {
+            apNote("\(v.promoted.first { $0.source == source }?.into ?? "dev") 에 합쳐서 이 스토리는 버릴 수 없습니다. \(target ?? "live") 에 합치면 합친 가지를 지울 수 있습니다.")
+        } else if mine.isEmpty {
+            apNote("\(target ?? "live") 에 합쳤고 이 스토리의 가지를 모두 지웠습니다.", APColor.ok)
+        } else {
+            VStack(alignment: .leading, spacing: 6) {
+                if !mergedLeft.isEmpty {
+                    HStack(spacing: 8) {
+                        APButton(title: "합친 가지 지우기", icon: "scissors", enabled: m.busy == nil && !m.reading, help: "엔진 finish cleanup: \(target ?? "live") 에 다 들어간 가지만 지웁니다", axid: "ap-merge-cleanup-\(s.key)") { m.cleanup(s.key, unmerged: false) }
+                        apNote("\(target ?? "live") 에 합쳤습니다. 누를 때만 " + (mergedLeft.contains(s.branch) ? "스토리 가지와 " : "") + "작업 가지 \(mergedLeft.filter { $0 != s.branch }.count)개를 지웁니다.")
+                    }
+                }
+                if !unmergedLeft.isEmpty {
+                    if m.confirm == "unmerged:" + s.key {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("합치지 못한 작업 가지 \(unmergedLeft.count)개도 지웁니다.").boardFont(12, weight: .bold)
+                            apNote(unmergedLeft.joined(separator: ", ") + " 의 커밋 \(unmergedCommits)개가 사라지고 되돌릴 수 없습니다. 이 실행을 이어 가면 같은 티켓으로 스토리 가지를 새로 만들어 다시 합니다.")
+                            HStack(spacing: 6) {
+                                APButton(title: "지우기", tint: APColor.fail, enabled: m.busy == nil, axid: "ap-merge-unmerged-\(s.key)-yes") { m.cleanup(s.key, unmerged: true) }
+                                APButton(title: "취소", axid: "ap-merge-unmerged-\(s.key)-no") { m.confirm = nil }
+                            }
+                        }
+                        .padding(8)
+                        .background(RoundedRectangle(cornerRadius: 8).fill(APColor.fail.opacity(0.10)))
+                    } else {
+                        HStack(spacing: 8) {
+                            APButton(title: "합치지 못한 작업 가지도 지우기", icon: "trash", tint: APColor.fail, enabled: m.busy == nil && !m.reading, help: "확인을 한 번 더 받습니다", axid: "ap-merge-unmerged-\(s.key)") { m.confirm = "unmerged:" + s.key }
+                            apNote("남은 작업 가지 \(unmergedLeft.count)개(커밋 \(unmergedCommits)개)는 \(target ?? "live") 에 없습니다. 이어 가려면 지워야 엔진이 같은 티켓으로 출발합니다.")
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// 바뀐 줄(diff) — 더한 줄 초록, 뺀 줄 빨강, 조각 머리 강조. 글자 하나로 그린다(줄마다 보기를 만들지 않음)
+struct APPatch: View {
+    let text: String
+    var body: some View {
+        var a = AttributedString()
+        for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            var piece = AttributedString(String(line) + "\n")
+            if ["+++", "---", "diff ", "index ", "new file", "deleted file", "old mode", "new mode", "similarity", "rename ", "Binary"].contains(where: { line.hasPrefix($0) }) { piece.foregroundColor = .secondary }
+            else if line.hasPrefix("+") { piece.foregroundColor = APColor.ok }
+            else if line.hasPrefix("-") { piece.foregroundColor = APColor.fail }
+            else if line.hasPrefix("@@") { piece.foregroundColor = Palette.accent }
+            a += piece
+        }
+        return Text(a).boardFont(10.5, design: .monospaced).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+    }
+}
+
 // MARK: - 창
 
 var window: NSWindow!
@@ -11427,7 +12639,7 @@ struct MiniBoard: View {
                 Spacer(minLength: 0)
                 Foreman(groups: store.groups, limits: usage.limits, now: store.now, compact: true)
             }
-            if store.groups.isEmpty && autopilot.runs.isEmpty {
+            if store.groups.isEmpty && autopilot.runs.isEmpty && autopilot.awaiting.isEmpty {
                 Text("아직 기록된 세션이 없습니다").boardFont(11).foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
             } else {
@@ -11435,6 +12647,7 @@ struct MiniBoard: View {
                     VStack(spacing: 2) {
                         // 작은 크기의 실행 줄 — 상태 꼬리표와 "2/4 제목" 한 줄, 막대는 뺌(와이어프레임 보드 본체 ⑧)
                         ForEach(autopilot.runs) { r in APRunLine(run: r, minutes: r.unitMinutes(store.now), compact: true).equatable() }
+                        ForEach(autopilot.awaiting) { r in APEndedLine(run: r, compact: true).equatable() }
                         ForEach(store.groups) { g in MiniRow(g: g, now: store.now) }
                     }
                 }

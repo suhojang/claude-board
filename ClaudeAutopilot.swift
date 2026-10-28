@@ -10,7 +10,8 @@
 //                                                                   실행 기록 저장소(SQLite)에 실행 폴더·일반 꼴 대기열을 옮겨 담기
 //        claude-autopilot prerun <실행 폴더> [--dev]                  출발 전 판정 미리 돌리기(prerun.json)
 //        claude-autopilot finish <실행 폴더> merge --into <가지> [--story <키>] | promote <가지> --into <가지> | discard [--story <키>]
-//                                                                   끝난 실행의 가지 승격(사람이 부른다. 엔진이 스스로 부르지 않는다)
+//                                            | cleanup --story <키> [--unmerged]
+//                                                                   끝난 실행의 가지 승격과 합친 가지 지우기(사람이 부른다. 엔진이 스스로 부르지 않는다)
 import Foundation
 import Darwin
 import CryptoKit
@@ -2871,7 +2872,9 @@ func usage() -> Never {
            claude-autopilot finish <실행 폴더> merge --into <가지> [--story <키>]
            claude-autopilot finish <실행 폴더> promote <가지> --into <가지>
            claude-autopilot finish <실행 폴더> discard [--story <키>]
-             끝난 실행의 가지 승격(사람이 부름): 자율주행 가지(Jira 실행은 스토리 가지)를 합치기·기존 가지 올리기·합치기 전에 버리기
+           claude-autopilot finish <실행 폴더> cleanup --story <키> [--unmerged]
+             끝난 실행의 가지 승격(사람이 부름): 자율주행 가지(Jira 실행은 스토리 가지)를 합치기·기존 가지 올리기·합치기 전에 버리기,
+             Jira 스토리를 승격 차례의 마지막 가지(live)에 합친 뒤 이 실행이 만든 그 스토리의 가지 지우기(--unmerged: 합치지 못한 작업 가지도)
     """)
 }
 
@@ -3637,6 +3640,7 @@ func cmdPrerun(_ args: [String]) -> Never {
 //   merge --into <가지> [--story <키>]   자율주행 가지(Jira 실행이면 --story 의 스토리 가지)를 <가지>로
 //   promote <가지> --into <가지>         기존 가지를 다음 가지로(live → master). 프로젝트 설정의 승격 차례가 있어야 한다
 //   discard [--story <키>]               어느 단계도 합치기 전에만 자율주행 가지(또는 그 스토리의 스토리·작업 가지)를 지운다
+//   cleanup --story <키> [--unmerged]    스토리를 승격 차례의 마지막 가지(live)에 합친 뒤 이 실행이 만든 그 스토리의 가지 가운데 거기 다 들어간 것을 지운다
 // 합치기는 받는 가지가 그대로면 앞으로 감기, 앞서 나갔으면 병합 커밋(merge-tree 로 체크아웃 없이), 충돌이면 하지 않는다. 받는 가지가 어느 작업 트리에
 // 걸려 있으면 그 작업 트리가 깨끗할 때만 그 자리에서 앞으로 감기(ff-only)로 올리고, 아니면 하지 않는다
 // 따로 작업 트리 모드에서 엔진이 만든 작업 트리를 지우고 prune 한다(합친 뒤·버린 뒤). 커밋 안 한 변경이 있으면 force 없이는 지우지 않고 까닭을 돌려준다
@@ -3691,12 +3695,23 @@ func cmdFinish(_ args: [String]) -> Never {
         return s
     }
     let id = (dir as NSString).lastPathComponent
+    // Jira 스토리·작업 가지가 아직 이 실행의 것인가 — 이어 가기는 같은 키로 같은 이름의 가지를 다시 만든다. 실행 끝에 남긴 가지 머리(branches.end,
+    // 스토리 가지는 stories.<키>.head 도)와 지금 머리가 같을 때만 이 실행의 가지로 보고 움직인다(엔진은 이 실행이 만든 가지만 움직인다)
+    let endHeads = b["end"] as? [String: Any] ?? [:]
+    func ours(_ r: String, _ x: String) -> Bool {
+        guard let h = headOf(r, "refs/heads/" + x) else { return false }
+        if let e = (endHeads[r] as? [String: Any])?[x] as? String { return e == h }
+        if let k = storyKey, x == refs.first?.branch, let sh = ((b["stories"] as? [String: Any])?[k] as? [String: Any])?["head"] as? String { return sh == h }
+        return false
+    }
+    let foreign = "이 실행이 끝난 뒤 같은 이름으로 다시 만들어졌거나 바뀐 가지라(이어 간 실행 등) 이 실행에서는 움직이지 않습니다"
     switch op {
     case "merge":
         guard let into, rest.isEmpty else { usage() }
         if let after = step("autopilot", into)["after"] as? String, !done(label, after) {
             fail("\(after) 에 먼저 합쳐야 \(into) 에 합칠 수 있습니다(승격 차례).")
         }
+        if storyKey != nil, let (r, sb) = refs.first, branchExists(r, sb), !ours(r, sb) { fail("합치지 않았습니다: 스토리 가지 \(sb) 는 \(foreign).") }
         promoted += mergeRefs(label, refs, into, id: id)
         // 합친 뒤 따로 작업 트리를 지운다(깨끗할 때만, 커밋 안 한 변경이 있으면 지우지 않고 알린다). 가지는 남아 다음 승격에 쓰인다
         for r in Set(refs.map { $0.repo }) { if let note = finishWorktreeRemove(r, info, force: false) { print("  " + note) } }
@@ -3712,9 +3727,11 @@ func cmdFinish(_ args: [String]) -> Never {
         guard rest.isEmpty, into == nil else { usage() }
         if let p = promoted.first(where: { $0["source"] as? String == label }) { fail("이미 \(p["into"] ?? "?") 에 합친 단계가 있어 버리지 않습니다. 버리기는 합치기 전에만 합니다.") }
         var del = refs
-        if let k = storyKey, let r = refs.first?.repo {   // 스토리 단위: 그 스토리의 작업 가지도 함께
+        if let k = storyKey, let r = refs.first?.repo {   // 스토리 단위: 그 스토리의 작업 가지도 함께. 이 실행 뒤 다시 만들어진 같은 이름의 가지는 남긴다
             let defs = (readJSON(dir + "/pinned/frozen.json") as? [String: Any])?["units"] as? [[String: Any]] ?? []
             for d in defs where d["story"] as? String == k { if let t = d["branch"] as? String, branchExists(r, t) { del.append((r, t)) } }
+            for (rr, x) in del where branchExists(rr, x) && !ours(rr, x) { print("  남김: \(repoName(rr)) \(x): \(foreign)") }
+            del = del.filter { !branchExists($0.repo, $0.branch) || ours($0.repo, $0.branch) }
         }
         // 엔진 자신의 작업 트리에 걸린 가지는 먼저 작업 트리를 지워(force) 떼어 내면 된다. 다른 작업 트리에 걸린 것만 거부
         var bad: [String] = []
@@ -3734,6 +3751,61 @@ func cmdFinish(_ args: [String]) -> Never {
             if c.code == 0 { gone.append(["source": label, "repo": r, "branch": x, "head": h, "at": r3(now())]) }
         }
         b["discarded"] = (b["discarded"] as? [Any] ?? []) + gone
+    case "cleanup":
+        // 합친 가지 지우기(Jira 스토리, 2026-10-27 사용자 결정: 누를 때만). 이 실행이 만든(made) 그 스토리의 스토리 가지·작업 가지 가운데
+        // 승격 차례에서 스토리가 마지막으로 합쳐지는 가지(예 live)에 다 들어간 것만 지운다. --unmerged 면 들어가지 않은 작업 가지(합치지 못한 작업)도
+        // 지운다 — 이어 가기는 같은 작업 키를 쓰므로 그 가지가 남으면 출발이 거부된다(2026-10-28 사용자 결정: 먼저 합치거나 버린 뒤 이어 감)
+        let withUnmerged = rest.contains("--unmerged")
+        rest.removeAll { $0 == "--unmerged" }
+        guard let k = storyKey, into == nil, rest.isEmpty, let r = refs.first?.repo, let sb = refs.first?.branch else { usage() }
+        let target: String
+        if let steps {
+            guard let last = steps.last(where: { $0["from"] as? String == "autopilot" })?["into"] as? String else {
+                fail("프로젝트 설정의 승격 차례에 자율주행 가지를 합치는 단계가 없어 지울 기준을 모릅니다.")
+            }
+            guard done(label, last) else { fail("스토리 \(k) 를 아직 \(last) 에 합치지 않았습니다. \(last) 에 합친 뒤에 지웁니다.") }
+            target = last
+        } else {
+            guard let last = promoted.last(where: { $0["source"] as? String == label })?["into"] as? String else {
+                fail("스토리 \(k) 를 아직 어느 가지에도 합치지 않았습니다. 합친 뒤에 지웁니다.")
+            }
+            target = last
+        }
+        guard let th = headOf(r, "refs/heads/" + target) else { fail("\(repoName(r)) 에 \(target) 가지가 없습니다.") }
+        let made = (info[r] as? [String: Any])?["made"] as? [String] ?? []
+        let defs = (readJSON(dir + "/pinned/frozen.json") as? [String: Any])?["units"] as? [[String: Any]] ?? []
+        var cand = [sb]
+        for d in defs where d["story"] as? String == k { if let t = d["branch"] as? String, !cand.contains(t) { cand.append(t) } }
+        let co = checkedOut(r), ownWt = (info[r] as? [String: Any])?["work_tree"] as? String
+        var del: [(branch: String, head: String, merged: Bool)] = [], keep: [String] = [], bad: [String] = [], other: [String] = []
+        var dropOwnWt = false
+        for x in cand {
+            guard let h = headOf(r, "refs/heads/" + x) else { continue }   // 이미 없음
+            guard made.contains(x), ours(r, x) else { other.append(x); continue }   // 이 실행이 만든 그 가지가 아니면 움직이지 않는다
+            let merged = isAncestor(r, h, th)
+            if !merged, x == sb { fail("스토리 가지 \(sb) 에 \(target) 에 없는 커밋이 있어(합친 뒤 새 커밋이 생겼을 수 있음) 지우지 않았습니다. 다시 합친 뒤에 지웁니다.") }
+            if !merged, !withUnmerged {
+                keep.append("\(x)(\(target) 에 없는 커밋 \(gitOut(["rev-list", "--count", "\(th)..\(h)"], cwd: r) ?? "?")개)")
+                continue
+            }
+            if let wt = co[x] {
+                if wt == ownWt { dropOwnWt = true } else { bad.append("\(x) 가 작업 트리(\(wt))에 걸려 있습니다. 다른 가지로 바꾼 뒤 다시 하세요") }
+            }
+            del.append((x, h, merged))
+        }
+        if !bad.isEmpty { fail("지우지 않았습니다(아무것도 바꾸지 않음):\n" + bad.map { "  - " + $0 }.joined(separator: "\n")) }
+        if dropOwnWt, let note = finishWorktreeRemove(r, info, force: false) { fail("지우지 않았습니다: " + note) }
+        var gone: [[String: Any]] = []
+        if del.isEmpty { print("  지울 가지가 없습니다(이미 지웠거나 \(target) 에 다 들어간 가지가 없음).") }
+        for d in del {
+            let c = gitRun(["branch", "-D", d.branch], cwd: r)
+            print(c.code == 0 ? "  지움: \(repoName(r)) \(d.branch) (\(d.head.prefix(7))\(d.merged ? ", \(target) 에 들어 있음" : ", 합치지 못한 작업 가지"))"
+                              : "  지우지 못함: \(repoName(r)) \(d.branch): \(firstLine(c.out))")
+            if c.code == 0 { gone.append(["source": label, "repo": r, "branch": d.branch, "head": d.head, "merged": d.merged, "at": r3(now())]) }
+        }
+        for s in keep { print("  남김: \(s). 합치지 못한 작업 가지까지 지우려면 --unmerged 를 붙입니다") }
+        for x in other { print("  남김: \(x) 는 이 실행이 만든 가지가 아니거나 \(foreign)") }
+        b["cleaned"] = (b["cleaned"] as? [Any] ?? []) + gone
     default: usage()
     }
     b["promoted"] = promoted
