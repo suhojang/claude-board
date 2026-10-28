@@ -5,7 +5,7 @@
 // 사용법: claude-autopilot start <실행 폴더> [--dev]                 run.json·queue.json 확인 → 고정 사본 → LaunchAgent 올리기
 //        claude-autopilot run <실행 폴더> <고정 설정 해시>            launchd 가 부르는 본체(해시는 start 가 LaunchAgent 인자로 넣는다)
 //        claude-autopilot control <실행 폴더> pause|resume|stop      control.json 쓰기(보드도 같은 파일을 쓴다)
-//        claude-autopilot status <실행 폴더> [--dev]                  사람이 읽는 한 화면 요약
+//        claude-autopilot status <실행 폴더> [--dev] [--json]         사람이 읽는 한 화면 요약(출발 전 --json 은 보드가 읽는 확인 결과)
 //        claude-autopilot records import [--dev|--db <파일>] [--project <이름>] [--unit-key <칸 경로>] <원본…>
 //                                                                   실행 기록 저장소(SQLite)에 실행 폴더·일반 꼴 대기열을 옮겨 담기
 //        claude-autopilot prerun <실행 폴더> [--dev]                  출발 전 판정 미리 돌리기(prerun.json)
@@ -2862,7 +2862,8 @@ func usage() -> Never {
     사용법: claude-autopilot start <실행 폴더> [--dev]
            claude-autopilot run <실행 폴더> <고정 설정 해시>
            claude-autopilot control <실행 폴더> pause|resume|stop
-           claude-autopilot status <실행 폴더> [--dev]
+           claude-autopilot status <실행 폴더> [--dev] [--json]
+             출발 전 --json: 보드가 읽는 확인 결과(고칠 것·어디서·저장소·Jira 단위의 가지)
            claude-autopilot records import [--dev | --db <파일>] [--project <이름>] [--unit-key <칸 경로>] <원본…>
              원본: 실행 폴더(run.json·queue.json 이 있는 폴더) 또는 일반 꼴 대기열 파일(format "claude-board-queue")
            claude-autopilot prerun <실행 폴더> [--dev]
@@ -3331,9 +3332,21 @@ func cmdControl(_ args: [String]) -> Never {
 }
 
 // 출발 전 실행 폴더: 확인 결과와 고정될 값, 출발 명령 한 줄
-func statusBeforeStart(_ dir: String, _ run: [String: Any], dev devFlag: Bool) -> Never {
+func statusBeforeStart(_ dir: String, _ run: [String: Any], dev devFlag: Bool, json: Bool = false) -> Never {
     let dev = devFlag || run["claude_args"] != nil || run["claude_path"] != nil
     let (problems, f, _) = prepare(dir, dev: dev)
+    // 보드의 출발 화면이 읽는 꼴(2단계 5-2a): 같은 확인(prepare)의 고칠 것과, 보드가 다시 셈할 수 없는 고정될 값(어디서와 그 까닭, 저장소, Jira 단위의 가지)만.
+    // 지금 가지·가지 목록·커밋 안 한 변경은 보드가 git 으로 직접 읽는다
+    if json {
+        let units = (f["units"] as? [[String: Any]] ?? []).enumerated().map { i, d -> [String: Any] in
+            var o: [String: Any] = ["n": i + 1]
+            for k in ["id", "story", "branch", "story_branch"] { if let v = d[k] { o[k] = v } }
+            return o
+        }
+        print(jsonText(["problems": problems, "worktree_mode": f["worktree_mode"] ?? NSNull(), "worktree_reason": f["worktree_reason"] ?? NSNull(),
+                        "repos": f["repos"] ?? [] as [Any], "units": units, "set": setSummary(f)], pretty: true))
+        exit(problems.isEmpty ? 0 : 1)
+    }
     var out = "실행 \((dir as NSString).lastPathComponent) · 출발 전\(run["title"].map { " · \($0)" } ?? "")\n"
     out += problems.isEmpty ? "출발 준비 확인: 이상 없음\n" : "출발 준비 확인: 고칠 것 \(problems.count)개\n" + problems.map { "  - \($0)\n" }.joined()
     let sl = f["stopline"] as? [String: Any] ?? [:]
@@ -3406,7 +3419,7 @@ extension String { func ifEmpty(_ s: String) -> String { isEmpty ? s : self } }
 func cmdStatus(_ args: [String]) -> Never {
     let dir = runDir(args.first)
     guard let run = readJSON(dir + "/run.json") as? [String: Any] else { fail("run.json 을 읽지 못했습니다") }
-    if run["state"] == nil { statusBeforeStart(dir, run, dev: args.contains("--dev")) }
+    if run["state"] == nil { statusBeforeStart(dir, run, dev: args.contains("--dev"), json: args.contains("--json")) }
     let queue = readJSON(dir + "/queue.json") as? [[String: Any]] ?? []
     let s = run["state"] as? String ?? "-"
     var out = "실행 \((dir as NSString).lastPathComponent) · \(stateLabel[s] ?? s)"

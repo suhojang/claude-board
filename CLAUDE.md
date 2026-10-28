@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+이 파일은 Claude Code(claude.ai/code)가 이 저장소의 코드를 다룰 때 따를 지침을 담는다.
 
 ## 개요
 
@@ -68,7 +68,7 @@ Claude Code hook ──> state.py  ──> ~/.claude/notifier/sessions/<session_
 | `context/<sid>.json` | 사용자의 상태줄 스크립트 (이 저장소에 없음) | 보드 (컨텍스트 사용량·effort) |
 | `~/.claude/sessions/<pid>.json` (이 폴더 밖, `name`·`status` …) | Claude Code (도는 세션마다, 끝나면 지움) | 보드 (카드 세션 이름 라벨·탭 줄 이름, 이름 바꾸기 전 승인 창 확인 `status`) |
 | `/tmp/.claude-usage-cache.json` | 보드·상태줄 스크립트(·자율주행 엔진이 사용량 API 를 부를 때)가 함께 씀 | 보드, 자율주행 엔진(멈출 선) |
-| (이 폴더 밖) `~/Library/Application Support/Claude Board/autopilot/runs/<실행 id>/`(시험 빌드는 `Claude Board Dev`, 엔진 전용 `…/autopilot/private/<실행 id>/`, 실행 기록 저장소 `…/autopilot/private/records.sqlite`) — `run.json`·`queue.json`·`control.json`·`events.jsonl`·`units/<n>/{result,engine}.json` … 자세히는 `docs/자율주행/설계.md` 5장. `~/.claude` 는 Claude Code 보호 경로라 옮겼다 | 자율주행 엔진(`control.json` 은 보드, `result.json` 은 모델) | 보드(2단계), 엔진 |
+| (이 폴더 밖) `~/Library/Application Support/Claude Board/autopilot/runs/<실행 id>/`(시험 빌드는 `Claude Board Dev`, 엔진 전용 `…/autopilot/private/<실행 id>/`, 실행 기록 저장소 `…/autopilot/private/records.sqlite`) — `run.json`·`queue.json`·`control.json`·`events.jsonl`·`units/<n>/{result,engine}.json` … 자세히는 `docs/자율주행/설계.md` 5장. `~/.claude` 는 Claude Code 보호 경로라 옮겼다. 출발 전 폴더는 보드가 `…/autopilot/drafts/<실행 id>/` 에 쓰고 출발할 때 `runs/` 로 옮긴다 | 자율주행 엔진(출발 전 `run.json`·`queue.json`·`cards.json`·`answers.json` 과 `control.json`, `projects/<프로젝트>.json` 의 출발 가지·승격 차례는 보드, `result.json` 은 모델) | 보드(2단계), 엔진 |
 | (이 폴더 밖) `~/.claude-board/worktrees/<실행 id>/<저장소>/` — 단일 저장소를 따로 작업 트리에서 돌릴 때 엔진이 만드는 작업 트리(경로에 공백 없게 실행 폴더 뿌리 밖). `start` 가 만들고 `finish`(합친 뒤·버린 뒤)·제거 도구가 지운다. 모델 쓰기 범위이므로 비밀을 두지 않는다 | 자율주행 엔진 | 모델(작업 트리 세션), 엔진 |
 
 ### 실행 파일
@@ -87,7 +87,7 @@ Claude Code hook ──> state.py  ──> ~/.claude/notifier/sessions/<session_
   `confirmShutdown`(업데이트·종료 전 확인, 끊기는 탭의 주 세션에 `.paused`), `driveSession`(보드 탭은 탭에 직접, Ghostty 는 AppleScript),
   `mdRenderDir`·`mdRenderCommand`(md-render 를 `~/.claude/notifier/plugins/` 로 옮기고 `--plugin-dir` 을 한 번만 붙임, 끈 세션은 `mdRenderOff`). 보드 쪽 문제는 `~/.claude/notifier/board.log`.
   설계·결정·실측은 `docs/내장 터미널/설계.md`(11장 단계별 메모) — 이 기능을 바꿀 때 먼저 본다.
-  `// MARK: - 자율주행` — `AutopilotStore` 가 자율주행 뿌리(시험 빌드는 `Claude Board Dev`)의 `runs/` 와 `private/records.sqlite`(읽기 전용)를 읽어 실행 줄·자율주행 중·지난 실행 화면을 그리고, 보드는 `control.json` 만 쓴다(일시정지·재개·중단). 원래 작업 트리로 도는 경로에 보드 탭 새 세션을 열면 `startSession` 이 경고한다. 설계는 `docs/자율주행/설계.md`.
+  `// MARK: - 자율주행` — `AutopilotStore` 가 자율주행 뿌리(시험 빌드는 `Claude Board Dev`)의 `runs/` 와 `private/records.sqlite`(읽기 전용)를 읽어 실행 줄·자율주행 중·지난 실행 화면을 그리고, 일시정지·재개·중단은 `control.json` 으로 남긴다. 출발 준비 시트(`APStart`, 지금은 지난 실행 이어 가기만)가 출발 전 실행 폴더를 쓰고 앱 안 엔진의 `status --json`·`prerun`·`start` 를 부른다. 원래 작업 트리로 도는 경로에 보드 탭 새 세션을 열면 `startSession` 이 경고한다. 설계는 `docs/자율주행/설계.md`.
 - `ClaudeAutopilot.swift` — 자율주행 엔진 `claude-autopilot`(`start`·`run`·`control`·`status`·`records import`·`prerun`·`finish`). 보드 앱 밖에서 LaunchAgent(KeepAlive)로 돌고, 출발 때 실행 폴더 `pinned/` 에 고정한 자기 사본과 설정(`frozen.json`, 해시는 LaunchAgent 인자)으로 돈다. 모델 세션은 Claude Code 샌드박스(`--settings`)·고른 환경 변수·`--setting-sources project,local` 로 띄운다. 앱 `Contents/MacOS/` 에 build-board.sh·make-dmg.sh 가 함께 싣는다. 설계·실측은 `docs/자율주행/설계.md`·`진행 상황.md`.
 - `ClaudeNotifier.swift` — 알림 패널. 인자는 파일 머리 주석 참고. 여러 패널이 동시에 뜨면 슬롯 파일로 자리를 나눈다. `--session` 을 받으면 누를 때 보드에 `focus` 동작을 알린다.
 - `board-tui.py` — 터미널판 보드(`claude-board-tui`).
