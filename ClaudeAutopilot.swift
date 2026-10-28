@@ -11,7 +11,8 @@
 //        claude-autopilot prerun <실행 폴더> [--dev]                  출발 전 판정 미리 돌리기(prerun.json)
 //        claude-autopilot finish <실행 폴더> merge --into <가지> [--story <키>] | promote <가지> --into <가지> | discard [--story <키>]
 //                                            | cleanup --story <키> [--unmerged]
-//                                                                   끝난 실행의 가지 승격과 합친 가지 지우기(사람이 부른다. 엔진이 스스로 부르지 않는다)
+//                                                                   끝난 실행의 가지 승격과 합친 가지 지우기(사람이 부른다. 엔진이 스스로 부르지 않는다).
+//                                                                   --story 는 그 스토리가 가지를 만든 모든 저장소에 대해 먼저 다 보고 한다
 import Foundation
 import Darwin
 import CryptoKit
@@ -718,6 +719,21 @@ func checkedOut(_ repo: String) -> [String: String] {
     return m
 }
 func repoName(_ r: String) -> String { (r as NSString).lastPathComponent }
+// run.json 의 branches.stories.<키> 를 저장소별로 읽는다(2026-10-28, 한 스토리가 여러 저장소에 걸침). 새 꼴은 {repos: {<저장소>: {branch, base, head,
+// merged, unmerged}}}, 옛 꼴(스토리 하나에 저장소 하나 {repo, branch, base, head, merged, unmerged}, 2026-10-22~28 실행)은 그 저장소 하나로 본다
+func storyRepos(_ s: [String: Any]) -> [String: [String: Any]] {
+    if let rs = s["repos"] as? [String: Any] { return rs.compactMapValues { $0 as? [String: Any] } }
+    guard let r = s["repo"] as? String, !r.isEmpty else { return [:] }
+    var o = s; o["repo"] = nil
+    return [r: o]
+}
+// 작업 폴더가 든 저장소(branches.repos 의 키, 따로 작업 트리면 그 작업 트리 자리도 본다). 가장 긴 것
+func repoFor(_ path: String, _ info: [String: Any]) -> String? {
+    info.keys.filter { r in
+        let w = (info[r] as? [String: Any])?["work_tree"] as? String
+        return path == r || path.hasPrefix(r + "/") || (w.map { path == $0 || path.hasPrefix($0 + "/") } ?? false)
+    }.max { $0.count < $1.count }
+}
 // Jira 가지 이름 꼴(프로젝트 설정 tickets.branch_names). 자리표 {type}·{story}·{task} 를 채운다.
 // 예: story "{type}/_{story}/parent/{story}", task "{type}/_{story}/{task}". {type} 은 tickets.type_by_kind 에서 단위 종류로 찾는다
 func renderBranch(_ pattern: String, type: String? = nil, story: String? = nil, task: String? = nil) -> String {
@@ -1873,11 +1889,16 @@ final class Engine {
         }
         return true
     }
-    func story(_ k: String) -> [String: Any] { (br["stories"] as? [String: Any])?[k] as? [String: Any] ?? [:] }
-    func setStory(_ k: String, _ s: [String: Any]) {
+    // 스토리 기록은 저장소별(2026-10-28, 한 스토리가 여러 저장소에 걸침): stories.<키>.repos.<저장소> = {branch, base, head, merged, unmerged}
+    func storyRepo(_ k: String, _ r: String) -> [String: Any] { storyRepos((br["stories"] as? [String: Any])?[k] as? [String: Any] ?? [:])[r] ?? [:] }
+    func setStoryRepo(_ k: String, _ r: String, _ e: [String: Any]) {
         var b = br, ss = b["stories"] as? [String: Any] ?? [:]
-        ss[k] = s; b["stories"] = ss; br = b
+        var rs = storyRepos(ss[k] as? [String: Any] ?? [:])
+        rs[r] = e
+        ss[k] = ["repos": rs]; b["stories"] = ss; br = b
     }
+    // 이 실행의 스토리 가지 이름들(단위 story_branch) — 저장소에 걸려 있어도 모델이 쓰지 못하게 막는 가지
+    var storyBranchNames: Set<String> { Set(defs.compactMap { $0["story_branch"] as? String }) }
     func addMade(_ r: String, _ b: String) {
         var i = repoInfo(r)
         let m = i["made"] as? [String] ?? []
@@ -1895,9 +1916,11 @@ final class Engine {
             let i = repoInfo(r)
             guard let g = i["git_dir"] as? String, let c = i["common_dir"] as? String else { continue }
             let on = i["on"] as? String ?? ""
+            // 쓸 수 있는 가지는 지금 걸린 가지 하나. 다만 스토리 가지가 걸려 있으면(같은 스토리의 다른 저장소 작업 동안 읽기만) 그것도 막는다
+            let writable = storyBranchNames.contains(on) ? "" : on
             var names = Set((start[r] as? [String: Any] ?? [:]).keys)
             names.formUnion(i["made"] as? [String] ?? [])
-            names.remove(on)
+            names.remove(writable)
             for b in names.sorted() { out += [c + "/refs/heads/" + b, c + "/refs/heads/" + b + ".lock"] }
             out += [c + "/HEAD", g + "/HEAD", c + "/packed-refs", c + "/config"]
             // 밖에서 도는 git 이 실행할 공통 .git 설정 자리(작업 트리 모드는 공통 .git 이 쓰기 범위라 harnessDeny 가 못 덮는다, 보안 2026-10-22 둘째)
@@ -1906,7 +1929,7 @@ final class Engine {
             if g != c { out.append(g + "/config.worktree") }
             // 보안: replace ref(검토 속이기)와 shallow(얕은 복제로 이력 가리기)
             out += [c + "/refs/replace", c + "/shallow", g + "/shallow"]
-            for d in storyDirs where !on.hasPrefix(d + "/") { out.append(c + "/refs/heads/" + d) }
+            for d in storyDirs where !writable.hasPrefix(d + "/") { out.append(c + "/refs/heads/" + d) }
             // 따로 작업 트리: 작업 트리 .git 파일과 그 작업 트리 git 폴더의 commondir·gitdir(git 폴더 바꿔치기 막기)
             if let w = i["work_tree"] as? String { out += [w + "/.git", g + "/commondir", g + "/gitdir"] }
         }
@@ -1926,7 +1949,9 @@ final class Engine {
 
     // 단위를 시작하기 전의 가지(설계 2장 끝): 기대는 앞 단위(depends)가 통과하지 않았으면(Jira 단위면 스토리 가지에 합쳐지지 않았으면) 건너뛴다.
     // Jira 단위(story 칸)는 스토리 가지(없으면 출발 가지 머리에서)와 작업 가지(스토리 가지 머리에서)를 만들고 그 저장소를 작업 가지로 바꾼다.
-    // 다른 저장소와 Jira 가 아닌 단위는 autopilot/<실행 id> 에 둔다. 못 하면 그 단위를 건너뛰고 false
+    // 다른 저장소 가운데 같은 스토리의 스토리 가지가 이미 있는 곳(앞 작업이 그 저장소에서 일함)은 그 스토리 가지에 읽기 전용으로 둔다 —
+    // 뒤 작업이 상대 경로(../<저장소>)로 앞 작업의 변경을 보게(2026-10-28, 설계 2장 끝 "기대는 단위는 한 스토리"). 모델 쪽은 그 가지도 쓰기 금지다
+    // (protectDeny 의 writable). 나머지 저장소와 Jira 가 아닌 단위는 autopilot/<실행 id> 에 둔다. 못 하면 그 단위를 건너뛰고 false
     func unitBranchGate(_ n: Int) -> Bool {
         for d in def(n)["depends"] as? [String] ?? [] {
             guard let i = defs.firstIndex(where: { $0["id"] as? String == d }) else { continue }
@@ -1946,6 +1971,9 @@ final class Engine {
                     skipUnit(n, why); return false
                 }
                 want = task
+            } else if let k = def(n)["story"] as? String, let sb = storyRepo(k, r)["branch"] as? String, storyRepo(k, r)["head"] != nil,
+                      (repoInfo(r)["made"] as? [String] ?? []).contains(sb), branchExists(r, sb) {
+                want = sb
             }
             if let why = switchTo(r, want) { skipUnit(n, why); return false }
         }
@@ -1961,7 +1989,11 @@ final class Engine {
         guard c.code == 0 else { return "\(repoName(r)) 에 \(b) 가지를 만들지 못했습니다: \(firstLine(c.out))" }
         if let k {
             let h = headOf(r, "refs/heads/" + b) ?? ""
-            setStory(k, ["repo": r, "branch": b, "base": h, "head": h, "merged": [] as [Any], "unmerged": [] as [Any]])
+            var e = storyRepo(k, r)   // 이 저장소의 기록(앞서 건너뛴 작업이 남긴 합치지 않음 줄이 있으면 잇는다)
+            e["branch"] = b; e["base"] = h; e["head"] = h
+            if e["merged"] == nil { e["merged"] = [] as [Any] }
+            if e["unmerged"] == nil { e["unmerged"] = [] as [Any] }
+            setStoryRepo(k, r, e)
             event("board", "스토리 가지 \(b) 를 출발 가지 머리에서 만들었습니다(\(repoName(r))).")
         } else {
             event("board", "작업 가지 \(b) 를 스토리 가지 \(from) 머리에서 만들었습니다(\(repoName(r))).")
@@ -1981,6 +2013,10 @@ final class Engine {
         if cur != on { return "\(repoName(r)) 의 가지가 실행 중에 바뀌어(지금 \(cur.isEmpty ? "가지 없음" : cur)) \(want) 로 바꾸지 않았습니다" }
         let dirty = porcelain(w), dirtyStart = i["dirty_start"] as? [String] ?? []
         if dirty != dirtyStart {
+            // 스토리 가지(다른 저장소 작업 동안 읽기 전용으로 걸어 둔 자리)에는 엔진도 커밋하지 않는다 — 스토리에는 판정을 통과한 작업만 합친다
+            if storyBranchNames.contains(on) {
+                return "\(repoName(r)) 의 스토리 가지 \(on)(읽기 전용으로 걸어 둔 자리)에 커밋하지 않은 변경 \(dirty.count)개가 있어 \(want) 로 바꾸지 않았습니다"
+            }
             guard dirtyStart.isEmpty, (i["made"] as? [String] ?? []).contains(on) else {
                 return "\(repoName(r)) 에 커밋하지 않은 변경 \(dirty.count)개가 있어 \(want) 로 바꾸지 않았습니다"
             }
@@ -2040,14 +2076,15 @@ final class Engine {
                 else { no("스토리 가지를 올리지 못했습니다(그 사이 움직였을 수 있음): \(firstLine(up.out))") }
             }
         }
-        var s = story(k)
+        var s = storyRepo(k, r)   // 이 작업이 일한 저장소의 스토리 기록
+        if s["branch"] == nil { s["branch"] = sb }
         if let h = headOf(r, "refs/heads/" + sb) { s["head"] = h }
         if m["state"] as? String == "not_merged" {
             s["unmerged"] = (s["unmerged"] as? [Any] ?? []) + [["task": task, "why": m["why"] ?? ""]]
         } else if !(s["merged"] as? [String] ?? []).contains(task) {
             s["merged"] = (s["merged"] as? [String] ?? []) + [task]
         }
-        setStory(k, s); saveRun()
+        setStoryRepo(k, r, s); saveRun()
         u["merge"] = m; saveUnit(n, u)
         switch m["state"] as? String {
         case "merged": event("board", "작업 가지 \(task) 를 스토리 가지 \(sb) 에 \(m["how"] as? String == "ff" ? "앞으로 감기로" : "병합 커밋으로") 합쳤습니다.")
@@ -2062,10 +2099,12 @@ final class Engine {
         guard let k = def(n)["story"] as? String, let task = def(n)["branch"] as? String else { return }
         var u = loadUnit(n)
         if u["merge"] == nil { u["merge"] = ["story": k, "task": task, "state": "not_merged", "why": why, "at": r3(now())]; saveUnit(n, u) }
-        var s = story(k)
-        if s.isEmpty { s = ["repo": repoOf(cwd(n)) ?? "", "branch": def(n)["story_branch"] ?? "", "merged": [] as [Any]] }
+        guard let r = repoOf(cwd(n)) else { saveRun(); return }
+        // 그 작업의 저장소 기록. 스토리 가지를 아직 만들지 않은 저장소면(시작하지 않고 건너뜀) head 없이 남는다 — finish 는 합칠 가지로 보지 않는다
+        var s = storyRepo(k, r)
+        if s.isEmpty { s = ["branch": def(n)["story_branch"] ?? "", "merged": [] as [Any]] }
         s["unmerged"] = (s["unmerged"] as? [Any] ?? []) + [["task": task, "why": why]]
-        setStory(k, s); saveRun()
+        setStoryRepo(k, r, s); saveRun()
     }
 
     // 끝: 저장소마다 가지 머리를 다시 재어 출발 때와 견준다. 움직인 기존 가지는 0 이어야 한다(되돌리지 않고 보여만 준다)
@@ -2170,8 +2209,15 @@ final class Engine {
         }
         s += "- 쓰기는 작업 폴더\(writeRoots.isEmpty ? "" : "와 " + writeRoots.joined(separator: ", ")), 단위 폴더, 임시 폴더만 됩니다(샌드박스). 네트워크는 허용한 곳만 나갑니다.\n"
         if !repos.isEmpty {
-            let on = repos.map { "\(repoName($0)) `\(repoInfo($0)["on"] as? String ?? "?")`" }
-            s += "- 작업 가지: \(on.joined(separator: ", ")). 커밋은 이 가지에만 합니다. 가지를 바꾸거나 다른 가지를 옮기지 않습니다(다른 가지 맞추기는 끝난 뒤 사람이 보드에서 합니다).\n"
+            let ro = repos.filter { storyBranchNames.contains(repoInfo($0)["on"] as? String ?? "") }
+            let on = repos.filter { !ro.contains($0) }.map { "\(repoName($0)) `\(repoInfo($0)["on"] as? String ?? "?")`" }
+            if !on.isEmpty {
+                s += "- 작업 가지: \(on.joined(separator: ", ")). 커밋은 이 가지에만 합니다. 가지를 바꾸거나 다른 가지를 옮기지 않습니다(다른 가지 맞추기는 끝난 뒤 사람이 보드에서 합니다).\n"
+            }
+            if !ro.isEmpty {
+                let ros = ro.map { "\(repoName($0)) `\(repoInfo($0)["on"] as? String ?? "?")`" }
+                s += "- 읽기만 하는 저장소: \(ros.joined(separator: ", ")). 같은 스토리의 앞 작업이 합쳐진 스토리 가지에 걸어 두었으니 그 변경을 보고 일합니다. 이 저장소의 파일은 고치지 않고 커밋하지 않습니다(커밋은 막혀 있고, 남긴 변경이 있으면 다음 작업이 시작하지 못합니다). 거기서 바꿀 것이 있으면 next_start 에 적습니다.\n"
+            }
         }
         if let k = def(n)["story"] as? String {
             s += "- 이 작업은 스토리 \(k) 의 작업입니다. 판정을 통과하면 엔진이 이 작업 가지를 스토리 가지(`\(def(n)["story_branch"] ?? "")`)에 합칩니다. 직접 합치지 않습니다.\n"
@@ -2874,7 +2920,8 @@ func usage() -> Never {
            claude-autopilot finish <실행 폴더> discard [--story <키>]
            claude-autopilot finish <실행 폴더> cleanup --story <키> [--unmerged]
              끝난 실행의 가지 승격(사람이 부름): 자율주행 가지(Jira 실행은 스토리 가지)를 합치기·기존 가지 올리기·합치기 전에 버리기,
-             Jira 스토리를 승격 차례의 마지막 가지(live)에 합친 뒤 이 실행이 만든 그 스토리의 가지 지우기(--unmerged: 합치지 못한 작업 가지도)
+             Jira 스토리를 승격 차례의 마지막 가지(live)에 합친 뒤 이 실행이 만든 그 스토리의 가지 지우기(--unmerged: 합치지 못한 작업 가지도).
+             --story 는 그 스토리가 가지를 만든 모든 저장소를 먼저 보고, 하나라도 안 되면 아무것도 바꾸지 않는다
     """)
 }
 
@@ -3445,11 +3492,18 @@ func cmdStatus(_ args: [String]) -> Never {
                 + (restored == nil ? "" : restored! ? " · 출발 때 가지로 되돌림" : " · 되돌리지 않음(\(i["restore_note"] ?? ""))") + "\n"
         }
         for (k, v) in (b["stories"] as? [String: Any] ?? [:]).sorted(by: { $0.key < $1.key }) {
-            let s = v as? [String: Any] ?? [:]
-            out += "스토리 \(k): \(s["branch"] ?? "?") · 합침 \((s["merged"] as? [Any])?.count ?? 0) · 합치지 않음 \((s["unmerged"] as? [Any])?.count ?? 0)\n"
+            let rs = storyRepos(v as? [String: Any] ?? [:])
+            let parts = rs.keys.sorted().map { r -> String in
+                let s = rs[r] ?? [:]
+                return "\(repoName(r)) \(s["branch"] ?? "?")\(s["head"] == nil ? "(가지 없음)" : "") · 합침 \((s["merged"] as? [Any])?.count ?? 0) · 합치지 않음 \((s["unmerged"] as? [Any])?.count ?? 0)"
+            }
+            out += "스토리 \(k): " + (parts.isEmpty ? "기록 없음" : parts.joined(separator: " / ")) + "\n"
         }
         if let m = b["moved"] as? [Any] { out += "움직인 기존 가지: \(m.count)개\n" }
         for p in b["promoted"] as? [[String: Any]] ?? [] { out += "합침: \(p["branch"] ?? "?") → \(p["into"] ?? "?") (\(repoName(p["repo"] as? String ?? "")), \(p["how"] ?? ""))\n" }
+        for f in b["failed"] as? [[String: Any]] ?? [] {
+            out += "하지 못함: \(f["op"] ?? "?") \(f["branch"] ?? "?")\((f["into"] as? String).map { " → " + $0 } ?? "") (\(repoName(f["repo"] as? String ?? "")): \(f["why"] ?? ""))\n"
+        }
     }
     for (i, q) in queue.enumerated() {
         let n = i + 1
@@ -3674,18 +3728,54 @@ func cmdFinish(_ args: [String]) -> Never {
     let info = b["repos"] as? [String: Any] ?? [:]
     guard !info.isEmpty else { fail("이 실행에는 엔진이 만든 가지가 없습니다(git 저장소에서 돌지 않았거나 가지 기능 전의 실행).") }
     var promoted = b["promoted"] as? [[String: Any]] ?? []
-    // 합칠 쪽: 자율주행 가지(저장소마다) 또는 스토리 가지
-    var label = "autopilot", refs: [(repo: String, branch: String)] = []
-    if let k = storyKey {
-        guard let s = (b["stories"] as? [String: Any])?[k] as? [String: Any], let r = s["repo"] as? String, let sb = s["branch"] as? String else {
-            fail("이 실행에 스토리 \(k) 가 없습니다.")
+    var failed: [[String: Any]] = []   // 저장소마다 하다가 하지 못한 것(먼저 본 확인을 지난 뒤의 중간 실패) — branches.failed 에 남긴다
+    let defs = (readJSON(dir + "/pinned/frozen.json") as? [String: Any])?["units"] as? [[String: Any]] ?? []
+    // 합칠 쪽: 자율주행 가지(저장소마다) 또는 스토리 가지(그 스토리가 가지를 만든 저장소마다, 2026-10-28 여러 저장소에 걸친 스토리)
+    // 합칠 쪽(source)의 저장소별 가지: 자율주행 가지는 저장소마다, 스토리 가지는 그 스토리가 가지를 만든 저장소마다(2026-10-28 여러 저장소에 걸친 스토리).
+    // 스토리의 저장소 기록에 head 가 없으면 그 저장소에는 스토리 가지를 만들지 않았다(그 저장소의 작업이 시작하지 않고 건너뜀) — 합칠 가지로 보지 않는다
+    let storiesRec = b["stories"] as? [String: Any] ?? [:]
+    func refsOf(_ source: String) -> [(repo: String, branch: String)] {
+        if source == "autopilot" { return info.keys.sorted().compactMap { r in ((info[r] as? [String: Any])?["work"] as? String).map { (r, $0) } } }
+        guard source.hasPrefix("story:"), let sv = storiesRec[String(source.dropFirst(6))] as? [String: Any] else { return [] }
+        let rs = storyRepos(sv)
+        return rs.keys.sorted().compactMap { r in
+            guard rs[r]?["head"] != nil, let sb = rs[r]?["branch"] as? String, !sb.isEmpty else { return nil }
+            return (r, sb)
         }
-        label = "story:" + k; refs = [(r, sb)]
-    } else {
-        refs = info.keys.sorted().compactMap { r in ((info[r] as? [String: Any])?["work"] as? String).map { (r, $0) } }
     }
+    var label = "autopilot", storyEntries: [String: [String: Any]] = [:], noBranch: [String] = []
+    if let k = storyKey {
+        guard let sv = storiesRec[k] as? [String: Any] else { fail("이 실행에 스토리 \(k) 가 없습니다.") }
+        storyEntries = storyRepos(sv)
+        label = "story:" + k
+    }
+    let refs = refsOf(label)
+    if storyKey != nil { noBranch = storyEntries.keys.sorted().filter { r in !refs.contains { $0.repo == r } } }
     let steps = (run["project"] as? String).flatMap { projectSettings($0, dev: run["dev"] as? Bool ?? false)?["promotion"] as? [[String: Any]] }
-    func done(_ src: String?, _ into: String) -> Bool { promoted.contains { ($0["into"] as? String) == into && (src == nil || $0["source"] as? String == src) } }
+    // 이 합칠 쪽을 into 에 아직 합치지 않은 저장소(into 가지가 없는 저장소는 엔진이 건너뛰므로 뺀다). 저장소가 여럿이면 모두 합쳐야 그 단계가 끝난 것이다 —
+    // 중간에 실패한 저장소가 남으면 다음 단계(live·master·합친 가지 지우기)를 막는다
+    func pending(_ source: String, _ into: String) -> [String] {
+        let did = Set(promoted.filter { ($0["into"] as? String) == into && $0["source"] as? String == source }.compactMap { $0["repo"] as? String })
+        return refsOf(source).filter { !did.contains($0.repo) && headOf($0.repo, "refs/heads/" + into) != nil }.map { repoName($0.repo) }
+    }
+    // into 에 일부 저장소만 합친 합칠 쪽들(기존 가지끼리 올리기 전에 본다)
+    func partial(_ into: String) -> [String] {
+        var seen: [String] = []
+        for p in promoted where (p["into"] as? String) == into { if let src = p["source"] as? String, !src.hasPrefix("branch:"), !seen.contains(src) { seen.append(src) } }
+        return seen.compactMap { src in
+            let left = pending(src, into)
+            return left.isEmpty ? nil : "\(src == "autopilot" ? "자율주행 가지" : "스토리 " + src.dropFirst(6)): \(left.joined(separator: ", "))"
+        }
+    }
+    func done(_ src: String?, _ into: String) -> Bool {
+        guard promoted.contains(where: { ($0["into"] as? String) == into && (src == nil || $0["source"] as? String == src) }) else { return false }
+        return src.map { pending($0, into).isEmpty } ?? partial(into).isEmpty
+    }
+    func notYet(_ after: String, _ then: String) -> String {
+        let left = promoted.contains { ($0["into"] as? String) == after && $0["source"] as? String == label } ? pending(label, after) : []
+        return left.isEmpty ? "\(after) 에 먼저 합쳐야 \(then)(승격 차례)."
+            : "\(after) 에 아직 합치지 않은 저장소가 있어(\(left.joined(separator: ", "))) \(then). \(after) 에 다시 합칩니다(이미 합친 저장소는 그대로로 넘어갑니다)."
+    }
     func step(_ from: String, _ into: String) -> [String: Any] {
         guard let steps else { return [:] }
         guard let s = steps.first(where: { $0["from"] as? String == from && $0["into"] as? String == into }) else {
@@ -3696,51 +3786,65 @@ func cmdFinish(_ args: [String]) -> Never {
     }
     let id = (dir as NSString).lastPathComponent
     // Jira 스토리·작업 가지가 아직 이 실행의 것인가 — 이어 가기는 같은 키로 같은 이름의 가지를 다시 만든다. 실행 끝에 남긴 가지 머리(branches.end,
-    // 스토리 가지는 stories.<키>.head 도)와 지금 머리가 같을 때만 이 실행의 가지로 보고 움직인다(엔진은 이 실행이 만든 가지만 움직인다)
+    // 스토리 가지는 그 저장소의 stories.<키>.repos.<저장소>.head 도)와 지금 머리가 같을 때만 이 실행의 가지로 보고 움직인다(엔진은 이 실행이 만든 가지만 움직인다)
     let endHeads = b["end"] as? [String: Any] ?? [:]
     func ours(_ r: String, _ x: String) -> Bool {
         guard let h = headOf(r, "refs/heads/" + x) else { return false }
         if let e = (endHeads[r] as? [String: Any])?[x] as? String { return e == h }
-        if let k = storyKey, x == refs.first?.branch, let sh = ((b["stories"] as? [String: Any])?[k] as? [String: Any])?["head"] as? String { return sh == h }
+        if let e = storyEntries[r], x == e["branch"] as? String, let sh = e["head"] as? String { return sh == h }
         return false
+    }
+    // 스토리 작업의 작업 가지와 그 저장소(작업 폴더가 든 저장소)
+    func taskBranches(_ k: String) -> [(repo: String, branch: String)] {
+        var out: [(repo: String, branch: String)] = []
+        for d in defs where d["story"] as? String == k {
+            guard let t = d["branch"] as? String, let r = repoFor(d["cwd"] as? String ?? "", info) else { continue }
+            if !out.contains(where: { $0.repo == r && $0.branch == t }) { out.append((r, t)) }
+        }
+        return out
     }
     let foreign = "이 실행이 끝난 뒤 같은 이름으로 다시 만들어졌거나 바뀐 가지라(이어 간 실행 등) 이 실행에서는 움직이지 않습니다"
     switch op {
     case "merge":
         guard let into, rest.isEmpty else { usage() }
-        if let after = step("autopilot", into)["after"] as? String, !done(label, after) {
-            fail("\(after) 에 먼저 합쳐야 \(into) 에 합칠 수 있습니다(승격 차례).")
-        }
-        if storyKey != nil, let (r, sb) = refs.first, branchExists(r, sb), !ours(r, sb) { fail("합치지 않았습니다: 스토리 가지 \(sb) 는 \(foreign).") }
-        promoted += mergeRefs(label, refs, into, id: id)
+        if let after = step("autopilot", into)["after"] as? String, !done(label, after) { fail(notYet(after, "\(into) 에 합칠 수 있습니다")) }
+        if let k = storyKey, refs.isEmpty { fail("합치지 않았습니다: 스토리 \(k) 는 스토리 가지를 만든 저장소가 없습니다(작업이 시작하지 않음).") }
+        // 저장소마다 먼저 본다(같은 이름으로 다시 만든 가지·충돌·받는 가지가 걸린 작업 트리). 하나라도 안 되면 아무것도 바꾸지 않는다
+        var pre: [String] = []
+        if storyKey != nil { for (r, sb) in refs where branchExists(r, sb) && !ours(r, sb) { pre.append("\(repoName(r)): 스토리 가지 \(sb) 는 \(foreign)") } }
+        let m = mergeRefs(label, refs, into, id: id, pre: pre)
+        promoted += m.done; failed += m.failed
+        for r in noBranch { print("  합칠 것 없음: \(repoName(r)) 에는 스토리 가지를 만들지 않았습니다(그 저장소의 작업이 시작하지 않음)") }
         // 합친 뒤 따로 작업 트리를 지운다(깨끗할 때만, 커밋 안 한 변경이 있으면 지우지 않고 알린다). 가지는 남아 다음 승격에 쓰인다
-        for r in Set(refs.map { $0.repo }) { if let note = finishWorktreeRemove(r, info, force: false) { print("  " + note) } }
+        for r in Set(m.done.compactMap { $0["repo"] as? String }) { if let note = finishWorktreeRemove(r, info, force: false) { print("  " + note) } }
     case "promote":
         guard let into, rest.count == 1 else { usage() }
         let from = rest[0]
         guard steps != nil else { fail("프로젝트 설정에 승격 차례(promotion)가 없어 기존 가지끼리는 합치지 않습니다. 보드에서 차례를 정한 뒤 다시 하세요.") }
         if let after = step(from, into)["after"] as? String, !done(nil, after) {
-            fail("\(after) 에 먼저 합쳐야 \(from) 을 \(into) 에 합칠 수 있습니다(승격 차례).")
+            let half = partial(after)
+            fail(half.isEmpty ? "\(after) 에 먼저 합쳐야 \(from) 을 \(into) 에 합칠 수 있습니다(승격 차례)."
+                 : "\(after) 에 일부 저장소만 합친 것이 있어(\(half.joined(separator: " · "))) \(from) 을 \(into) 에 올리지 않습니다. 그 단계를 다시 합친 뒤 올립니다.")
         }
-        promoted += mergeRefs("branch:" + from, info.keys.sorted().map { ($0, from) }, into, id: id)
+        let m = mergeRefs("branch:" + from, info.keys.sorted().map { ($0, from) }, into, id: id)
+        promoted += m.done; failed += m.failed
     case "discard":
         guard rest.isEmpty, into == nil else { usage() }
         if let p = promoted.first(where: { $0["source"] as? String == label }) { fail("이미 \(p["into"] ?? "?") 에 합친 단계가 있어 버리지 않습니다. 버리기는 합치기 전에만 합니다.") }
         var del = refs
-        if let k = storyKey, let r = refs.first?.repo {   // 스토리 단위: 그 스토리의 작업 가지도 함께. 이 실행 뒤 다시 만들어진 같은 이름의 가지는 남긴다
-            let defs = (readJSON(dir + "/pinned/frozen.json") as? [String: Any])?["units"] as? [[String: Any]] ?? []
-            for d in defs where d["story"] as? String == k { if let t = d["branch"] as? String, branchExists(r, t) { del.append((r, t)) } }
+        if let k = storyKey {   // 스토리 단위: 모든 저장소의 스토리 가지와 그 작업 가지(작업 폴더가 든 저장소의 것)를 함께. 이 실행 뒤 다시 만들어진 같은 이름의 가지는 남긴다
+            for t in taskBranches(k) where branchExists(t.repo, t.branch) && !del.contains(where: { $0 == t }) { del.append(t) }
             for (rr, x) in del where branchExists(rr, x) && !ours(rr, x) { print("  남김: \(repoName(rr)) \(x): \(foreign)") }
             del = del.filter { !branchExists($0.repo, $0.branch) || ours($0.repo, $0.branch) }
         }
-        // 엔진 자신의 작업 트리에 걸린 가지는 먼저 작업 트리를 지워(force) 떼어 내면 된다. 다른 작업 트리에 걸린 것만 거부
+        // 엔진 자신의 작업 트리에 걸린 가지는 먼저 작업 트리를 지워(force) 떼어 내면 된다. 다른 작업 트리에 걸린 것만 거부(모든 저장소를 먼저 본다)
         var bad: [String] = []
         for (r, x) in del {
             if let wt = checkedOut(r)[x], wt != (info[r] as? [String: Any])?["work_tree"] as? String {
-                bad.append("\(x) 가 작업 트리(\(wt))에 걸려 있습니다. 다른 가지로 바꾼 뒤 다시 하세요")
+                bad.append("\(repoName(r)): \(x) 가 작업 트리(\(wt))에 걸려 있습니다. 다른 가지로 바꾼 뒤 다시 하세요")
             }
         }
-        if !bad.isEmpty { fail("버리지 않았습니다:\n" + bad.map { "  - " + $0 }.joined(separator: "\n")) }
+        if !bad.isEmpty { fail("버리지 않았습니다(아무것도 바꾸지 않음):\n" + bad.map { "  - " + $0 }.joined(separator: "\n")) }
         for r in Set(del.map { $0.repo }) { if let note = finishWorktreeRemove(r, info, force: true) { print("  " + note) } }
         var gone: [[String: Any]] = []
         if !del.contains(where: { branchExists($0.repo, $0.branch) }) { print("  지울 가지가 없습니다(이미 버렸거나 지워짐).") }
@@ -3749,21 +3853,27 @@ func cmdFinish(_ args: [String]) -> Never {
             let c = gitRun(["branch", "-D", x], cwd: r)
             print(c.code == 0 ? "  지움: \(repoName(r)) \(x) (\(h.prefix(7)))" : "  지우지 못함: \(repoName(r)) \(x): \(firstLine(c.out))")
             if c.code == 0 { gone.append(["source": label, "repo": r, "branch": x, "head": h, "at": r3(now())]) }
+            else { failed.append(["op": "discard", "source": label, "repo": r, "branch": x, "why": firstLine(c.out), "at": r3(now())]) }
         }
         b["discarded"] = (b["discarded"] as? [Any] ?? []) + gone
     case "cleanup":
         // 합친 가지 지우기(Jira 스토리, 2026-10-27 사용자 결정: 누를 때만). 이 실행이 만든(made) 그 스토리의 스토리 가지·작업 가지 가운데
         // 승격 차례에서 스토리가 마지막으로 합쳐지는 가지(예 live)에 다 들어간 것만 지운다. --unmerged 면 들어가지 않은 작업 가지(합치지 못한 작업)도
-        // 지운다 — 이어 가기는 같은 작업 키를 쓰므로 그 가지가 남으면 출발이 거부된다(2026-10-28 사용자 결정: 먼저 합치거나 버린 뒤 이어 감)
+        // 지운다 — 이어 가기는 같은 작업 키를 쓰므로 그 가지가 남으면 출발이 거부된다(2026-10-28 사용자 결정: 먼저 합치거나 버린 뒤 이어 감).
+        // 스토리가 여러 저장소에 걸치면 모든 저장소를 먼저 보고, 하나라도 막히면 어느 저장소에서도 지우지 않는다
         let withUnmerged = rest.contains("--unmerged")
         rest.removeAll { $0 == "--unmerged" }
-        guard let k = storyKey, into == nil, rest.isEmpty, let r = refs.first?.repo, let sb = refs.first?.branch else { usage() }
+        guard let k = storyKey, into == nil, rest.isEmpty else { usage() }
         let target: String
         if let steps {
             guard let last = steps.last(where: { $0["from"] as? String == "autopilot" })?["into"] as? String else {
                 fail("프로젝트 설정의 승격 차례에 자율주행 가지를 합치는 단계가 없어 지울 기준을 모릅니다.")
             }
-            guard done(label, last) else { fail("스토리 \(k) 를 아직 \(last) 에 합치지 않았습니다. \(last) 에 합친 뒤에 지웁니다.") }
+            guard done(label, last) else {
+                fail(promoted.contains { ($0["into"] as? String) == last && $0["source"] as? String == label }
+                     ? "스토리 \(k) 를 아직 \(last) 에 합치지 않은 저장소가 있습니다(\(pending(label, last).joined(separator: ", "))). \(last) 에 다시 합친 뒤에 지웁니다."
+                     : "스토리 \(k) 를 아직 \(last) 에 합치지 않았습니다. \(last) 에 합친 뒤에 지웁니다.")
+            }
             target = last
         } else {
             guard let last = promoted.last(where: { $0["source"] as? String == label })?["into"] as? String else {
@@ -3771,44 +3881,57 @@ func cmdFinish(_ args: [String]) -> Never {
             }
             target = last
         }
-        guard let th = headOf(r, "refs/heads/" + target) else { fail("\(repoName(r)) 에 \(target) 가지가 없습니다.") }
-        let made = (info[r] as? [String: Any])?["made"] as? [String] ?? []
-        let defs = (readJSON(dir + "/pinned/frozen.json") as? [String: Any])?["units"] as? [[String: Any]] ?? []
-        var cand = [sb]
-        for d in defs where d["story"] as? String == k { if let t = d["branch"] as? String, !cand.contains(t) { cand.append(t) } }
-        let co = checkedOut(r), ownWt = (info[r] as? [String: Any])?["work_tree"] as? String
-        var del: [(branch: String, head: String, merged: Bool)] = [], keep: [String] = [], bad: [String] = [], other: [String] = []
-        var dropOwnWt = false
-        for x in cand {
-            guard let h = headOf(r, "refs/heads/" + x) else { continue }   // 이미 없음
-            guard made.contains(x), ours(r, x) else { other.append(x); continue }   // 이 실행이 만든 그 가지가 아니면 움직이지 않는다
-            let merged = isAncestor(r, h, th)
-            if !merged, x == sb { fail("스토리 가지 \(sb) 에 \(target) 에 없는 커밋이 있어(합친 뒤 새 커밋이 생겼을 수 있음) 지우지 않았습니다. 다시 합친 뒤에 지웁니다.") }
-            if !merged, !withUnmerged {
-                keep.append("\(x)(\(target) 에 없는 커밋 \(gitOut(["rev-list", "--count", "\(th)..\(h)"], cwd: r) ?? "?")개)")
-                continue
+        let tasks = taskBranches(k)
+        var plans: [(repo: String, del: [(branch: String, head: String, merged: Bool)])] = []
+        var keep: [String] = [], bad: [String] = [], other: [String] = [], skipped: [String] = [], dropOwnWt: [String] = []
+        for (r, sb) in refs {
+            guard let th = headOf(r, "refs/heads/" + target) else { skipped.append("\(repoName(r)) 에 \(target) 가지가 없어 이 저장소의 가지는 지우지 않았습니다"); continue }
+            let made = (info[r] as? [String: Any])?["made"] as? [String] ?? []
+            var cand = [sb]
+            for t in tasks where t.repo == r && !cand.contains(t.branch) { cand.append(t.branch) }
+            let co = checkedOut(r), ownWt = (info[r] as? [String: Any])?["work_tree"] as? String
+            var del: [(branch: String, head: String, merged: Bool)] = []
+            for x in cand {
+                guard let h = headOf(r, "refs/heads/" + x) else { continue }   // 이미 없음
+                guard made.contains(x), ours(r, x) else { other.append("\(repoName(r)) \(x)"); continue }   // 이 실행이 만든 그 가지가 아니면 움직이지 않는다
+                let merged = isAncestor(r, h, th)
+                if !merged, x == sb {
+                    bad.append("\(repoName(r)): 스토리 가지 \(sb) 에 \(target) 에 없는 커밋이 있어(합친 뒤 새 커밋이 생겼을 수 있음) 지우지 않습니다. 다시 합친 뒤에 지웁니다")
+                    continue
+                }
+                if !merged, !withUnmerged {
+                    keep.append("\(repoName(r)) \(x)(\(target) 에 없는 커밋 \(gitOut(["rev-list", "--count", "\(th)..\(h)"], cwd: r) ?? "?")개)")
+                    continue
+                }
+                if let wt = co[x] {
+                    if wt == ownWt { if !dropOwnWt.contains(r) { dropOwnWt.append(r) } }
+                    else { bad.append("\(repoName(r)): \(x) 가 작업 트리(\(wt))에 걸려 있습니다. 다른 가지로 바꾼 뒤 다시 하세요") }
+                }
+                del.append((x, h, merged))
             }
-            if let wt = co[x] {
-                if wt == ownWt { dropOwnWt = true } else { bad.append("\(x) 가 작업 트리(\(wt))에 걸려 있습니다. 다른 가지로 바꾼 뒤 다시 하세요") }
-            }
-            del.append((x, h, merged))
+            plans.append((r, del))
         }
         if !bad.isEmpty { fail("지우지 않았습니다(아무것도 바꾸지 않음):\n" + bad.map { "  - " + $0 }.joined(separator: "\n")) }
-        if dropOwnWt, let note = finishWorktreeRemove(r, info, force: false) { fail("지우지 않았습니다: " + note) }
+        for r in dropOwnWt { if let note = finishWorktreeRemove(r, info, force: false) { fail("지우지 않았습니다: " + note) } }
         var gone: [[String: Any]] = []
-        if del.isEmpty { print("  지울 가지가 없습니다(이미 지웠거나 \(target) 에 다 들어간 가지가 없음).") }
-        for d in del {
-            let c = gitRun(["branch", "-D", d.branch], cwd: r)
-            print(c.code == 0 ? "  지움: \(repoName(r)) \(d.branch) (\(d.head.prefix(7))\(d.merged ? ", \(target) 에 들어 있음" : ", 합치지 못한 작업 가지"))"
-                              : "  지우지 못함: \(repoName(r)) \(d.branch): \(firstLine(c.out))")
-            if c.code == 0 { gone.append(["source": label, "repo": r, "branch": d.branch, "head": d.head, "merged": d.merged, "at": r3(now())]) }
+        if plans.allSatisfy({ $0.del.isEmpty }) { print("  지울 가지가 없습니다(이미 지웠거나 \(target) 에 다 들어간 가지가 없음).") }
+        for p in plans {
+            for d in p.del {
+                let c = gitRun(["branch", "-D", d.branch], cwd: p.repo)
+                print(c.code == 0 ? "  지움: \(repoName(p.repo)) \(d.branch) (\(d.head.prefix(7))\(d.merged ? ", \(target) 에 들어 있음" : ", 합치지 못한 작업 가지"))"
+                                  : "  지우지 못함: \(repoName(p.repo)) \(d.branch): \(firstLine(c.out))")
+                if c.code == 0 { gone.append(["source": label, "repo": p.repo, "branch": d.branch, "head": d.head, "merged": d.merged, "at": r3(now())]) }
+                else { failed.append(["op": "cleanup", "source": label, "repo": p.repo, "branch": d.branch, "why": firstLine(c.out), "at": r3(now())]) }
+            }
         }
+        for s in skipped { print("  건너뜀: " + s) }
         for s in keep { print("  남김: \(s). 합치지 못한 작업 가지까지 지우려면 --unmerged 를 붙입니다") }
         for x in other { print("  남김: \(x) 는 이 실행이 만든 가지가 아니거나 \(foreign)") }
         b["cleaned"] = (b["cleaned"] as? [Any] ?? []) + gone
     default: usage()
     }
     b["promoted"] = promoted
+    if !failed.isEmpty { b["failed"] = (b["failed"] as? [Any] ?? []) + failed }
     run["branches"] = b; run["updated"] = r3(now())
     writeJSON(dir + "/run.json", run)
     // 기록 저장소의 runs.branches 도 새로(실패해도 run.json 은 이미 썼다)
@@ -3817,13 +3940,20 @@ func cmdFinish(_ args: [String]) -> Never {
         catch { print("  실행 기록 저장소에 쓰지 못했습니다: \(error)") }
         db.close()
     }
+    if !failed.isEmpty {
+        // 먼저 본 확인을 지난 뒤 저장소 하나에서 git 이 실패했다(잠금 파일 등). 한 것은 위 줄과 run.json 에 남았다
+        let what = failed.map { "\(repoName($0["repo"] as? String ?? "")) \($0["branch"] ?? "")\(($0["into"] as? String).map { " → " + $0 } ?? "")" }
+        print("일부만 했습니다. 하지 못한 것: \(what.joined(separator: ", ")). 까닭을 고친 뒤 같은 일을 다시 하면 이미 한 저장소는 그대로로 넘어갑니다.")
+        exit(1)
+    }
     exit(0)
 }
 
-// 합치기 하나(저장소마다): 모든 저장소를 먼저 계획하고, 하나라도 충돌·거부면 아무것도 하지 않는다. 한 것을 promoted 줄로 돌려준다
-func mergeRefs(_ label: String, _ refs: [(repo: String, branch: String)], _ into: String, id: String) -> [[String: Any]] {
+// 합치기 하나(저장소마다): 모든 저장소를 먼저 계획하고, 하나라도 충돌·거부면(pre 는 부르는 쪽이 먼저 본 까닭) 아무것도 하지 않는다.
+// 한 것을 promoted 줄로, 계획을 지난 뒤 하지 못한 것을 failed 줄로 돌려준다
+func mergeRefs(_ label: String, _ refs: [(repo: String, branch: String)], _ into: String, id: String, pre: [String] = []) -> (done: [[String: Any]], failed: [[String: Any]]) {
     struct Plan { var repo, src, srcHead, intoHead, how: String; var tree: String?; var wt: String? }
-    var plans: [Plan] = [], bad: [String] = []
+    var plans: [Plan] = [], bad: [String] = pre
     for (r, s) in refs {
         guard let sh = headOf(r, "refs/heads/" + s) else { bad.append("\(repoName(r)) 에 \(s) 가지가 없습니다(버렸거나 지워짐)"); continue }
         guard let ih = headOf(r, "refs/heads/" + into) else { print("  건너뜀: \(repoName(r)) 에 \(into) 가지가 없습니다"); continue }
@@ -3837,30 +3967,42 @@ func mergeRefs(_ label: String, _ refs: [(repo: String, branch: String)], _ into
             else if m.code == 1 { bad.append("\(repoName(r)): \(s) 를 \(into) 에 합치면 충돌합니다(\(lines.dropFirst().prefix(5).joined(separator: ", "))). 보드 탭에서 직접 합치세요") }
             else { bad.append("\(repoName(r)): 합칠 tree 를 만들지 못했습니다: \(firstLine(m.out))") }
         }
-        if p.how != "same", let wt = p.wt, !(gitOut(["--no-optional-locks", "status", "--porcelain", "--untracked-files=no"], cwd: wt) ?? "x").isEmpty {
-            bad.append("\(repoName(r)): \(into) 가 걸린 작업 트리(\(wt))에 커밋하지 않은 변경이 있어 합치지 않습니다")
+        if p.how != "same", let wt = p.wt {
+            if !(gitOut(["--no-optional-locks", "status", "--porcelain", "--untracked-files=no"], cwd: wt) ?? "x").isEmpty {
+                bad.append("\(repoName(r)): \(into) 가 걸린 작업 트리(\(wt))에 커밋하지 않은 변경이 있어 합치지 않습니다")
+            } else if p.how == "ff" || p.tree != nil {
+                // 그 자리 앞으로 감기(merge --ff-only)는 들어올 파일과 같은 이름의 추적하지 않는 파일이 있으면 멈춘다 — 먼저 본다
+                let incoming = Set((gitOut(["diff", "--name-only", "--no-renames", ih, p.tree ?? sh], cwd: r) ?? "").split(separator: "\n").map(String.init))
+                let loose = (gitOut(["--no-optional-locks", "ls-files", "--others", "--exclude-standard"], cwd: wt) ?? "").split(separator: "\n").map(String.init)
+                let hit = loose.filter { incoming.contains($0) }
+                if !hit.isEmpty { bad.append("\(repoName(r)): \(into) 가 걸린 작업 트리(\(wt))에 들어올 파일과 같은 이름의 추적하지 않는 파일이 있어 합치지 않습니다(\(hit.prefix(5).joined(separator: ", ")))") }
+            }
         }
         plans.append(p)
     }
     if !bad.isEmpty { fail("합치지 않았습니다(아무것도 바꾸지 않음):\n" + bad.map { "  - " + $0 }.joined(separator: "\n")) }
-    var out: [[String: Any]] = []
+    var out: [[String: Any]] = [], failed: [[String: Any]] = []
     for p in plans {
         var head = p.srcHead
+        func no(_ why: String) {
+            print("  하지 못함: \(repoName(p.repo)) \(why)")
+            failed.append(["op": label.hasPrefix("branch:") ? "promote" : "merge", "source": label, "repo": p.repo, "branch": p.src, "into": into, "why": why, "at": r3(now())])
+        }
         if p.how == "same" { print("  그대로: \(repoName(p.repo)) \(into) 에 \(p.src) 가 이미 들어 있습니다") }
         if p.how == "merge", let t = p.tree {
             let c = gitRun(["commit-tree", t, "-p", p.intoHead, "-p", p.srcHead, "-m", "Merge branch '\(p.src)' into \(into)\n\n자율주행 \(id) 승격(보드 finish)"], cwd: p.repo, commit: true)
-            guard c.code == 0 else { print("  하지 못함: \(repoName(p.repo)) 병합 커밋: \(firstLine(c.out))"); continue }
+            guard c.code == 0 else { no("병합 커밋: \(firstLine(c.out))"); continue }
             head = c.out
         }
         if p.how != "same" {
             let up = p.wt.map { gitRun(["merge", "--ff-only", "-q", head], cwd: $0) }
                 ?? gitRun(["update-ref", "-m", "autopilot \(id): finish \(p.src) into \(into)", "refs/heads/" + into, head, p.intoHead], cwd: p.repo)
-            guard up.code == 0 else { print("  하지 못함: \(repoName(p.repo)) \(into) 올리기: \(firstLine(up.out))"); continue }
+            guard up.code == 0 else { no("\(into) 올리기: \(firstLine(up.out))"); continue }
             print("  합침: \(repoName(p.repo)) \(p.src) → \(into) (\(p.how == "ff" ? "앞으로 감기" : "병합 커밋") \(p.intoHead.prefix(7)) → \(head.prefix(7))\(p.wt == nil ? "" : ", 작업 트리도 함께"))")
         }
         out.append(["source": label, "repo": p.repo, "branch": p.src, "into": into, "how": p.how, "from": p.intoHead, "to": head, "at": r3(now())])
     }
-    return out
+    return (out, failed)
 }
 
 let argv = Array(CommandLine.arguments.dropFirst())

@@ -7626,7 +7626,9 @@ struct APRun: Equatable, Identifiable {
     var bases: [String: String] = [:]   // 저장소 → 출발 가지
     var originals: [String: String] = [:]
     var existing: [String] = []         // 출발 때 있던 가지(쓰기 금지)
-    var storyBranches: [String] = []
+    var storyBranches: [String] = []    // 스토리 가지 이름(저장소마다 같은 이름)
+    var storyRepos: [String: [String: String]] = [:]   // 스토리 키 → 저장소 → 스토리 가지(만든 저장소만, 2026-10-28 여러 저장소에 걸친 스토리)
+    var on: [String: String] = [:]      // 저장소 → 엔진이 지금 걸어 둔 가지(branches.repos.<저장소>.on)
     var checkRetries = 2
     var checkTimeout = 10.0
     var controlSeen = 0.0
@@ -7649,10 +7651,19 @@ struct APRun: Equatable, Identifiable {
         repos.contains { r in path == r || path.hasPrefix(r + "/") || (r.hasPrefix(path + "/") && path != NSHomeDirectory()) }
     }
     // 단위가 도는 저장소 이름 — 따로 작업 트리면 작업 트리 경로를 원래 저장소로 읽는다
-    func repoName(_ u: APUnit) -> String {
-        if let w = worktreePath, u.cwd == w || u.cwd.hasPrefix(w + "/"), let r = repos.first { return (r as NSString).lastPathComponent }
-        let r = repos.first { u.cwd == $0 || u.cwd.hasPrefix($0 + "/") } ?? u.cwd
-        return (r as NSString).lastPathComponent
+    func repoName(_ u: APUnit) -> String { ((repoPath(u) ?? u.cwd) as NSString).lastPathComponent }
+    func repoPath(_ u: APUnit) -> String? {
+        if let w = worktreePath, u.cwd == w || u.cwd.hasPrefix(w + "/"), let r = repos.first { return r }
+        return repos.filter { u.cwd == $0 || u.cwd.hasPrefix($0 + "/") }.max { $0.count < $1.count }
+    }
+    // 이 단위가 도는 동안 같은 스토리의 스토리 가지에 읽기 전용으로 걸린 다른 저장소(엔진 unitBranchGate, 2026-10-28) — 저장소 이름과 가지
+    func readOnlyRepos(_ u: APUnit) -> [(name: String, branch: String)] {
+        guard let k = u.story, let sr = storyRepos[k] else { return [] }
+        let mine = repoPath(u)
+        return on.keys.sorted().compactMap { r in
+            guard r != mine, let b = on[r], sr[r] == b else { return nil }
+            return ((r as NSString).lastPathComponent, b)
+        }
     }
     // 보드 본체의 실행 줄이 쓰는 지금 단위의 단위 시계(분)
     func unitMinutes(_ now: Date) -> Int { current.map { Int(activeSec($0, now) / 60) } ?? 0 }
@@ -7694,8 +7705,12 @@ struct APRun: Equatable, Identifiable {
             if let b = (i["base"] as? [String: Any])?["branch"] as? String { x.bases[k] = b }
             if let o = i["original"] as? String { x.originals[k] = o }
             if let w = i["work"] as? String { x.work = w }
+            if let o = i["on"] as? String { x.on[k] = o }
         }
-        x.storyBranches = (br["stories"] as? [String: Any] ?? [:]).values.compactMap { ($0 as? [String: Any])?["branch"] as? String }.sorted()
+        for (k, v) in br["stories"] as? [String: Any] ?? [:] {
+            for (r, e) in apStoryRepos(v) where e["head"] != nil { if let b = e["branch"] as? String, !b.isEmpty { x.storyRepos[k, default: [:]][r] = b } }
+        }
+        x.storyBranches = Set(x.storyRepos.values.flatMap(\.values)).sorted()
         let start = br["start"] as? [String: Any] ?? [:]
         x.existing = Set(start.values.flatMap { ($0 as? [String: Any])?.keys.map { String($0) } ?? [] })
             .subtracting([x.work]).subtracting(x.storyBranches).sorted()
@@ -7752,15 +7767,14 @@ struct APRun: Equatable, Identifiable {
     // 합칠 쪽(자율주행 가지, Jira 면 스토리마다)이 버려지지도 승격 차례의 마지막 자율주행 단계(예 live)에 합쳐지지도 않았거나,
     // 하나라도 그 단계에 합쳤는데 기존 가지끼리의 마지막 단계(예 master ← live)를 아직 안 했으면 남았다
     static func mergeOpen(_ br: [String: Any], steps: [APStep], stories withAutopilot: Bool) -> Bool {
-        let promoted = br["promoted"] as? [[String: Any]] ?? []
+        let promoted = apPromotedRows(br), failed = apFailedRows(br)
         let discarded = Set((br["discarded"] as? [[String: Any]] ?? []).compactMap { $0["source"] as? String })
-        func done(_ src: String?, _ into: String) -> Bool {
-            promoted.contains { $0["into"] as? String == into && (src == nil || $0["source"] as? String == src) }
-        }
+        // 일부 저장소만 합친 단계(엔진 branches.failed 가 남고 그 뒤 그 저장소를 합치지 않음)는 끝나지 않은 것으로 본다 — 엔진 finish 와 같은 규칙
+        func done(_ src: String?, _ into: String) -> Bool { apStepDone(promoted, failed, source: src, into: into) }
         var sources = (br["stories"] as? [String: Any] ?? [:]).keys.sorted().map { "story:" + $0 }
         if sources.isEmpty || withAutopilot { sources.insert("autopilot", at: 0) }
         let lastAuto = steps.last { $0.from == "autopilot" }?.into
-        func reached(_ s: String) -> Bool { lastAuto.map { done(s, $0) } ?? promoted.contains { $0["source"] as? String == s } }
+        func reached(_ s: String) -> Bool { lastAuto.map { done(s, $0) } ?? promoted.contains { $0.source == s } }
         if sources.contains(where: { !discarded.contains($0) && !reached($0) }) { return true }
         if let last = steps.last, last.from != "autopilot", sources.contains(where: reached), !done(nil, last.into) { return true }
         return false
@@ -7771,6 +7785,48 @@ struct APRun: Equatable, Identifiable {
 func apPromotion(_ project: String?) -> [APStep] {
     guard let p = project, let o = apRead(autopilotRoot + "/projects/\(p).json") as? [String: Any], let list = o["promotion"] as? [[String: Any]] else { return [] }
     return list.compactMap { s in (s["from"] as? String).flatMap { f in (s["into"] as? String).map { APStep(from: f, into: $0, after: s["after"] as? String) } } }
+}
+
+// 엔진 run.json 의 branches.stories.<키> 를 저장소별로 읽는다(2026-10-28, 한 스토리가 여러 저장소에 걸침) — 엔진 storyRepos 와 같다.
+// 새 꼴 {repos: {<저장소>: {branch, base, head, merged, unmerged}}}, 옛 꼴(스토리 하나에 저장소 하나 {repo, branch, …})은 그 저장소 하나로 본다
+func apStoryRepos(_ s: Any?) -> [String: [String: Any]] {
+    guard let s = s as? [String: Any] else { return [:] }
+    if let rs = s["repos"] as? [String: Any] { return rs.compactMapValues { $0 as? [String: Any] } }
+    guard let r = s["repo"] as? String, !r.isEmpty else { return [:] }
+    var o = s; o["repo"] = nil
+    return [r: o]
+}
+// 작업 폴더가 든 저장소(branches.repos 의 키, 따로 작업 트리면 그 작업 트리 자리도 본다) — 엔진 repoFor 와 같다
+func apRepoFor(_ path: String, _ repos: [String: Any]) -> String? {
+    repos.keys.filter { r in
+        let w = (repos[r] as? [String: Any])?["work_tree"] as? String
+        return path == r || path.hasPrefix(r + "/") || (w.map { path == $0 || path.hasPrefix($0 + "/") } ?? false)
+    }.max { $0.count < $1.count }
+}
+func apPromotedRows(_ br: [String: Any]) -> [APPromoted] {
+    (br["promoted"] as? [[String: Any]] ?? []).map {
+        APPromoted(source: $0["source"] as? String ?? "", repo: $0["repo"] as? String ?? "", branch: $0["branch"] as? String ?? "",
+                   into: $0["into"] as? String ?? "", how: $0["how"] as? String ?? "", to: $0["to"] as? String ?? "", at: apNum($0["at"]))
+    }
+}
+// 엔진 finish 가 저장소 하나에서 하지 못한 것(먼저 본 확인을 지난 뒤의 중간 실패, branches.failed)
+struct APFailed: Equatable { var op = "", source = "", repo = "", branch = "", into = "", why = ""; var at: Double? }
+func apFailedRows(_ br: [String: Any]) -> [APFailed] {
+    (br["failed"] as? [[String: Any]] ?? []).map {
+        APFailed(op: $0["op"] as? String ?? "", source: $0["source"] as? String ?? "", repo: $0["repo"] as? String ?? "", branch: $0["branch"] as? String ?? "",
+                 into: $0["into"] as? String ?? "", why: $0["why"] as? String ?? "", at: apNum($0["at"]))
+    }
+}
+// 합치기·올리기 가운데 하지 못하고 아직 다시 하지 않은 것 — 그 뒤 같은 합칠 쪽·받는 가지·저장소로 합친 줄이 없으면 남았다
+func apUnresolved(_ promoted: [APPromoted], _ failed: [APFailed], source: String?, into: String) -> [APFailed] {
+    failed.filter { f in
+        ["merge", "promote"].contains(f.op) && f.into == into && (source == nil || f.source == source)
+            && !promoted.contains { $0.source == f.source && $0.into == f.into && $0.repo == f.repo && ($0.at ?? 0) >= (f.at ?? 0) }
+    }
+}
+// 단계가 끝났는가 — 엔진 finish 의 차례 규칙: 그 합칠 쪽(source 가 없으면 무엇이든)을 into 에 합친 줄이 있고, 일부 저장소만 하고 남긴 것이 없다
+func apStepDone(_ promoted: [APPromoted], _ failed: [APFailed], source: String?, into: String) -> Bool {
+    promoted.contains { $0.into == into && (source == nil || $0.source == source) } && apUnresolved(promoted, failed, source: source, into: into).isEmpty
 }
 
 enum APScreen: Equatable {
@@ -8016,6 +8072,7 @@ struct APPastRun: Equatable, Identifiable {
     var promotedInto: [String] = []
     var discarded = false
     var epic: String?
+    var storyRepos: [String: [APPastStoryRepo]] = [:]   // 스토리 키 → 저장소마다 스토리 가지·합친 작업 수·마지막으로 받은 가지(기록 저장소 runs.branches)
     var jira: Bool { jiraUnits > 0 }
 
     // 결과 한 줄 — "4개 중 3개 통과 · 상한 1"
@@ -8045,6 +8102,8 @@ struct APPastRun: Equatable, Identifiable {
         }
     }
 }
+
+struct APPastStoryRepo: Equatable { var name = "", branch = ""; var made = false; var merged = 0; var into: String?; var discarded = false }
 
 struct APPastUnit: Equatable, Identifiable {
     let n: Int
@@ -8153,6 +8212,15 @@ enum APRecords {
                 r.hasBranches = !((b["repos"] as? [String: Any]) ?? [:]).isEmpty
                 r.promotedInto = (b["promoted"] as? [[String: Any]] ?? []).compactMap { $0["into"] as? String }
                 r.discarded = !(b["discarded"] as? [Any] ?? []).isEmpty
+                let pro = apPromotedRows(b)
+                let gone = (b["discarded"] as? [[String: Any]] ?? []).map { (($0["source"] as? String) ?? "") + "|" + (($0["repo"] as? String) ?? "") }
+                for (k, v) in b["stories"] as? [String: Any] ?? [:] {
+                    r.storyRepos[k] = apStoryRepos(v).sorted { $0.key < $1.key }.map { repo, e in
+                        APPastStoryRepo(name: (repo as NSString).lastPathComponent, branch: e["branch"] as? String ?? "", made: e["head"] != nil,
+                                        merged: (e["merged"] as? [Any])?.count ?? 0, into: pro.last { $0.source == "story:" + k && $0.repo == repo }?.into,
+                                        discarded: gone.contains("story:" + k + "|" + repo))
+                    }
+                }
             }
             if let hs = json(c[18]) as? [String: Any] {
                 r.harnessFiles = Int(apNum(hs["files"]) ?? 0)
@@ -8794,6 +8862,13 @@ struct APRunningScreen: View {
                     Text("\(run.repoName(u)) · \(u.branch ?? "")").boardFont(10, design: .monospaced).foregroundStyle(.secondary)
                         .lineLimit(1).truncationMode(.head)
                 }
+                // 같은 스토리의 앞 작업이 다른 저장소에서 일했으면 그 저장소는 스토리 가지에 읽기 전용으로 걸려 있다(뒤 작업이 상대 경로로 본다)
+                let ro = run.active && u.status == "running" ? run.readOnlyRepos(u) : []
+                if !ro.isEmpty {
+                    Text("읽기만: " + ro.map { "\($0.name) · \($0.branch)" }.joined(separator: "  ") + " (같은 스토리의 앞 작업)")
+                        .boardFont(10, design: .monospaced).foregroundStyle(.secondary).lineLimit(2).truncationMode(.middle)
+                        .accessibilityIdentifier("ap-unit-readonly")
+                }
             }
             stageRow(run, u)
             Text("단위 상한").boardFont(10.5, weight: .semibold).foregroundStyle(.secondary)
@@ -9030,7 +9105,13 @@ struct APRunningScreen: View {
         var s: [String] = []
         if run.jira {
             if let u = run.current, let b = u.branch { s.append("지금 작업 가지: \(run.repoName(u)) \(b)") }
-            if !run.storyBranches.isEmpty { s.append("스토리 가지 \(run.storyBranches.joined(separator: " · "))") }
+            // 스토리 가지는 저장소마다(한 스토리가 여러 저장소에 걸치면 같은 이름이 저장소마다 있다)
+            let byBranch = Dictionary(grouping: run.storyRepos.values.flatMap { $0.map { (repo: $0.key, branch: $0.value) } }, by: \.branch)
+            if !byBranch.isEmpty {
+                s.append("스토리 가지 " + byBranch.keys.sorted().map { b in
+                    b + "(" + (byBranch[b] ?? []).map { ($0.repo as NSString).lastPathComponent }.sorted().joined(separator: "·") + ")"
+                }.joined(separator: " · "))
+            }
         }
         if !run.existing.isEmpty { s.append("기존 가지: \(run.existing.prefix(8).joined(separator: " · "))\(run.existing.count > 8 ? " 등" : "")") }
         if !run.jira, !run.work.isEmpty { s.append("커밋은 \(run.work) 에만") }
@@ -9321,7 +9402,7 @@ struct APHistoryScreen: View {
                 if jira {
                     HStack(spacing: 5) {
                         if let k = g.key { APTicket(key: k) } else { Text("스토리 없음").boardFont(10.5, weight: .semibold) }
-                        Text(storyNote(g.key, g.units)).boardFont(10.5).foregroundStyle(.secondary)
+                        Text(storyNote(d.run, g.key, g.units)).boardFont(10.5).foregroundStyle(.secondary)
                     }
                     .padding(.top, 3)
                 }
@@ -9367,7 +9448,7 @@ struct APHistoryScreen: View {
                     // 스토리 머리 줄 — 칸 밖 보기는 Grid 의 모든 열을 차지한다
                     HStack(spacing: 5) {
                         if let k = g.key { APTicket(key: k) } else { Text("스토리 없음").boardFont(10.5, weight: .semibold) }
-                        Text(storyNote(g.key, g.units)).boardFont(10.5).foregroundStyle(.secondary)
+                        Text(storyNote(d.run, g.key, g.units)).boardFont(10.5).foregroundStyle(.secondary)
                     }
                     .padding(.top, 4)
                 }
@@ -9404,11 +9485,15 @@ struct APHistoryScreen: View {
         Text(s).boardFont(10, weight: .semibold).foregroundStyle(.secondary).lineLimit(1).fixedSize()
     }
 
-    // 스토리 머리 줄 — 종류 · 합친 작업 수
-    private func storyNote(_ key: String?, _ units: [APPastUnit]) -> String {
+    // 스토리 머리 줄 — 종류 · 합친 작업 수. 스토리가 여러 저장소에 걸치면 저장소마다 합친 작업 수와 마지막으로 받은 가지
+    private func storyNote(_ run: APPastRun, _ key: String?, _ units: [APPastUnit]) -> String {
         let kind = units.first.map { apKind($0.kind) } ?? ""
         let merged = units.filter { $0.merged == "merged" }.count
-        return [kind, key == nil ? "" : "합친 작업 \(merged)/\(units.count)"].filter { !$0.isEmpty }.joined(separator: " · ")
+        var parts = [kind, key == nil ? "" : "합친 작업 \(merged)/\(units.count)"]
+        if let k = key, let rs = run.storyRepos[k], rs.count > 1 {
+            parts += rs.map { $0.name + " " + (!$0.made ? "가지 없음" : $0.discarded ? "버림" : "\($0.merged)" + ($0.into.map { " → \($0)" } ?? "")) }
+        }
+        return parts.filter { !$0.isEmpty }.joined(separator: " · ")
     }
 
     // 하네스가 출발 때와 같은지 — 다르면 바뀐 파일(설계 2장 끝 "하네스 사본과 지문")
@@ -9960,23 +10045,34 @@ extension APRecords {
     }
     nonisolated static func leftovers(_ runDir: String) -> [String] {
         guard let r = apRead(runDir + "/run.json") as? [String: Any] else { return [] }
-        let stories = (r["branches"] as? [String: Any])?["stories"] as? [String: Any] ?? [:]
+        let br = r["branches"] as? [String: Any] ?? [:]
+        let stories = br["stories"] as? [String: Any] ?? [:], repos = br["repos"] as? [String: Any] ?? [:]
         let q = apRead(runDir + "/queue.json") as? [[String: Any]] ?? []
         let open = q.filter { $0["story"] is String && ($0["status"] as? String ?? "pending") != "done" }
         var want: [(repo: String, branch: String)] = []
         for k in Set(open.compactMap { $0["story"] as? String }).sorted() {
-            guard let st = stories[k] as? [String: Any], let repo = st["repo"] as? String, !repo.isEmpty else { continue }
-            if let b = st["branch"] as? String { want.append((repo, b)) }
-            for u in open where u["story"] as? String == k { if let t = u["branch"] as? String { want.append((repo, t)) } }
+            // 스토리 가지는 그 스토리가 가지를 만든 저장소마다, 작업 가지는 그 작업 폴더가 든 저장소에서(2026-10-28 여러 저장소에 걸친 스토리)
+            let rs = apStoryRepos(stories[k])
+            guard !rs.isEmpty else { continue }
+            for (repo, e) in rs.sorted(by: { $0.key < $1.key }) { if let b = e["branch"] as? String, !b.isEmpty { want.append((repo, b)) } }
+            // 엔진은 이어 갈 작업마다 그 저장소에 스토리 가지·작업 가지가 있으면 출발을 거부한다 — 작업의 저장소에서 스토리 가지 이름도 본다
+            let sb = rs.values.compactMap { $0["branch"] as? String }.first { !$0.isEmpty }
+            for u in open where u["story"] as? String == k {
+                guard let repo = apRepoFor(u["cwd"] as? String ?? "", repos) ?? (rs.count == 1 ? rs.keys.first : nil) else { continue }
+                if let sb { want.append((repo, sb)) }
+                if let t = u["branch"] as? String { want.append((repo, t)) }
+            }
         }
-        var have: [String: Set<String>] = [:], out: [String] = []
+        var have: [String: Set<String>] = [:], found: [(repo: String, branch: String)] = []
         for w in want where FileManager.default.fileExists(atPath: w.repo) {
             if have[w.repo] == nil {
                 have[w.repo] = Set((apGit(["for-each-ref", "--format=%(refname)", "refs/heads/"], w.repo) ?? "").split(separator: "\n").map { String($0.dropFirst(11)) })
             }
-            if have[w.repo]?.contains(w.branch) == true, !out.contains(w.branch) { out.append(w.branch) }
+            if have[w.repo]?.contains(w.branch) == true, !found.contains(where: { $0 == w }) { found.append(w) }
         }
-        return out
+        // 저장소가 여럿이면 가지 앞에 저장소 이름을 붙인다
+        let many = Set(found.map(\.repo)).count > 1
+        return found.map { many ? "\(($0.repo as NSString).lastPathComponent) \($0.branch)" : $0.branch }
     }
 
     // 남은 가지를 치우러 합치기·승격으로 — 출발 준비는 닫아도 남는다(합치기·승격 시트의 "출발 준비로 돌아가기"로 돌아온다)
@@ -11446,14 +11542,37 @@ struct APMergeTask: Equatable, Identifiable {
     var id: Int { n }
     var key: String?
     var title = "", status = "", branch = "", merge = "", why = ""
+    var repo = ""                // 작업 폴더가 든 저장소(작업 가지가 있는 곳)
     var depends: [String] = []   // 기댄 앞 작업(작업 키, 없으면 "단위 n")
+    var spanKey: String { "task|" + repo + "|" + branch }
+}
+
+// 스토리의 저장소 하나 — 엔진 branches.stories.<키>.repos.<저장소>(옛 꼴은 저장소 하나). made 는 그 저장소에 스토리 가지를 만들었는가(head 가 있음)
+struct APStoryRepo: Equatable, Identifiable {
+    let repo: String
+    var id: String { repo }
+    var branch = ""
+    var made = false
+    var merged = 0
+    var name: String { (repo as NSString).lastPathComponent }
 }
 
 struct APMergeStory: Equatable, Identifiable {
     let key: String
     var id: String { key }
-    var repo = "", branch = "", kind = ""
+    var kind = ""
+    var repos: [APStoryRepo] = []   // 스토리 가지가 있는(또는 작업이 건너뛰어 가지 없이 기록만 있는) 저장소들(2026-10-28 여러 저장소에 걸친 스토리)
     var tasks: [APMergeTask] = []
+    var made: [APStoryRepo] { repos.filter(\.made) }
+    var branch: String { made.first?.branch ?? repos.first?.branch ?? "" }   // 스토리 가지 이름은 저장소마다 같다
+    var many: Bool { repos.count > 1 }
+    func storyBranch(_ repo: String) -> String? { repos.first { $0.repo == repo }?.branch }
+    // 이 스토리의 가지(저장소, 가지): 저장소마다 스토리 가지와 그 저장소에서 일한 작업 가지
+    var pairs: [(repo: String, branch: String)] {
+        var out: [(repo: String, branch: String)] = []
+        for p in repos.map({ ($0.repo, $0.branch) }) + tasks.map({ ($0.repo, $0.branch) }) where !p.0.isEmpty && !p.1.isEmpty && !out.contains(where: { $0 == p }) { out.append(p) }
+        return out
+    }
 }
 
 // 단계 하나 — 승격 차례 한 줄을 이 실행(Jira 면 스토리)에 맞춘 것. source 는 엔진 promoted 의 source(autopilot·story:<키>·branch:<가지>)와 같다
@@ -11482,8 +11601,9 @@ struct APMergeView: Equatable {
     var restoreNotes: [String: String] = [:]
     var made: [String: [String]] = [:]
     var endHeads: [String: [String: String]] = [:]   // 실행 끝의 가지 머리(branches.end) — 같은 이름으로 다시 만들어진 가지 가리기
-    var storyHeads: [String: String] = [:]
+    var storyHeads: [String: String] = [:]           // "<스토리 키>|<저장소>" → 스토리 기록의 head
     var promoted: [APPromoted] = []
+    var failed: [APFailed] = []                      // 엔진이 저장소 하나에서 하지 못한 것(branches.failed)
     var discarded: Set<String> = []
     var cleaned = 0
     var moved: [String] = []
@@ -11499,7 +11619,7 @@ struct APMergeView: Equatable {
     var lastAuto: String? { steps.last { $0.from == "autopilot" }?.into }
 }
 
-struct APMergeResult: Equatable { let ok: Bool; let title: String; let text: String }
+struct APMergeResult: Equatable { let ok: Bool; let title: String; let text: String; var partial = false }   // partial: 저장소 일부만 함(엔진 종료 코드 1)
 struct APRepoPlan: Identifiable { let repo: String; let plan: APMergePlan?; var id: String { repo } }
 
 @MainActor final class APMerge: ObservableObject {
@@ -11602,11 +11722,11 @@ struct APRepoPlan: Identifiable { let repo: String; let plan: APMergePlan?; var 
             m.made[k] = apStrings(i["made"])
         }
         for (k, val) in br["end"] as? [String: Any] ?? [:] { m.endHeads[k] = (val as? [String: Any] ?? [:]).compactMapValues { $0 as? String } }
-        for (k, val) in br["stories"] as? [String: Any] ?? [:] { if let h = (val as? [String: Any])?["head"] as? String { m.storyHeads[k] = h } }
-        m.promoted = (br["promoted"] as? [[String: Any]] ?? []).map {
-            APPromoted(source: $0["source"] as? String ?? "", repo: $0["repo"] as? String ?? "", branch: $0["branch"] as? String ?? "",
-                       into: $0["into"] as? String ?? "", how: $0["how"] as? String ?? "", to: $0["to"] as? String ?? "", at: apNum($0["at"]))
+        for (k, val) in br["stories"] as? [String: Any] ?? [:] {
+            for (r, e) in apStoryRepos(val) { if let h = e["head"] as? String { m.storyHeads[k + "|" + r] = h } }
         }
+        m.promoted = apPromotedRows(br)
+        m.failed = apFailedRows(br)
         m.discarded = Set((br["discarded"] as? [[String: Any]] ?? []).compactMap { $0["source"] as? String })
         m.cleaned = (br["cleaned"] as? [Any] ?? []).count
         m.moved = (br["moved"] as? [[String: Any]] ?? []).map { "\((($0["repo"] as? String ?? "") as NSString).lastPathComponent) \($0["branch"] as? String ?? "?")" }
@@ -11630,20 +11750,26 @@ struct APRepoPlan: Identifiable { let repo: String; let plan: APMergePlan?; var 
             if let l = n.live { m.steps.append(APStep(from: "autopilot", into: l, after: n.dev)) }
             if let ms = n.master { m.steps.append(n.live.map { APStep(from: $0, into: ms, after: $0) } ?? APStep(from: "autopilot", into: ms, after: n.dev)) }
         }
-        // Jira 스토리 — 엔진 branches.stories(스토리 하나에 저장소 하나)와 대기열의 작업
+        // Jira 스토리 — 엔진 branches.stories(저장소마다, 옛 꼴은 저장소 하나)와 대기열의 작업
         let st = br["stories"] as? [String: Any] ?? [:]
         let idToKey = Dictionary(run.units.map { ($0.unitId, $0.task ?? "단위 \($0.n)") }, uniquingKeysWith: { a, _ in a })
         var order: [String] = []
         for u in run.units { if let s = u.story, !order.contains(s) { order.append(s) } }
         for k in st.keys.sorted() where !order.contains(k) { order.append(k) }
         m.stories = order.map { k in
-            let s = st[k] as? [String: Any] ?? [:]
-            var x = APMergeStory(key: k, repo: s["repo"] as? String ?? "", branch: s["branch"] as? String ?? "")
+            let rs = apStoryRepos(st[k])
+            var x = APMergeStory(key: k)
+            x.repos = rs.keys.sorted().map { r in
+                let e = rs[r] ?? [:]
+                return APStoryRepo(repo: r, branch: e["branch"] as? String ?? "", made: e["head"] != nil, merged: (e["merged"] as? [Any])?.count ?? 0)
+            }
             let mine = run.units.filter { $0.story == k }
             x.kind = mine.first?.kind ?? ""
             x.tasks = mine.map { u in
-                APMergeTask(n: u.n, key: u.task, title: u.title, status: u.status, branch: u.branch ?? "", merge: u.merge ?? "", why: apPlain(u.mergeWhy),
-                            depends: u.depends.map { idToKey[$0] ?? $0 })
+                // 작업의 저장소: 작업 폴더가 든 저장소. 옛 꼴(저장소 하나)이면 그 저장소
+                let repo = run.repoPath(u) ?? (x.repos.count == 1 ? x.repos[0].repo : "")
+                return APMergeTask(n: u.n, key: u.task, title: u.title, status: u.status, branch: u.branch ?? "", merge: u.merge ?? "", why: apPlain(u.mergeWhy),
+                                   repo: repo, depends: u.depends.map { idToKey[$0] ?? $0 })
             }
             return x
         }
@@ -11660,10 +11786,12 @@ struct APRepoPlan: Identifiable { let repo: String; let plan: APMergePlan?; var 
                                refs: Dictionary(m.repos.map { ($0, m.run.work) }, uniquingKeysWith: { a, _ in a }))
         }
     }
+    // 스토리 단계 — 그 스토리가 가지를 만든 저장소마다 함께(엔진 finish --story 가 저장소를 모두 먼저 보고 한다)
     func storySteps(_ m: APMergeView, _ s: APMergeStory) -> [APMergeStep] {
-        m.steps.enumerated().compactMap { i, st in
-            guard st.from == "autopilot", !s.repo.isEmpty, !s.branch.isEmpty else { return nil }
-            return APMergeStep(num: i + 1, source: "story:" + s.key, from: s.branch, into: st.into, after: st.after, refs: [s.repo: s.branch])
+        let refs = Dictionary(s.made.map { ($0.repo, $0.branch) }, uniquingKeysWith: { a, _ in a })
+        return m.steps.enumerated().compactMap { i, st in
+            guard st.from == "autopilot", !refs.isEmpty, !s.branch.isEmpty else { return nil }
+            return APMergeStep(num: i + 1, source: "story:" + s.key, from: s.branch, into: st.into, after: st.after, refs: refs)
         }
     }
     func promoteSteps(_ m: APMergeView) -> [APMergeStep] {
@@ -11678,14 +11806,28 @@ struct APRepoPlan: Identifiable { let repo: String; let plan: APMergePlan?; var 
     }
 
     // 차례 — 엔진 finish 와 같은 규칙(합치기는 같은 합칠 쪽이 after 에 합쳐졌을 때, 기존 가지끼리는 무엇이든 after 에 합쳐졌을 때)
-    func done(_ st: APMergeStep) -> APPromoted? { v?.promoted.last { $0.into == st.into && $0.source == st.source } }
+    // 일부 저장소만 합친 단계(엔진 branches.failed 가 남음)는 끝나지 않은 것으로 본다 — 다시 누르면 합친 저장소는 엔진이 "그대로"로 넘긴다
+    func done(_ st: APMergeStep) -> APPromoted? {
+        guard let m = v, leftover(st).isEmpty else { return nil }
+        return m.promoted.last { $0.into == st.into && $0.source == st.source }
+    }
+    func leftover(_ st: APMergeStep) -> [APFailed] { v.map { apUnresolved($0.promoted, $0.failed, source: st.source, into: st.into) } ?? [] }
+    func doneRows(_ st: APMergeStep) -> [APPromoted] {   // 저장소마다 실제로 합친 줄(다시 눌러 "그대로"가 뒤에 적혀도 앞서 합친 방식을 보인다)
+        guard let m = v else { return [] }
+        return st.refs.keys.sorted().compactMap { r in
+            let rows = m.promoted.filter { $0.into == st.into && $0.source == st.source && $0.repo == r }
+            return rows.last { $0.how != "same" } ?? rows.last
+        }
+    }
     func afterDone(_ st: APMergeStep) -> Bool {
         guard let a = st.after else { return true }
-        return v?.promoted.contains { $0.into == a && (st.promote || $0.source == st.source) } ?? false
+        guard let m = v else { return false }
+        return apStepDone(m.promoted, m.failed, source: st.promote ? nil : st.source, into: a)
     }
     func reached(_ source: String, _ into: String?) -> Bool {
-        guard let into else { return v?.promoted.contains { $0.source == source } ?? false }
-        return v?.promoted.contains { $0.source == source && $0.into == into } ?? false
+        guard let m = v else { return false }
+        guard let into else { return m.promoted.contains { $0.source == source } }
+        return apStepDone(m.promoted, m.failed, source: source, into: into)
     }
     func plansOf(_ st: APMergeStep) -> [APRepoPlan] { st.refs.keys.sorted().map { APRepoPlan(repo: $0, plan: plans[st.id + "|" + $0]) } }
 
@@ -11702,8 +11844,12 @@ struct APRepoPlan: Identifiable { let repo: String; let plan: APMergePlan?; var 
             return "\(prev) 을 마치면 누를 수 있습니다."
         }
         if st.promote, !m.promotionSaved { return "프로젝트 설정에 승격 차례가 없어 엔진이 기존 가지끼리는 합치지 않습니다" }
-        if let k = st.story, let s = m.stories.first(where: { $0.key == k }), foreign.contains(s.repo + "|" + s.branch) {
-            return "스토리 가지 \(s.branch) 는 이 실행이 끝난 뒤 같은 이름으로 다시 만들어졌거나 바뀌어(이어 간 실행 등) 이 실행에서는 합치지 않습니다"
+        if let k = st.story, let s = m.stories.first(where: { $0.key == k }) {
+            let bad = s.made.filter { foreign.contains($0.repo + "|" + $0.branch) }
+            if !bad.isEmpty {
+                return (s.many ? bad.map(\.name).joined(separator: "·") + " 의 " : "")
+                    + "스토리 가지 \(s.branch) 는 이 실행이 끝난 뒤 같은 이름으로 다시 만들어졌거나 바뀌어(이어 간 실행 등) 이 실행에서는 합치지 않습니다"
+            }
         }
         return nil
     }
@@ -11753,7 +11899,8 @@ struct APRepoPlan: Identifiable { let repo: String; let plan: APMergePlan?; var 
                 MainActor.assumeIsolated {
                     self.busy = nil
                     guard self.dir == d else { return }
-                    self.result = APMergeResult(ok: r.code == 0, title: what, text: r.out.isEmpty ? "(엔진 출력 없음, 종료 코드 \(r.code))" : r.out)
+                    self.result = APMergeResult(ok: r.code == 0, title: what, text: r.out.isEmpty ? "(엔진 출력 없음, 종료 코드 \(r.code))" : r.out,
+                                                partial: r.code == 1 && r.out.contains("일부만 했습니다"))
                     self.picked = [:]; self.patches = [:]
                     self.reload()
                     AutopilotStore.shared.tick()
@@ -11771,7 +11918,7 @@ struct APRepoPlan: Identifiable { let repo: String; let plan: APMergePlan?; var 
         queue.async {
             var plans: [String: APMergePlan] = [:], spans: [String: APMergePlan] = [:], have: [String: Set<String>] = [:], contained = Set<String>()
             var wts: [String: [String: String]] = [:], heads: [String: [String: String]] = [:], foreign = Set<String>()
-            for r in Set(m.repos + m.stories.map(\.repo)) where !r.isEmpty && FileManager.default.fileExists(atPath: r) {
+            for r in Set(m.repos + m.stories.flatMap { $0.repos.map(\.repo) + $0.tasks.map(\.repo) }) where !r.isEmpty && FileManager.default.fileExists(atPath: r) {
                 var hs: [String: String] = [:]
                 for line in (apGit(["for-each-ref", "--format=%(refname)\t%(objectname)", "refs/heads/"], r) ?? "").split(separator: "\n") {
                     let f = line.split(separator: "\t")
@@ -11783,10 +11930,10 @@ struct APRepoPlan: Identifiable { let repo: String; let plan: APMergePlan?; var 
             }
             // 엔진 finish 와 같은 기준: 실행 끝의 머리와 지금 머리가 다르면 이 실행의 가지가 아니다
             for s in m.stories {
-                for b in [s.branch] + s.tasks.map(\.branch) where !b.isEmpty {
-                    guard let h = heads[s.repo]?[b] else { continue }
-                    let want = m.endHeads[s.repo]?[b] ?? (b == s.branch ? m.storyHeads[s.key] : nil)
-                    if want != h { foreign.insert(s.repo + "|" + b) }
+                for (r, b) in s.pairs {
+                    guard let h = heads[r]?[b] else { continue }
+                    let want = m.endHeads[r]?[b] ?? (b == s.storyBranch(r) ? m.storyHeads[s.key + "|" + r] : nil)
+                    if want != h { foreign.insert(r + "|" + b) }
                 }
             }
             for st in steps {
@@ -11798,15 +11945,17 @@ struct APRepoPlan: Identifiable { let repo: String; let plan: APMergePlan?; var 
             if !m.run.work.isEmpty {
                 for r in m.repos where have[r] != nil { if let b = m.baseHeads[r] { spans["all|" + r] = APMerge.span(r, b, m.run.work) } }
             }
-            for s in m.stories where have[s.repo] != nil {
-                // 스토리 가지를 지운 뒤(합친 가지 지우기)에는 마지막 자율주행 단계의 가지(live)에 없는 커밋을 센다(엔진 cleanup 과 같은 기준)
-                let base = have[s.repo]?.contains(s.branch) == true ? s.branch : (lastAuto ?? s.branch)
-                for t in s.tasks where !t.branch.isEmpty && have[s.repo]?.contains(t.branch) == true && t.merge != "merged" {
-                    spans["task|" + t.branch] = APMerge.span(s.repo, base, t.branch)
+            for s in m.stories {
+                // 작업 가지는 그 저장소의 스토리 가지에서 본다. 스토리 가지를 지운 뒤(합친 가지 지우기)에는 마지막 자율주행 단계의 가지(live)에 없는 커밋을 센다(엔진 cleanup 과 같은 기준)
+                for t in s.tasks where !t.branch.isEmpty && have[t.repo]?.contains(t.branch) == true && t.merge != "merged" {
+                    let sb = s.storyBranch(t.repo) ?? s.branch
+                    spans[t.spanKey] = APMerge.span(t.repo, have[t.repo]?.contains(sb) == true ? sb : (lastAuto ?? sb), t.branch)
                 }
-                if let live = lastAuto, let lh = apGit(["rev-parse", "-q", "--verify", "refs/heads/\(live)^{commit}"], s.repo), !lh.isEmpty {
-                    for b in [s.branch] + s.tasks.map(\.branch) where !b.isEmpty && have[s.repo]?.contains(b) == true {
-                        if apGitRun(["merge-base", "--is-ancestor", "refs/heads/" + b, lh], s.repo).code == 0 { contained.insert(s.repo + "|" + b) }
+                guard let live = lastAuto else { continue }
+                for r in Set(s.pairs.map(\.repo)) where have[r] != nil {
+                    guard let lh = apGit(["rev-parse", "-q", "--verify", "refs/heads/\(live)^{commit}"], r), !lh.isEmpty else { continue }
+                    for (_, b) in s.pairs.filter({ $0.repo == r }) where have[r]?.contains(b) == true {
+                        if apGitRun(["merge-base", "--is-ancestor", "refs/heads/" + b, lh], r).code == 0 { contained.insert(r + "|" + b) }
                     }
                 }
             }
@@ -12009,7 +12158,7 @@ struct APMergeSheet: View {
     }
 
     private func resultBox(_ r: APMergeResult) -> some View {
-        APBox(title: r.ok ? "엔진이 한 일" : "엔진이 하지 않았습니다", note: r.title + " · 엔진 문장 그대로", tint: r.ok ? APColor.ok : APColor.fail, axid: "ap-merge-result") {
+        APBox(title: r.ok ? "엔진이 한 일" : r.partial ? "엔진이 일부만 했습니다" : "엔진이 하지 않았습니다", note: r.title + " · 엔진 문장 그대로", tint: r.ok ? APColor.ok : APColor.fail, axid: "ap-merge-result") {
             Text(r.text).boardFont(11, design: .monospaced).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -12062,8 +12211,11 @@ struct APMergeSheet: View {
                 if !v.moved.isEmpty { apNote(v.moved.joined(separator: ", "), APColor.fail) }
             }
             if v.jira {
-                let made = Set(v.made.values.flatMap { $0 })
-                apNote("새 가지: 스토리 가지 \(v.stories.filter { made.contains($0.branch) }.count) · 작업 가지 \(v.stories.flatMap(\.tasks).filter { made.contains($0.branch) }.count) · 출발 가지 \(bases)")
+                let made = { (r: String, b: String) in (v.made[r] ?? []).contains(b) }
+                let storyN = v.stories.flatMap(\.repos).filter { made($0.repo, $0.branch) }.count
+                let taskN = v.stories.flatMap(\.tasks).filter { made($0.repo, $0.branch) }.count
+                let spread = v.stories.filter { $0.made.count > 1 }.count
+                apNote("새 가지: 스토리 가지 \(storyN) · 작업 가지 \(taskN) · 출발 가지 \(bases)" + (spread > 0 ? " · 여러 저장소에 걸친 스토리 \(spread)" : ""))
             } else if !v.run.work.isEmpty {
                 Text(v.run.work).boardFont(11.5, weight: .semibold, design: .monospaced).lineLimit(1).truncationMode(.middle)
                 apNote("새 가지" + (v.repos.count > 1 ? " · 저장소 \(v.repos.count)개" : "") + (m.spans.isEmpty ? "" : " · 커밋 \(commits)개") + " · 출발 가지 \(bases)")
@@ -12152,9 +12304,19 @@ struct APMergeSheet: View {
                 }
             }
             if let d = did {
-                let how = ["ff": "앞으로 감기", "merge": "병합 커밋", "same": "이미 들어 있어 그대로"][d.how] ?? d.how
-                apNote("\(d.at.map(apClock) ?? "?") 에 \(st.promote ? "올렸습니다" : "합쳤습니다") · \(how)" + (d.how == "merge" ? " \(d.to.prefix(7))" : ""), APColor.ok)
+                let howOf = { (p: APPromoted) in (["ff": "앞으로 감기", "merge": "병합 커밋", "same": "이미 들어 있어 그대로"][p.how] ?? p.how) + (p.how == "merge" ? " \(p.to.prefix(7))" : "") }
+                let rows = m.doneRows(st)
+                apNote("\(d.at.map(apClock) ?? "?") 에 \(st.promote ? "올렸습니다" : "합쳤습니다") · "
+                       + (many && rows.count > 1 ? rows.map { "\(($0.repo as NSString).lastPathComponent) \(howOf($0))" }.joined(separator: " · ") : howOf(d)), APColor.ok)
             } else if let shownLock { apNote(shownLock, shownLock.hasSuffix("누를 수 있습니다.") || shownLock.contains("읽는 중") ? .secondary : APColor.limit) }
+            // 지난번에 일부 저장소만 했다(엔진 branches.failed). 다시 누르면 한 저장소는 그대로로 넘어가고 남은 저장소만 한다
+            let left = did == nil ? m.leftover(st) : []
+            if !left.isEmpty {
+                let doneNames = m.doneRows(st).filter { r in !left.contains { $0.repo == r.repo } }.map { ($0.repo as NSString).lastPathComponent }
+                apNote("일부만 했습니다" + (doneNames.isEmpty ? "" : "(한 저장소: " + doneNames.joined(separator: "·") + ")") + ". 하지 못한 저장소: "
+                       + left.map { "\(($0.repo as NSString).lastPathComponent)(\($0.why))" }.joined(separator: " · ") + ". 까닭을 고친 뒤 다시 누르면 남은 저장소만 합칩니다.", APColor.fail)
+                    .accessibilityIdentifier("ap-merge-partial-\(st.ax)")
+            }
             // 차례에 막힌 단계의 "그대로"는 앞 단계 뒤에 달라지므로 보이지 않는다
             ForEach(ps) { rp in
                 if let p = rp.plan, did == nil, !(p.state == "same" && !m.afterDone(st)) { planLine(st, rp.repo, p, named: many) }
@@ -12305,8 +12467,29 @@ struct APMergeSheet: View {
                 APTicket(key: s.key)
                 if !s.kind.isEmpty { APChip(text: apKind(s.kind)) }
                 Text(s.branch.isEmpty ? "스토리 가지 없음" : s.branch).boardFont(11, design: .monospaced).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                if s.many { APChip(text: "저장소 \(s.repos.count)") }
                 Spacer(minLength: 4)
                 Text("합친 작업 \(merged)/\(s.tasks.count)").boardFont(10.5).foregroundStyle(.secondary).fixedSize()
+            }
+            // 여러 저장소에 걸친 스토리 — 저장소마다 스토리 가지와 합친 작업(엔진은 단계마다 모든 저장소를 먼저 보고 함께 합친다)
+            if s.many {
+                VStack(alignment: .leading, spacing: 3) {
+                    ForEach(s.repos) { sr in
+                        let have = m.existing[sr.repo]?.contains(sr.branch) == true
+                        let tasksHere = s.tasks.filter { $0.repo == sr.repo }
+                        HStack(spacing: 6) {
+                            Text(sr.name).boardFont(11, weight: .semibold).frame(minWidth: 70, alignment: .leading)
+                            Text(sr.made ? sr.branch : "스토리 가지 없음").boardFont(10.5, design: .monospaced).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                            Spacer(minLength: 4)
+                            Text(!sr.made ? "작업이 시작하지 않아 합칠 것 없음" : "합친 작업 \(sr.merged)/\(tasksHere.count)" + (have || m.existing[sr.repo] == nil ? "" : " · 가지 지움"))
+                                .boardFont(10.5).foregroundStyle(.secondary).fixedSize()
+                        }
+                        .accessibilityElement(children: .combine)
+                        .accessibilityIdentifier("ap-merge-story-\(s.key)-repo-\(sr.name)")
+                    }
+                }
+                .padding(.horizontal, 8).padding(.vertical, 6)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color.white.opacity(0.03)))
             }
             if !v.discarded.contains("story:" + s.key) {
                 ForEach(m.storySteps(v, s)) { st in stepView(v, st) }
@@ -12334,13 +12517,14 @@ struct APMergeSheet: View {
     }
 
     private func taskRow(_ s: APMergeStory, _ t: APMergeTask) -> some View {
-        let other = m.foreign.contains(s.repo + "|" + t.branch)
-        let has = !t.branch.isEmpty && m.existing[s.repo]?.contains(t.branch) == true && !other
-        let p = m.spans["task|" + t.branch]
-        let key = "task|" + t.branch
+        let other = m.foreign.contains(t.repo + "|" + t.branch)
+        let has = !t.branch.isEmpty && m.existing[t.repo]?.contains(t.branch) == true && !other
+        let key = t.spanKey
+        let p = m.spans[key]
         return VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 6) {
                 if let k = t.key { APTicket(key: k) }
+                if s.many, !t.repo.isEmpty { APChip(text: (t.repo as NSString).lastPathComponent) }
                 Text(t.title).boardFont(11.5).lineLimit(1)
                 APChip(text: apUnitLabel(t.status), color: APColor.unit(t.status), strong: true)
                 Spacer(minLength: 4)
@@ -12355,7 +12539,7 @@ struct APMergeSheet: View {
             } else {
                 apNote(t.branch.isEmpty ? "가지 없음" : "\(t.branch) · 지웠음")
             }
-            if has, let p, m.openDiff.contains(key) { diffPanel(key, repo: s.repo, p, title: nil, ax: "task-\(t.key ?? "\(t.n)")") }
+            if has, let p, m.openDiff.contains(key) { diffPanel(key, repo: t.repo, p, title: nil, ax: "task-\(t.key ?? "\(t.n)")") }
         }
     }
 
@@ -12364,15 +12548,20 @@ struct APMergeSheet: View {
         let source = "story:" + s.key
         let target = v.promotionSaved ? v.lastAuto : v.promoted.last(where: { $0.source == source })?.into
         let live = target.map { m.reached(source, $0) } ?? false
-        let have = m.existing[s.repo] ?? []
-        let mine = ([s.branch] + s.tasks.map(\.branch)).filter { !$0.isEmpty && have.contains($0) && (v.made[s.repo] ?? []).contains($0) && !m.foreign.contains(s.repo + "|" + $0) }
-        let others = ([s.branch] + s.tasks.map(\.branch)).filter { !$0.isEmpty && m.foreign.contains(s.repo + "|" + $0) }
+        // 저장소마다 스토리 가지와 그 저장소의 작업 가지(여러 저장소에 걸친 스토리면 저장소 이름을 붙여 보인다)
+        let pairs = s.pairs
+        let label = { (p: (repo: String, branch: String)) in s.many ? "\((p.repo as NSString).lastPathComponent) \(p.branch)" : p.branch }
+        let isStory = { (p: (repo: String, branch: String)) in p.branch == s.storyBranch(p.repo) }
+        let mine = pairs.filter { m.existing[$0.repo]?.contains($0.branch) == true && (v.made[$0.repo] ?? []).contains($0.branch) && !m.foreign.contains($0.repo + "|" + $0.branch) }
+        let others = pairs.filter { m.foreign.contains($0.repo + "|" + $0.branch) }
         if !others.isEmpty {
-            apNote("같은 이름의 가지 \(others.count)개(\(others.joined(separator: ", ")))는 이 실행이 끝난 뒤 다시 만들어진 것이라 이 실행에서 움직이지 않습니다. 이어 간 실행의 합치기·승격에서 다룹니다.", APColor.limit)
+            apNote("같은 이름의 가지 \(others.count)개(\(others.map(label).joined(separator: ", ")))는 이 실행이 끝난 뒤 다시 만들어진 것이라 이 실행에서 움직이지 않습니다. 이어 간 실행의 합치기·승격에서 다룹니다.", APColor.limit)
         }
-        let mergedLeft = mine.filter { m.contained.contains(s.repo + "|" + $0) }
-        let unmergedLeft = mine.filter { !m.contained.contains(s.repo + "|" + $0) && $0 != s.branch }
-        let unmergedCommits = unmergedLeft.compactMap { m.spans["task|" + $0]?.commits }.reduce(0, +)
+        let mergedLeft = mine.filter { m.contained.contains($0.repo + "|" + $0.branch) }
+        let unmergedLeft = mine.filter { !m.contained.contains($0.repo + "|" + $0.branch) && !isStory($0) }
+        let unmergedCommits = unmergedLeft.compactMap { p in m.spans["task|" + p.repo + "|" + p.branch]?.commits }.reduce(0, +)
+        let storyCount = mine.filter(isStory).count
+        let where_ = s.made.count > 1 ? "저장소 \(s.made.count)곳의 " : ""
         if v.discarded.contains(source) {
             apNote("이 스토리를 버렸습니다(스토리 가지와 작업 가지를 지움).")
         } else if !m.reached(source, nil), mine.isEmpty {
@@ -12381,7 +12570,7 @@ struct APMergeSheet: View {
             if m.confirm == "discard:" + s.key {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("스토리 \(s.key) 의 가지를 지웁니다.").boardFont(12, weight: .bold)
-                    apNote("스토리 가지와 작업 가지 \(mine.count - (mine.contains(s.branch) ? 1 : 0))개(합치지 못한 작업 가지 포함)가 사라지고 되돌릴 수 없습니다. 실행 기록은 지난 실행에 남습니다.")
+                    apNote(where_ + "스토리 가지\(storyCount > 1 ? " \(storyCount)개" : "")와 작업 가지 \(mine.count - storyCount)개(합치지 못한 작업 가지 포함)가 사라지고 되돌릴 수 없습니다. 실행 기록은 지난 실행에 남습니다.")
                     HStack(spacing: 6) {
                         APButton(title: "지우기", tint: APColor.fail, enabled: m.discardLock(source) == nil, axid: "ap-merge-discard-\(s.key)-yes") { m.discard(s.key) }
                         APButton(title: "취소", axid: "ap-merge-discard-\(s.key)-no") { m.confirm = nil }
@@ -12392,7 +12581,7 @@ struct APMergeSheet: View {
             } else {
                 HStack(spacing: 8) {
                     APButton(title: "이 스토리 버리기", icon: "trash", tint: APColor.fail, enabled: m.discardLock(source) == nil, help: m.discardLock(source) ?? "확인을 한 번 더 받습니다", axid: "ap-merge-discard-\(s.key)") { m.confirm = "discard:" + s.key }
-                    apNote("dev 에 합치기 전에만 · 스토리 가지와 작업 가지 \(max(0, mine.count - 1))개를 지웁니다")
+                    apNote("dev 에 합치기 전에만 · " + where_ + "스토리 가지\(storyCount > 1 ? " \(storyCount)개" : "")와 작업 가지 \(mine.count - storyCount)개를 지웁니다")
                 }
             }
         } else if !live {
@@ -12404,14 +12593,15 @@ struct APMergeSheet: View {
                 if !mergedLeft.isEmpty {
                     HStack(spacing: 8) {
                         APButton(title: "합친 가지 지우기", icon: "scissors", enabled: m.busy == nil && !m.reading, help: "엔진 finish cleanup: \(target ?? "live") 에 다 들어간 가지만 지웁니다", axid: "ap-merge-cleanup-\(s.key)") { m.cleanup(s.key, unmerged: false) }
-                        apNote("\(target ?? "live") 에 합쳤습니다. 누를 때만 " + (mergedLeft.contains(s.branch) ? "스토리 가지와 " : "") + "작업 가지 \(mergedLeft.filter { $0 != s.branch }.count)개를 지웁니다.")
+                        let ms = mergedLeft.filter(isStory).count
+                        apNote("\(target ?? "live") 에 합쳤습니다. 누를 때만 " + where_ + (ms > 0 ? "스토리 가지\(ms > 1 ? " \(ms)개" : "")와 " : "") + "작업 가지 \(mergedLeft.count - ms)개를 지웁니다.")
                     }
                 }
                 if !unmergedLeft.isEmpty {
                     if m.confirm == "unmerged:" + s.key {
                         VStack(alignment: .leading, spacing: 6) {
                             Text("합치지 못한 작업 가지 \(unmergedLeft.count)개도 지웁니다.").boardFont(12, weight: .bold)
-                            apNote(unmergedLeft.joined(separator: ", ") + " 의 커밋 \(unmergedCommits)개가 사라지고 되돌릴 수 없습니다. 이 실행을 이어 가면 같은 티켓으로 스토리 가지를 새로 만들어 다시 합니다.")
+                            apNote(unmergedLeft.map(label).joined(separator: ", ") + " 의 커밋 \(unmergedCommits)개가 사라지고 되돌릴 수 없습니다. 이 실행을 이어 가면 같은 티켓으로 스토리 가지를 새로 만들어 다시 합니다.")
                             HStack(spacing: 6) {
                                 APButton(title: "지우기", tint: APColor.fail, enabled: m.busy == nil, axid: "ap-merge-unmerged-\(s.key)-yes") { m.cleanup(s.key, unmerged: true) }
                                 APButton(title: "취소", axid: "ap-merge-unmerged-\(s.key)-no") { m.confirm = nil }
