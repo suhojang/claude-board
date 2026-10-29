@@ -170,14 +170,17 @@ func mkdirPrivate(_ p: String) {
 // 엔진이 샌드박스 밖에서 부르는 git 의 보호(보안 검토 2026-10-22 둘째): 저장소 설정의 fsmonitor·hooks·attributesFile·gpgsign 을 쓰지 않고,
 // 시스템·전역 설정과 전역 attributes·replace 객체도 읽지 않는다 — 모델이 저장소 설정·attributes·replace 에 명령을 심어도 밖의 git 이 실행하지 않게
 let gitHardenEnv = ["GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_ATTR_NOSYSTEM=1", "GIT_NO_REPLACE_OBJECTS=1"]
-let gitHardenC = ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false", "-c", "core.attributesFile=/dev/null"]
-func safeGit(_ args: [String], cwd: String) -> String {
-    runTool("/usr/bin/env", gitHardenEnv + ["/usr/bin/git", "--no-optional-locks"] + gitHardenC + args, cwd: cwd).out
+// safe.bareRepository=explicit(2026-10-30 5-4 보안): 작업 폴더가 bare 저장소 꼴(HEAD·objects·refs)이어도 git 이 스스로 그것을 저장소로 쓰지 않게
+let gitHardenC = ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false", "-c", "core.attributesFile=/dev/null",
+                  "-c", "safe.bareRepository=explicit"]
+// env: 더 넣을 환경 변수("이름=값") — 모델이 쓸 수 있던 자리에서 도는 git 은 엔진이 GIT_DIR·GIT_WORK_TREE 를 출발 때 기록한 자리로 박는다(Engine.pin)
+func safeGit(_ args: [String], cwd: String, env: [String] = []) -> String {
+    runTool("/usr/bin/env", gitHardenEnv + env + ["/usr/bin/git", "--no-optional-locks"] + gitHardenC + args, cwd: cwd).out
 }
 // 엔진이 가지를 바꾸는 git(만들기·바꾸기·병합 커밋·ref 올리기): safeGit 과 같은 보호에 종료 코드와 오류 출력까지 돌려준다.
 // 전역 설정을 읽지 않으므로 엔진이 만드는 커밋에는 사용자 신원을 명령줄로 붙인다(없으면 "Please tell me who you are")
-func gitRun(_ args: [String], cwd: String, commit: Bool = false, withErr: Bool = true) -> (code: Int32, out: String) {
-    var a = gitHardenEnv + ["/usr/bin/git"] + gitHardenC
+func gitRun(_ args: [String], cwd: String, commit: Bool = false, withErr: Bool = true, env: [String] = []) -> (code: Int32, out: String) {
+    var a = gitHardenEnv + env + ["/usr/bin/git"] + gitHardenC
     if commit { let i = gitIdentity(cwd); a += ["-c", "user.name=\(i.name)", "-c", "user.email=\(i.email)"] }
     let r = runTool("/usr/bin/env", a + args, cwd: cwd, timeout: 120, withErr: withErr)
     return (r.code, r.out.trimmingCharacters(in: .whitespacesAndNewlines))
@@ -190,8 +193,8 @@ func gitIdentity(_ cwd: String) -> (name: String, email: String) {
     }
     return (get("user.name") ?? "Claude Board autopilot", get("user.email") ?? "autopilot@claude-board.invalid")
 }
-func gitOut(_ args: [String], cwd: String) -> String? {   // 성공했을 때의 출력(한 줄이면 그 줄)
-    let r = gitRun(args, cwd: cwd)
+func gitOut(_ args: [String], cwd: String, env: [String] = []) -> String? {   // 성공했을 때의 출력(한 줄이면 그 줄)
+    let r = gitRun(args, cwd: cwd, env: env)
     return r.code == 0 ? r.out : nil
 }
 func firstLine(_ s: String) -> String { short(s, 160) }
@@ -703,14 +706,14 @@ func branchHeads(_ repo: String) -> [String: String] {
     }
     return m
 }
-func currentBranch(_ repo: String) -> String? { gitOut(["symbolic-ref", "-q", "--short", "HEAD"], cwd: repo).flatMap { $0.isEmpty ? nil : $0 } }
+func currentBranch(_ repo: String, env: [String] = []) -> String? { gitOut(["symbolic-ref", "-q", "--short", "HEAD"], cwd: repo, env: env).flatMap { $0.isEmpty ? nil : $0 } }
 func headOf(_ repo: String, _ ref: String) -> String? { gitOut(["rev-parse", "-q", "--verify", ref + "^{commit}"], cwd: repo).flatMap { $0.isEmpty ? nil : $0 } }
 func branchExists(_ repo: String, _ b: String) -> Bool { headOf(repo, "refs/heads/" + b) != nil }
 func isAncestor(_ repo: String, _ a: String, _ b: String) -> Bool { gitRun(["merge-base", "--is-ancestor", a, b], cwd: repo).code == 0 }
 // 작업 트리 상태 줄(추적 안 하는 파일 포함, 무시 파일 제외). 색인을 고쳐 쓰지 않게 --no-optional-locks.
 // 줄 앞 빈칸이 상태 글자라("XY 경로") 출력 전체를 다듬지 않는다 — gitOut 은 다듬어 첫 줄의 " M" 이 "M" 이 됐다(5-3b ①, 경로만 보관할 때 경로가 어긋남)
-func porcelain(_ repo: String) -> [String] {
-    let r = runTool("/usr/bin/env", gitHardenEnv + ["/usr/bin/git"] + gitHardenC + ["--no-optional-locks", "status", "--porcelain"], cwd: repo)
+func porcelain(_ repo: String, env: [String] = []) -> [String] {
+    let r = runTool("/usr/bin/env", gitHardenEnv + env + ["/usr/bin/git"] + gitHardenC + ["--no-optional-locks", "status", "--porcelain"], cwd: repo)
     return r.code == 0 ? r.out.split(separator: "\n").map(String.init).filter { !$0.isEmpty } : []
 }
 // 가지가 걸려 있는 작업 트리(가지 이름 → 작업 트리 경로)
@@ -770,29 +773,42 @@ func gitDirChange(_ i: [String: Any], at w: String) -> String? {
     if let g = i["git_dir"] as? String, let lg = gitOut(["rev-parse", "--absolute-git-dir"], cwd: w).map(canonical), lg != g { return "git 폴더가 출발 때와 다른 자리로 풀려" }
     return nil
 }
-// 작업 트리 안(뿌리의 .git 은 빼고, 깊이 6 까지, 무거운 폴더는 건너뜀)에 since 뒤로 생긴(lstat ctime) .git 자리 — 끝 보고(branches.nested_git_new)
-func newNestedGit(_ roots: [String], since: Double) -> [String] {
-    let skip: Set<String> = [".git", "node_modules", "build", ".gradle", "target", "dist", "out", ".idea", ".build"]
-    var out: [String] = [], seen = 0
-    let others = Set(roots)   // 다른 저장소 뿌리(이 실행이 쓰는 묶음의 다른 저장소)는 그 저장소 차례에 본다 — 그 .git 은 출발 때 기록한 것
+// git 이 저장소로 쓰는 꼴인가(파일 시스템으로만): d 안에 .git(폴더·파일·링크), 또는 d 자신이 git 폴더 꼴(HEAD 와 objects·refs 폴더, 또는 HEAD 와 commondir —
+// bare 저장소·작업 트리 git 폴더). git 은 작업 폴더에서 위로 올라가며 이 둘을 찾는다(5-4 보안 검토 둘째 지적: .git 이름만이 아님)
+func gitPlaceIn(_ d: String) -> String? {
+    var st = stat()
+    if lstat(d + "/.git", &st) == 0 { return d + "/.git" }
+    if lstat(d + "/HEAD", &st) == 0, (isDir(d + "/objects") && isDir(d + "/refs")) || lstat(d + "/commondir", &st) == 0 { return d + " (git 폴더 꼴)" }
+    return nil
+}
+// 작업 트리 안에 실행 중에 새로 생긴(lstat ctime 이 출발 뒤) git 자리 — 끝 보고(branches.nested_git_new·nested_git_scan). 깊이 상한 없이 모든 폴더를
+// 이름만 보며 훑는다(node_modules·build 같은 폴더도, 링크는 따라가지 않는다). 뿌리의 .git 과 다른 저장소 뿌리는 건너뛴다(출발 때 기록한 것).
+// 항목 수·시간 상한에 닿으면 다 훑지 못한 것으로 돌려준다(complete false) — 보고는 "있을 수 있음"으로 한다(fail closed).
+// 실행 중의 막기는 이것이 아니라 단위마다의 unitGitOK·GIT_DIR 박기·safe.bareRepository 이고, 이 훑기는 실행이 끝난 뒤 사람이 그 폴더에서 돌릴 git 을 위한 받침이다
+func newNestedGit(_ roots: [String], since: Double, maxEntries: Int = 2_000_000, maxSec: Double = 30) -> (paths: [String], complete: Bool, why: String?) {
+    var out: [String] = [], n = 0
+    let others = Set(roots.map(canonical)), t0 = Date()
+    func new(_ p: String) -> Bool { var st = stat(); return lstat(p, &st) == 0 && Double(st.st_ctimespec.tv_sec) + 1 >= since }
     for root in roots {
-        var level = [root], depth = 0
-        while !level.isEmpty, depth <= 6, seen < 50_000 {
-            var next: [String] = []
-            for d in level {
-                let names = (try? fm.contentsOfDirectory(atPath: d)) ?? []
-                seen += names.count
-                if d != root, others.contains(d) { continue }
-                if d != root, names.contains(".git") {
-                    var st = stat()
-                    if lstat(d + "/.git", &st) == 0, Double(st.st_ctimespec.tv_sec) + 1 >= since { out.append(d + "/.git") }
-                }
-                for name in names where !skip.contains(name) && isDir(d + "/" + name) && !isLink(d + "/" + name) { next.append(d + "/" + name) }
+        let base = canonical(root)
+        guard let en = fm.enumerator(atPath: base) else { continue }
+        while let rel = en.nextObject() as? String {
+            n += 1
+            if n > maxEntries { return (out.sorted(), false, "항목이 \(maxEntries)개를 넘어") }
+            if n % 4096 == 0, Date().timeIntervalSince(t0) > maxSec { return (out.sorted(), false, "\(Int(maxSec))초 안에 다 훑지 못해") }
+            let name = (rel as NSString).lastPathComponent, full = base + "/" + rel
+            if name == ".git" {
+                if rel != ".git", new(full) { out.append(full) }
+                en.skipDescendants()
+            } else if others.contains(full) {
+                en.skipDescendants()
+            } else if name == "HEAD" {
+                let d = (full as NSString).deletingLastPathComponent
+                if d != base, !d.hasSuffix("/.git"), (isDir(d + "/objects") && isDir(d + "/refs")) || fm.fileExists(atPath: d + "/commondir"), new(full) { out.append(d + " (git 폴더 꼴)") }
             }
-            level = next; depth += 1
         }
     }
-    return out.sorted()
+    return (out.sorted(), true, nil)
 }
 // 중첩 .git 막기(2026-10-30 5-4, 보안 검토 지적): 단위 작업 폴더(dir)에서 위로 올라가며 .git 자리(폴더·파일·링크 모두)를 파일 시스템으로만 찾는다.
 // root 는 그 단위의 저장소 뿌리(그 자리의 .git 은 gitDirChange 가 따로 본다, 보지 않음). git 은 작업 폴더에서 위로 올라가 처음 만난 .git 을 쓰므로,
@@ -804,8 +820,7 @@ func strayGitDir(from dir: String, root: String?) -> String? {
     let stop = root.map(canonical)
     while true {
         if let s = stop, d == s { return nil }
-        var st = stat()
-        if lstat(d + "/.git", &st) == 0 { return "작업 폴더 위에 출발 때 없던 git 자리(\(d)/.git)가 있어" }
+        if let g = gitPlaceIn(d) { return "작업 폴더 위에 출발 때 없던 git 자리(\(g))가 있어" }
         if d == "/" || d.isEmpty { return stop == nil ? nil : "작업 폴더가 저장소(\(stop!)) 밖으로 풀려" }
         d = (d as NSString).deletingLastPathComponent
     }
@@ -1949,6 +1964,13 @@ final class Engine {
     // claude 는 세션을 열 때 샌드박스 밖에서 git status 를 부르고(claudeEnv 의 주석, 실측), 판정 명령도 그 자리에서 git 을 부를 수 있다.
     // 저장소 안 작업 폴더: 작업 폴더에서 뿌리 사이에 .git 이 없고(strayGitDir, 파일 시스템으로만) 뿌리의 git 폴더가 출발 때와 같을 때만(gitDirOK).
     // 저장소 밖 작업 폴더(출발 때 git 저장소가 아님): 위로 / 까지 .git 이 없을 때만 — 실행 중에 생긴 git 자리는 모두 막는다(fail closed, 5-4 보안 검토)
+    // 엔진이 모델이 쓸 수 있던 자리에서 돌리는 git 의 저장소를 박는다(5-4 보안 검토): GIT_DIR 은 출발 때 기록한 git 폴더(따로 작업 트리면
+    // .git/worktrees/<이름>), GIT_WORK_TREE 는 그 작업 트리 뿌리. git 이 작업 폴더에서 위로 저장소를 스스로 찾지 않으므로 하위 폴더의 .git·bare 꼴을 쓰지 않는다.
+    // 판정·고정 단계 명령과 claude 에는 박지 않는다(그 안의 git 이 다른 저장소(../형제)를 부를 수 있어 깨진다) — 거기는 unitGitOK·safe.bareRepository 로
+    func pin(_ r: String) -> [String] {
+        guard let g = repoInfo(r)["git_dir"] as? String else { return [] }
+        return ["GIT_DIR=" + g, "GIT_WORK_TREE=" + wt(r)]
+    }
     func unitGitOK(_ n: Int) -> Bool {
         let r = repoOf(cwd(n))
         if let why = strayGitDir(from: cwd(n), root: r.map(wt)) {
@@ -2086,14 +2108,15 @@ final class Engine {
             // git 폴더가 출발 때와 같은지를 git status 보다 먼저 본다(5-3b 보안, switchTo 와 같은 차례) — 모델이 쓸 수 있는 작업 트리라
             // 바꿔치기된 git 폴더(모델이 만든 설정의 filter 드라이버 등)로 git status 가 돌지 않게. 바뀌었으면 gitDirOK 가 까닭을 남기고,
             // 가지가 실행 중에 바뀌었으면 손대지 않는다(switchTo 가 까닭을 남긴다)
-            guard gitDirOK(r), currentBranch(w) == on else { continue }
-            let dirty = porcelain(w), start = i["dirty_start"] as? [String] ?? []
+            let p = pin(r)
+            guard gitDirOK(r), currentBranch(w, env: p) == on else { continue }
+            let dirty = porcelain(w, env: p), start = i["dirty_start"] as? [String] ?? []
             guard case .stash(let paths) = apLeftover(dirty: dirty, dirtyStart: start, onStoryBranch: true, madeByRun: true) else { continue }
-            guard currentBranch(w) == on else { continue }   // 보관 바로 앞에서 가지를 한 번 더 본다
+            guard currentBranch(w, env: p) == on else { continue }   // 보관 바로 앞에서 가지를 한 번 더 본다
             let msg = apStashMessage(run: id, unit: unit, repo: repoName(r), branch: on)
-            let before = gitOut(["rev-parse", "-q", "--verify", "refs/stash"], cwd: w)
-            let c = gitRun(["stash", "push", "--include-untracked", "-m", msg] + (paths.map { ["--"] + $0.map { ":(literal)" + $0 } } ?? []), cwd: w, commit: true)
-            let after = gitOut(["rev-parse", "-q", "--verify", "refs/stash"], cwd: w)
+            let before = gitOut(["rev-parse", "-q", "--verify", "refs/stash"], cwd: w, env: p)
+            let c = gitRun(["stash", "push", "--include-untracked", "-m", msg] + (paths.map { ["--"] + $0.map { ":(literal)" + $0 } } ?? []), cwd: w, commit: true, env: p)
+            let after = gitOut(["rev-parse", "-q", "--verify", "refs/stash"], cwd: w, env: p)
             let k = dirty.filter { !start.contains($0) }.count
             guard c.code == 0, let sha = after, sha != before else {
                 event("board", "단위 \(unit.map(String.init) ?? "?") 이 읽기 전용으로 걸어 둔 \(repoName(r)) \(on) 에 남긴 변경 \(k)개를 보관하지 못했습니다: \(firstLine(c.out))")
@@ -2103,7 +2126,7 @@ final class Engine {
             let row: [String: Any] = ["repo": r, "branch": on, "unit": unit.map { $0 as Any } ?? NSNull(), "stash": sha, "message": msg,
                                       "files": k, "paths": Array(dirty.filter { !start.contains($0) }.prefix(20)), "at": r3(now())]
             b["stashed"] = (b["stashed"] as? [Any] ?? []) + [row]; br = b; saveRun()
-            let still = porcelain(w) != start
+            let still = porcelain(w, env: p) != start
             event("board", "단위 \(unit.map(String.init) ?? "?") 이 읽기 전용으로 걸어 둔 \(repoName(r)) \(on) 에 남긴 변경 \(k)개를 엔진이 따로 보관했습니다"
                   + "(git stash \(sha.prefix(7)), 판정·다음 단위에 넣지 않음)" + (still ? ". 보관하지 못한 변경이 남았습니다" : "") + ".")
         }
@@ -2117,17 +2140,18 @@ final class Engine {
         // git 폴더를 지금 가지 읽기보다 먼저 본다(5-4 첫머리 보안, stashReadOnly 와 같은 차례). 바꿀 것이 없는 단위에서도 보므로
         // 바꿔치기된 저장소가 있으면 뒤 단위는 모두 건너뛴다(전에는 가지를 바꾸는 단위에서만 봤다)
         guard gitDirOK(r) else { return "\(repoName(r)) 의 git 폴더가 바뀌어 \(want) 로 바꾸지 않았습니다" }
-        let on = i["on"] as? String ?? "", cur = currentBranch(w) ?? ""
+        let p = pin(r)
+        let on = i["on"] as? String ?? "", cur = currentBranch(w, env: p) ?? ""
         if on == want, cur == want { return nil }
         if cur != on { return "\(repoName(r)) 의 가지가 실행 중에 바뀌어(지금 \(cur.isEmpty ? "가지 없음" : cur)) \(want) 로 바꾸지 않았습니다" }
-        let dirty = porcelain(w), dirtyStart = i["dirty_start"] as? [String] ?? []
+        let dirty = porcelain(w, env: p), dirtyStart = i["dirty_start"] as? [String] ?? []
         // 남은 변경을 어떻게 할지는 규칙 apLeftover(AutopilotRules/Leftovers.swift)가 정한다
         switch apLeftover(dirty: dirty, dirtyStart: dirtyStart, onStoryBranch: storyBranchNames.contains(on), madeByRun: (i["made"] as? [String] ?? []).contains(on)) {
         case .clean: break
         case .stash:
             // 읽기 전용 자리의 남은 변경은 단위를 시작하기 전(unitBranchGate)에 이미 보관한다. 여기 온 것은 보관하지 못한 것 — 한 번 더 해 보고 남으면 바꾸지 않는다
             stashReadOnly(unit: apStashUnit(statuses: queue.map { $0["status"] as? String ?? "pending" }, before: nil), only: r)
-            let left = porcelain(w)
+            let left = porcelain(w, env: p)
             if left != dirtyStart {
                 return "\(repoName(r)) 의 스토리 가지 \(on)(읽기 전용으로 걸어 둔 자리)에 커밋하지 않은 변경 \(left.count)개가 남아(따로 보관하지 못함) \(want) 로 바꾸지 않았습니다"
             }
@@ -2138,12 +2162,12 @@ final class Engine {
         case .refuse(.dirty):
             return "\(repoName(r)) 에 커밋하지 않은 변경 \(dirty.count)개가 있어 \(want) 로 바꾸지 않았습니다"
         case .commit:
-            let a = gitRun(["add", "-A"], cwd: w)
-            let c = a.code == 0 ? gitRun(["commit", "-q", "--no-verify", "-m", "자율주행 \(id): \(on) 에 커밋하지 않고 남은 변경(다음 단위로 가지를 바꾸기 전에 엔진이 남김)"], cwd: w, commit: true) : a
+            let a = gitRun(["add", "-A"], cwd: w, env: p)
+            let c = a.code == 0 ? gitRun(["commit", "-q", "--no-verify", "-m", "자율주행 \(id): \(on) 에 커밋하지 않고 남은 변경(다음 단위로 가지를 바꾸기 전에 엔진이 남김)"], cwd: w, commit: true, env: p) : a
             guard c.code == 0 else { return "\(repoName(r)) 에 남은 변경을 \(on) 에 커밋하지 못해 \(want) 로 바꾸지 않았습니다: \(firstLine(c.out))" }
             event("board", "앞 단위가 커밋하지 않고 남긴 변경 \(dirty.count)개를 그 가지(\(on))에 커밋해 두었습니다.")
         }
-        let sw = gitRun(["switch", want], cwd: w)
+        let sw = gitRun(["switch", want], cwd: w, env: p)
         guard sw.code == 0 else { return "\(repoName(r)) 를 \(want) 로 바꾸지 못했습니다: \(firstLine(sw.out))" }
         i = repoInfo(r); i["on"] = want; setRepoInfo(r, i); saveRun()
         return nil
@@ -2260,8 +2284,9 @@ final class Engine {
         b["replace_new"] = replaceNew; b["tags_changed"] = tagsChanged; b["shallow_changed"] = shallowChanged; b["include_changed"] = includeChanged
         b["config_worktree_changed"] = worktreeConfigChanged
         // 실행 중에 작업 트리 안에 새로 생긴 .git(중첩 git 자리, 5-4 보안) — 실행이 끝나도 남아 사람이 그 폴더에서 돌리는 git 이 그 설정을 쓴다
-        let nested = newNestedGit(repos.map(wt), since: num(run["started"]) ?? 0)
+        let scan = newNestedGit(repos.map(wt), since: num(run["started"]) ?? 0), nested = scan.paths
         b["nested_git_new"] = nested
+        b["nested_git_scan"] = ["complete": scan.complete, "why": scan.why ?? NSNull()] as [String: Any]
         br = b
         let other = created.filter { $0["by"] as? String == "other" }.compactMap { $0["branch"] as? String }
         if moved.isEmpty {
@@ -2273,6 +2298,9 @@ final class Engine {
         if !nested.isEmpty {
             let some = nested.prefix(3).map { $0.hasPrefix(home + "/") ? "~/" + $0.dropFirst(home.count + 1) : $0 }
             event("engine", "보안: 실행 중에 작업 트리 안에 git 자리 \(nested.count)곳이 새로 생겼습니다(\(some.joined(separator: ", "))\(nested.count > 3 ? " 등" : "")). 지우지 않았습니다. 그 폴더에서 git 을 돌리기 전에 사람이 확인하세요.")
+        }
+        if !scan.complete {
+            event("engine", "보안: 작업 트리를 다 훑지 못했습니다(\(scan.why ?? "?")). 실행 중에 새로 생긴 git 자리가 있을 수 있는 것으로 봅니다. 그 작업 트리의 하위 폴더에서 git 을 돌리기 전에 사람이 확인하세요.")
         }
         if !replaceNew.isEmpty || !tagsChanged.isEmpty || !shallowChanged.isEmpty || !includeChanged.isEmpty || !worktreeConfigChanged.isEmpty {
             event("engine", "보안: 실행 중에 replace 객체 \(replaceNew.count)개, 태그 변화 \(tagsChanged.count)개, shallow 변화 \(shallowChanged.count)곳, include/filter 변화 \(includeChanged.count)곳, config.worktree 변화 \(worktreeConfigChanged.count)곳이 생겼습니다. 사람이 push·검토 전에 확인하세요.")
@@ -2300,13 +2328,14 @@ final class Engine {
                 event("engine", "\(repoName(r)): \(i["restore_note"] as? String ?? "").")
                 continue
             }
-            let cur = currentBranch(r)
+            let p = pin(r)
+            let cur = currentBranch(r, env: p)
             if let o = original, cur == o { ok = true; note = "이미 출발 때 가지(\(o))에 있습니다" }
             else if (cur ?? "") != on { note = "실행 중에 가지가 바뀌어(지금 \(cur ?? "가지 없음")) 출발 때 가지로 되돌리지 않았습니다" }
-            else if porcelain(r) != (i["dirty_start"] as? [String] ?? []) {
-                note = "커밋하지 않은 변경 \(porcelain(r).count)개가 있어 출발 때 가지로 되돌리지 않았습니다(작업 트리는 \(on) 에 있습니다)"
+            else if porcelain(r, env: p) != (i["dirty_start"] as? [String] ?? []) {
+                note = "커밋하지 않은 변경 \(porcelain(r, env: p).count)개가 있어 출발 때 가지로 되돌리지 않았습니다(작업 트리는 \(on) 에 있습니다)"
             } else {
-                let sw = original.map { gitRun(["switch", $0], cwd: r) } ?? gitRun(["switch", "--detach", i["original_head"] as? String ?? "HEAD"], cwd: r)
+                let sw = original.map { gitRun(["switch", $0], cwd: r, env: p) } ?? gitRun(["switch", "--detach", i["original_head"] as? String ?? "HEAD"], cwd: r, env: p)
                 if sw.code == 0 { ok = true; note = "원래 작업 트리를 출발 때 가지(\(original ?? "가지 없는 자리"))로 되돌렸습니다" }
                 else { note = "출발 때 가지로 되돌리지 못했습니다: \(firstLine(sw.out))" }
             }
@@ -2396,9 +2425,15 @@ final class Engine {
         u["status"] = status; u["phase"] = "end"; u["ended"] = r3(now()); u["reason"] = reason
         if status == "capped" {
             // 상한 때 남기는 git 기록도 git 폴더를 먼저 본다(5-4 첫머리 보안) — status·diff 는 바꿔치기된 git 폴더의 filter 를 돌린다
-            u["git"] = unitGitOK(n)
-                ? ["status": safeGit(["status", "--porcelain"], cwd: cwd(n)), "diff_stat": safeGit(["diff", "--stat"], cwd: cwd(n))]
-                : ["note": "보안: git 폴더가 출발 때와 달라져 git status·diff 를 돌리지 않았습니다"]
+            // git 은 GIT_DIR·GIT_WORK_TREE 를 박아 그 저장소로만 돌린다(5-4 보안). 저장소 밖 작업 폴더면 남길 git 이 없다
+            if !unitGitOK(n) {
+                u["git"] = ["note": "보안: git 폴더가 출발 때와 달라져 git status·diff 를 돌리지 않았습니다"]
+            } else if let r = repoOf(cwd(n)) {
+                let p = pin(r)
+                u["git"] = ["status": safeGit(["status", "--porcelain"], cwd: cwd(n), env: p), "diff_stat": safeGit(["diff", "--stat"], cwd: cwd(n), env: p)]
+            } else {
+                u["git"] = ["note": "작업 폴더가 git 저장소가 아니라 git 기록이 없습니다"]
+            }
         }
         let ok = readJSON(unitDir(n) + "/result.json") is [String: Any]
         u["result_ok"] = ok
@@ -2653,6 +2688,13 @@ final class Engine {
         e["GIT_CONFIG_COUNT"] = String(k + 2)
         e["GIT_CONFIG_KEY_\(k + 1)"] = "core.fsmonitor"
         e["GIT_CONFIG_VALUE_\(k + 1)"] = "false"
+        // bare 저장소 꼴 폴더를 git 이 스스로 저장소로 쓰지 않게(5-4 보안): claude 가 세션을 열 때 부르는 git, 모델의 git, 판정 명령의 git 모두.
+        // 명령줄 무게의 설정이라 저장소 설정이 덮지 못한다(git 의 보호 설정). 저장소 뿌리 위로는 저장소를 찾지 않는다(GIT_CEILING_DIRECTORIES, 받침)
+        e["GIT_CONFIG_COUNT"] = String(k + 3)
+        e["GIT_CONFIG_KEY_\(k + 2)"] = "safe.bareRepository"
+        e["GIT_CONFIG_VALUE_\(k + 2)"] = "explicit"
+        let ceil = Set(repos.map { (canonical(wt($0)) as NSString).deletingLastPathComponent }).filter { $0 != "/" && !$0.isEmpty }.sorted()
+        if !ceil.isEmpty { e["GIT_CEILING_DIRECTORIES"] = ceil.joined(separator: ":") }
         return e
     }
 
