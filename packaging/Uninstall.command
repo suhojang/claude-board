@@ -12,6 +12,13 @@ echo "2) 앱·자동 실행 제거: /Applications 의 앱을 지우려면 관리
 pkill -x ClaudeBoard 2>/dev/null || true
 launchctl bootout "gui/$(id -u)/com.claude.board" 2>/dev/null || true
 rm -f "$HOME/Library/LaunchAgents/com.claude.board.plist"
+# 자율주행 엔진: 실행마다 com.claude.board.autopilot.<실행 id> 로 등록한다(끝나면 스스로 지움). 남은 것은 도는 실행까지 끄고 지운다
+# (시험 빌드의 com.claude.board.dev.autopilot.* 는 건드리지 않는다). 다음 3) 이 작업 트리를 지우기 전에 끈다
+for p in "$HOME"/Library/LaunchAgents/com.claude.board.autopilot.*.plist; do
+  [ -f "$p" ] || continue
+  launchctl bootout "gui/$(id -u)/$(basename "$p" .plist)" 2>/dev/null || true
+  rm -f "$p"
+done
 osascript -e 'tell application "System Events" to delete (every login item whose name is "Claude Board")' >/dev/null 2>&1 || true
 rm -rf "$HOME/Applications/Claude Board.app"
 sudo /bin/sh -c 'rm -rf "/Applications/Claude Board.app"; pkgutil --forget com.claude.board >/dev/null 2>&1; true' \
