@@ -16,7 +16,8 @@ import WebKit
 
 // 보드 자율주행 모드 2단계 첫 조각: 읽기 기초·자율주행 중·지난 실행(설계 docs/자율주행/설계.md 6장 2단계, 화면은 와이어프레임 5판).
 // 실행 상태의 주인은 엔진(claude-autopilot)이다. 보드는 엔진이 남긴 실행 폴더(runs/<실행 id>/)와 기록 저장소(private/records.sqlite)를
-// 읽어 그리고, 사람이 누른 일시정지·재개·중단만 control.json 으로 남긴다 — 보드의 유일한 쓰기이고 끝난 실행에는 쓰지 않는다(엔진 control 명령과 같은 규칙).
+// 읽어 그리고, 사람이 누른 일시정지·재개·중단·멈추고 다시 출발은 control.json 으로, 방향을 바꿀 말은 inbox/<시각>.md 로 남긴다(2단계 5-4) —
+// 실행 폴더에 보드가 쓰는 것은 이 둘이고 끝난 실행에는 쓰지 않는다(엔진 control 명령과 같은 규칙).
 // 엔진 전용 자리(private/<실행 id>/, runs/*/engine/, pinned/)는 읽지 않는다
 
 // 자율주행 뿌리 — 엔진의 autopilotRoot 와 같은 자리. 시험 빌드(번들 id com.claude.board.dev)는 Claude Board Dev 뿌리라
@@ -117,6 +118,11 @@ struct APUnit: Equatable, Identifiable {
 
 struct APEvent: Equatable { let ts: Double; let who: String; let text: String }
 
+// 멈추고 다시 출발을 엔진이 받은 표지(run.json restart): 받은 시각, 마친 뒤 멈출 단위(없으면 바로), 멈춘 시각
+struct APRestartMark: Equatable { let asked: Double; let unit: Int?; let stopped: Double? }
+// 보드가 inbox/ 에 쓴 말 — 엔진이 받기 전까지 자율주행 중 화면에 "엔진이 받기를 기다립니다"로 보인다
+struct APSaid: Equatable { let file: String; let to: String; let text: String; let at: Double }
+
 // 실행 하나 — run.json·queue.json·units/<n>/engine.json 을 합친 것
 struct APRun: Equatable, Identifiable {
     let id: String
@@ -149,6 +155,8 @@ struct APRun: Equatable, Identifiable {
     var wrapped = false                 // 끝 정리(하네스 끝 검사·기록)를 마침 — 엔진 finish 가 받는 실행
     var mergeWaiting = false            // 끝났고 합치기·승격에 남은 단계가 있음(보드 본체의 끝난 실행 줄, 2단계 5-3)
     var stashes: [APStash] = []         // 읽기 전용 자리에 남은 변경을 엔진이 보관한 것(branches.stashed, 5-3b ①)
+    var inbox: [APInboxEntry] = []      // 방향을 바꿀 말 — 엔진이 받은 것과 어떻게 됐는지(run.json inbox, 2단계 5-4)
+    var restart: APRestartMark?         // 멈추고 다시 출발 — 엔진이 받은 것(run.json restart, 5-4)
 
     var active: Bool { !state.isEmpty && !["done", "stopped", "error"].contains(state) }
     var jira: Bool { units.contains { $0.story != nil } }
@@ -212,6 +220,12 @@ struct APRun: Equatable, Identifiable {
         x.checkRetries = Int(apNum(r["check_retries"]) ?? 2)
         x.checkTimeout = apNum(r["check_timeout_min"]) ?? 10
         x.controlSeen = apNum(r["control_seen"]) ?? 0
+        if let a = r["inbox"] as? [Any], let d = try? JSONSerialization.data(withJSONObject: a) {
+            x.inbox = (try? JSONDecoder().decode([APInboxEntry].self, from: d)) ?? []
+        }
+        if let rs = r["restart"] as? [String: Any] {
+            x.restart = APRestartMark(asked: apNum(rs["asked"]) ?? 0, unit: apNum(rs["unit"]).map { Int($0) }, stopped: apNum(rs["stopped"]))
+        }
         let br = r["branches"] as? [String: Any] ?? [:]
         let repos = br["repos"] as? [String: Any] ?? [:]
         for (k, v) in repos {
@@ -337,6 +351,19 @@ enum APScreen: Equatable {
 
 struct APSent: Equatable { let action: String; let ts: Double }
 
+// 보드가 쓰는 inbox/ 의 진짜 어댑터(규칙 apInboxSend 의 포트 APInboxOut) — 임시 파일에 쓰고 이름을 바꿔 엔진이 반쯤 쓴 파일을 읽지 않게
+struct APInboxBoardOut: APInboxOut {
+    let dir: String
+    func exists(_ name: String) -> Bool { FileManager.default.fileExists(atPath: dir + "/" + name) }
+    func write(_ name: String, _ data: Data) -> Bool {
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        let tmp = dir + "/.tmp-\(getpid())-" + name
+        guard FileManager.default.createFile(atPath: tmp, contents: data), rename(tmp, dir + "/" + name) == 0 else { unlink(tmp); return false }
+        return true
+    }
+}
+let apInboxStamp = formatter("yyyyMMdd-HHmmss-SSS")
+
 // 진행 기록 묶음 — 단위 번호(출발 0, 끝 -1)와 그 줄들(오래된 것부터)
 struct APLogGroup: Identifiable {
     let id: Int
@@ -351,6 +378,10 @@ struct APLogGroup: Identifiable {
     @Published private(set) var viewed: APRun?            // 자율주행 중 화면이 보는 실행 — 끝난 뒤에도 그 화면에서는 끝 상태로 남는다
     @Published private(set) var events: [APEvent] = []
     @Published private(set) var sent: [String: APSent] = [:]   // 보낸 요청 — 엔진이 받을 때(run.json control_seen)까지 단추를 잠근다
+    @Published private(set) var said: [String: [APSaid]] = [:]   // 보낸 말 가운데 엔진이 아직 받지 않은 것(실행 id → 차례대로, 5-4)
+    @Published private(set) var sayError: [String: String] = [:]
+    // 이 보드가 멈추고 다시 출발을 보낸 실행 — 끝 정리까지 마치면 한 번 출발 준비를 저절로 연다(규칙 apReopenIntake, 5-4). 보드를 끄면 잊고 화면의 단추로 연다
+    private var restartAsked: Set<String> = [], reopened: Set<String> = []
     @Published private(set) var history = APHistory()
     @Published private(set) var detail: APPastDetail?
     // 지난 실행에서 거른 프로젝트(nil 이면 모든 프로젝트)와 상세에 보이는 실행 — 상세는 거른 목록 안에서 고른다(규칙 apHistoryPick, 5-3b ⑥)
@@ -427,6 +458,25 @@ struct APLogGroup: Identifiable {
             return r.controlSeen + 0.0005 < s.ts && now - s.ts < 20
         }
         if keep != sent { sent = keep }
+        // 엔진이 받은 말은 보낸 말 목록에서 뺀다(run.json inbox 에 같은 파일 이름)
+        var pruned: [String: [APSaid]] = [:]
+        for (id, list) in said {
+            let r = live.first { $0.id == id } ?? (view?.id == id ? view : nil) ?? cache.values.compactMap(\.run).first { $0.id == id }
+            let got = Set(r?.inbox.map(\.file) ?? [])
+            let left = list.filter { !got.contains($0.file) }
+            if !left.isEmpty { pruned[id] = left }
+        }
+        if pruned != said { said = pruned }
+        // 멈추고 다시 출발로 멈춘 실행 — 끝 정리를 마치면 이 실행을 이어 가는 출발 준비를 한 번 연다. 다른 출발 준비가 열려 있으면 그것을 버리지 않고 단추로 남긴다
+        for id in restartAsked where !reopened.contains(id) {
+            guard let r = cache.values.compactMap(\.run).first(where: { $0.id == id }) else { continue }
+            guard apReopenIntake(state: r.state, wrapped: r.wrapped, flag: r.restart != nil, asked: true, opened: false, project: r.project) else { continue }
+            reopened.insert(id)
+            let s = APStart.shared
+            if !s.shown, !s.preparing, !s.starting, s.source != "topic", !s.hasDraft || s.pastId == id {
+                DispatchQueue.main.async { MainActor.assumeIsolated { APStart.shared.open(continuing: id) } }
+            }
+        }
         if let v = viewing { readEvents(base + "/" + v) } else if !evDir.isEmpty { evDir = ""; evOffset = 0; evRest = Data(); events = [] }
         if case .history(let sel) = screen { readHistory(sel) }
     }
@@ -536,6 +586,27 @@ struct APLogGroup: Identifiable {
             return
         }
         sent[run.id] = APSent(action: action, ts: ts)
+        if action == "restart_from_intake" { restartAsked.insert(run.id) }
+    }
+
+    // 방향을 바꿀 말 보내기(2단계 5-4, 와이어프레임 자율주행 중 ③ "한마디") — 규칙 apInboxSend 가 확인하고 inbox/<yyyyMMdd-HHmmss-SSS>.md 로 쓴다.
+    // "지금 단위에"는 지금 도는 단위 번호를 머리에 적는다(엔진이 받을 때 그 단위가 끝났으면 다른 단위에 넘기지 않게). 되면 true
+    func say(_ text: String, to: APInboxTo, _ run: APRun) -> Bool {
+        let state = (apRead(run.dir + "/run.json") as? [String: Any])?["state"] as? String ?? ""
+        let unit = to == .now ? run.units.first { $0.status == "running" }?.n : nil
+        let now = Date()
+        let at = (now.timeIntervalSince1970 * 1000).rounded() / 1000
+        switch apInboxSend(APInboxNote(to: to, unit: unit, at: at, text: text), runState: state, stamp: apInboxStamp.string(from: now),
+                           out: APInboxBoardOut(dir: run.dir + "/inbox")) {
+        case .sent(let name):
+            said[run.id, default: []].append(APSaid(file: name, to: to.rawValue, text: text.trimmingCharacters(in: .whitespacesAndNewlines), at: at))
+            sayError[run.id] = nil
+            return true
+        case .refused(let why):
+            sayError[run.id] = why
+            boardLog("자율주행 \(run.id): 말을 보내지 못했습니다(\(why))")
+            return false
+        }
     }
 
     // 진행 기록을 단위별로 묶는다. events.jsonl 에는 단위 번호가 없어 단위의 시작·끝 시각(engine.json)으로 가른다:
@@ -543,7 +614,8 @@ struct APLogGroup: Identifiable {
     // 앞 단위. 첫 단위 앞은 출발(0), 실행이 끝났다는 줄부터는 끝(-1)
     static func groups(_ run: APRun, _ events: [APEvent]) -> [APLogGroup] {
         let starts = run.units.compactMap { u in u.started.map { (u.n, $0, u.ended) } }.sorted { $0.1 < $1.1 }
-        let finishes = ["자율주행을 마쳤습니다", "사람이 중단해 실행을 마칩니다", "엔진 오류로 멈춥니다", "고정한 실행 설정이 출발 때와 달라"]
+        let finishes = ["자율주행을 마쳤습니다", "사람이 중단해 실행을 마칩니다", "엔진 오류로 멈춥니다", "고정한 실행 설정이 출발 때와 달라",
+                        "멈추고 다시 출발: 사람이 요청해 여기서 멈춥니다"]
         var out: [Int: [APEvent]] = [:], order: [Int] = []
         var finished = false
         for e in events {
@@ -640,7 +712,7 @@ struct APPastRun: Equatable, Identifiable {
     }
     var stateLabel: (String, Color)? {
         switch state {
-        case "stopped": ("중단됨", APColor.muted)
+        case "stopped": apIsRestartStop(state: state, reason: reason) ? ("멈추고 다시 출발", APColor.stop) : ("중단됨", APColor.muted)
         case "error": ("오류로 멈춤", APColor.fail)
         default: nil
         }
@@ -1036,7 +1108,7 @@ func apStateChip(_ r: APRun) -> (String, Color) {
     case "waiting_stopline": return ("멈출 선 대기", APColor.stop)
     case "waiting_precheck": return ("환경 확인 대기", APColor.stop)
     case "done": return ("끝남", APColor.ok)
-    case "stopped": return ("중단됨", APColor.muted)
+    case "stopped": return r.restart?.stopped != nil ? ("멈추고 다시 출발", APColor.stop) : ("중단됨", APColor.muted)
     case "error": return ("오류로 멈춤", APColor.fail)
     case "starting": return ("출발 중", APColor.work)
     default:
@@ -1397,6 +1469,7 @@ struct APRunningScreen: View {
                 header(run)
                 if let u = run.current { unitCard(run, u) }
                 controls(run, compact: false)
+                if run.active || !run.inbox.isEmpty || !(ap.said[run.id] ?? []).isEmpty { APSayBox(ap: ap, run: run) }
                 nextBlock(run)
                 logBlock(run)
                 usageBlock(run)
@@ -1532,10 +1605,12 @@ struct APRunningScreen: View {
         }
     }
 
-    // 단추: 일시정지(또는 재개)·중단(확인 없이, 사용자 결정)·멈추고 다시 출발(엔진과 함께 바뀌는 다음 조각이라 잠금)
+    // 단추: 일시정지(또는 재개)·중단(확인 없이, 사용자 결정)·멈추고 다시 출발(지금 단위를 마친 뒤 멈추고 이 실행을 이어 가는 출발 준비를 다시 엶, 2단계 5-4)
     private func controls(_ run: APRun, compact: Bool) -> some View {
         let wait = ap.sent[run.id]
         let can = run.active && wait == nil
+        let restartWhy = run.project == nil ? "프로젝트가 없는 실행이라 이어 가는 출발 준비를 열 수 없습니다(출발 화면으로 출발한 실행만)"
+            : run.restart != nil ? "이미 받았습니다. 지금 단위를 마친 뒤 멈춥니다" : ""
         return VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
                 if run.state == "paused" {
@@ -1548,7 +1623,11 @@ struct APRunningScreen: View {
                 APButton(title: "중단", tint: APColor.fail, enabled: can, help: "실행을 마칩니다. 다시 띄우지 않습니다", axid: "ap-stop") {
                     ap.send("stop", run)
                 }
-                APButton(title: "멈추고 다시 출발", enabled: false, help: "아직 만들지 않았습니다(출발 화면과 함께)") {}
+                APButton(title: "멈추고 다시 출발", enabled: can && restartWhy.isEmpty,
+                         help: restartWhy.isEmpty ? "지금 단위를 마친 뒤 멈추고, 이 실행을 이어 가는 출발 준비를 다시 엽니다. 목표나 범위를 바꿀 때 씁니다" : restartWhy,
+                         axid: "ap-restart") {
+                    ap.send("restart_from_intake", run)
+                }
                 if !compact {
                     Spacer(minLength: 4)
                     Text("실행 합계 \(apUSD(run.totalCost)) USD").boardFont(10.5).monospacedDigit().foregroundStyle(.secondary).fixedSize()
@@ -1558,8 +1637,23 @@ struct APRunningScreen: View {
                 Text("\(apControlNames[w.action] ?? w.action) 요청을 보냈습니다. 엔진이 받기를 기다립니다…")
                     .boardFont(10.5).foregroundStyle(APColor.stop)
                     .accessibilityIdentifier("ap-sent")
-            } else if !run.active {
-                HStack(spacing: 6) {
+            } else if let rs = run.restart, run.active {
+                Text(restartNote(rs, paused: run.state == "paused"))
+                    .boardFont(10.5).foregroundStyle(APColor.stop).fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("ap-restart-note")
+            }
+            if !run.active, wait == nil {
+                if run.restart != nil, run.project != nil {
+                    WrapRow(spacing: 6) {
+                        Text(run.restart?.stopped != nil ? "멈추고 다시 출발로 멈췄습니다." : "멈추고 다시 출발을 받은 뒤 끝났습니다.").boardFont(10.5).foregroundStyle(APColor.stop)
+                        if run.wrapped {
+                            APBack(title: "출발 준비 열기 →", axid: "ap-restart-open") { APStart.shared.open(continuing: run.id) }
+                        } else {
+                            Text("엔진이 끝 정리를 마치면 출발 준비를 엽니다.").boardFont(10.5).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                WrapRow(spacing: 6) {
                     Text("이 실행은 끝났습니다.").boardFont(10.5).foregroundStyle(.secondary)
                     APBack(title: "지난 실행에서 보기 →", axid: "ap-to-history") { ap.screen = .history(run.id) }
                     if run.wrapped, !run.work.isEmpty || !run.storyBranches.isEmpty {
@@ -1570,6 +1664,12 @@ struct APRunningScreen: View {
         }
         .padding(compact ? 0 : 10)
         .background(RoundedRectangle(cornerRadius: 12).fill(Color.white.opacity(compact ? 0 : 0.04)))
+    }
+
+    private func restartNote(_ rs: APRestartMark, paused: Bool) -> String {
+        let when: String = rs.unit.map { "지금 단위(단위 \($0))를 마친 뒤" } ?? "곧"
+        let tail: String = paused ? " 일시정지 중이라 재개해야 그 단위를 마칩니다. 바로 멈추려면 중단합니다." : ""
+        return "멈추고 다시 출발을 받았습니다. \(when) 멈추고, 멈추면 이 실행을 이어 가는 출발 준비를 엽니다.\(tail)"
     }
 
     private func blockTitle(_ s: String, _ note: String = "") -> some View {
@@ -1716,6 +1816,97 @@ struct APRunningScreen: View {
         if !run.existing.isEmpty { s.append("기존 가지: \(run.existing.prefix(8).joined(separator: " · "))\(run.existing.count > 8 ? " 등" : "")") }
         if !run.jira, !run.work.isEmpty { s.append("커밋은 \(run.work) 에만") }
         return s.joined(separator: " · ")
+    }
+}
+
+// 방향을 바꿀 말(와이어프레임 자율주행 중 ③ "한마디", 2단계 5-4) — "지금 단위에"(이 세션의 다음 차례)·"다음 단위부터"(뒤 단위의 첫 입력)를 고르고 보낸다.
+// 아래에 보낸 말과 엔진이 한 일(받음·넘김·붙임·넘기지 못함과 까닭)을 최근 것부터. 작은 크기에서는 그리지 않는다(와이어프레임 ⑨)
+struct APSayBox: View {
+    @ObservedObject var ap: AutopilotStore
+    let run: APRun
+    @State private var to: APInboxTo = .now
+    @State private var text = ""
+
+    private struct Line: Identifiable { let id: String; let at: Double; let to: String; let text: String; let status: String; let detail: String; let color: Color }
+
+    var body: some View {
+        let running = run.units.first { $0.status == "running" }
+        let next = run.units.first { $0.status == "pending" && $0.n > (running?.n ?? 0) }
+        let count = text.trimmingCharacters(in: .whitespacesAndNewlines).count
+        VStack(alignment: .leading, spacing: 6) {
+            if run.active {
+                WrapRow(spacing: 6) {
+                    Text("한마디").boardFont(11.5, weight: .bold)
+                    APButton(title: "지금 단위에", tint: to == .now ? Palette.accent : nil, help: "이 세션의 다음 차례에 넘깁니다", axid: "ap-say-now") { to = .now }
+                    APButton(title: "다음 단위부터", tint: to == .next ? Palette.accent : nil, help: "뒤에 시작하는 단위의 첫 입력에 모두 붙입니다", axid: "ap-say-next") { to = .next }
+                }
+                ZStack(alignment: .topLeading) {
+                    TextEditor(text: $text)
+                        .font(.system(size: 12))
+                        .scrollContentBackground(.hidden)
+                        .frame(minHeight: 44, maxHeight: 110)
+                        .padding(4)
+                        .background(RoundedRectangle(cornerRadius: 8).fill(Color.black.opacity(0.25)))
+                        .accessibilityIdentifier("ap-say-text")
+                    if text.isEmpty {
+                        Text("예: 정렬은 화면에 보이는 순서와 같아야 합니다").boardFont(11.5).foregroundStyle(.secondary.opacity(0.7))
+                            .padding(.horizontal, 9).padding(.vertical, 8).allowsHitTesting(false)
+                    }
+                }
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    apNote(to == .now
+                           ? (running.map { "지금 단위에 보내면 이 세션의 다음 차례에 들어갑니다(단위 \($0.n))." }
+                              ?? (next.map { "지금 도는 단위가 없어 다음에 시작하는 단위 \($0.n) 의 첫 입력에 붙습니다." } ?? "남은 단위가 없습니다."))
+                           : (next.map { "다음 단위부터 보내면 단위 \($0.n) 부터 뒤 단위의 첫 입력에 모두 붙습니다." } ?? "뒤에 남은 단위가 없습니다."))
+                        .accessibilityIdentifier("ap-say-hint")
+                    Spacer(minLength: 4)
+                    Text(verbatim: "\(count)/\(apInboxMaxChars)").boardFont(10).monospacedDigit().foregroundStyle(count > apInboxMaxChars ? APColor.fail : .secondary).fixedSize()
+                    APButton(title: "보내기", primary: true, enabled: count > 0 && count <= apInboxMaxChars,
+                             help: count == 0 ? "보낼 말을 써 주세요" : count > apInboxMaxChars ? "\(apInboxMaxChars)자까지 보낼 수 있습니다" : "inbox 에 써서 엔진에 넘깁니다", axid: "ap-say-send") {
+                        if ap.say(text, to: to, run) { text = "" }
+                    }
+                }
+                apNote("말은 방향만 바꿉니다. 대기열(단위)·판정·쓰기 범위·가지 보호는 출발 때 그대로이고, 범위 밖의 말은 모델이 하지 않고 미룬 일로 적습니다.")
+                if let e = ap.sayError[run.id] { apNote(e, APColor.fail).accessibilityIdentifier("ap-say-error") }
+            }
+            let lines = lines()
+            if !lines.isEmpty {
+                Text("보낸 말 \(lines.count)").boardFont(11, weight: .semibold).padding(.top, run.active ? 4 : 0)
+                ForEach(lines) { l in
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 6) {
+                            Text(apClock(l.at)).boardFont(10, design: .monospaced).foregroundStyle(.secondary).fixedSize()
+                            APChip(text: l.to == "next" ? "다음 단위부터" : "지금 단위에")
+                            APChip(text: l.status, color: l.color, strong: true)
+                            Spacer(minLength: 0)
+                        }
+                        Text(l.text).boardFont(11).lineLimit(3).fixedSize(horizontal: false, vertical: true)
+                        if !l.detail.isEmpty { apNote(l.detail) }
+                    }
+                    .padding(.leading, 4)
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier("ap-said-\(l.id)")
+                }
+            }
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 12).fill(Color.white.opacity(0.04)))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("ap-say")
+    }
+
+    // 엔진이 받은 말(run.json inbox)과 아직 받지 않은 말(보드가 쓴 것), 최근 것부터
+    private func lines() -> [Line] {
+        var out: [Line] = run.inbox.filter { $0.status != "bad" || !$0.file.isEmpty }.map { e in
+            let l = apInboxLabel(e)
+            let c: Color = ["waiting": APColor.wait, "delivered": APColor.ok, "applied": APColor.ok, "bad": APColor.fail][e.status] ?? APColor.muted
+            return Line(id: e.file, at: e.sent ?? e.received, to: e.to, text: e.status == "bad" ? "(읽지 못한 파일 \(e.file))" : e.text, status: l.status, detail: l.detail, color: c)
+        }
+        for s in ap.said[run.id] ?? [] where !out.contains(where: { $0.id == s.file }) {
+            out.append(Line(id: s.file, at: s.at, to: s.to, text: s.text, status: run.active ? "보냄" : "받지 못함",
+                            detail: run.active ? "엔진이 받기를 기다립니다(1초 안에 받습니다)" : "실행이 끝나 엔진이 받지 못했습니다", color: run.active ? APColor.stop : APColor.muted))
+        }
+        return out.sorted { $0.at > $1.at }
     }
 }
 
@@ -3734,6 +3925,7 @@ struct APStep1: View {
                 if !s.past.isEmpty, s.source == "continue" { pastList }
                 if s.hasDraft { pathBox }
                 if !s.leftBranches.isEmpty { APLeftBranches(s: s) }
+                if !s.jira, let r = s.pastRun, r.merge?.hasWaiting == true { APUnmergedNote(s: s, run: r) }
                 if s.jira { APEpicBox(s: s) }
                 if s.hasDraft { importBox }
             }
@@ -3848,6 +4040,20 @@ struct APLeftBranches: View {
                    + "합치기·승격에서 그 스토리를 버리거나(dev 에 합치기 전), dev·live 에 합친 뒤 '합친 가지 지우기'와 '합치지 못한 작업 가지도 지우기'로 치운 뒤 이어 갑니다. "
                    + "뒤 실행이 같은 이름으로 다시 만든 가지면 그 실행의 합치기·승격에서 다룹니다.")
             APButton(title: "합치기·승격 →", primary: true, help: "지난 실행의 합치기·승격을 엽니다. 이 준비는 남습니다", axid: "ap-left-merge") { s.toMerge() }
+        }
+    }
+}
+
+// 이어 갈 실행의 자율주행 가지를 아직 합치지 않음(Jira 아닌 실행, 2단계 5-4 — 멈추고 다시 출발 뒤가 흔한 때) — 새 실행은 고른 출발 가지에서
+// 시작하므로 지난 실행이 한 일을 보지 않는다. 막지는 않고 알리며 합치기·승격으로 잇는다(지난 가지는 그대로 남는다)
+struct APUnmergedNote: View {
+    @ObservedObject var s: APStart
+    let run: APPastRun
+    var body: some View {
+        APBox(title: "지난 실행의 일을 아직 합치지 않았습니다", note: "자율주행 가지 autopilot/\(run.id)", tint: APColor.wait, axid: "ap-unmerged") {
+            apNote("새 실행은 출발 확인에서 고른 출발 가지(dev 등)에서 시작하므로, 지난 실행이 통과시킨 단위의 커밋을 보지 않습니다. "
+                   + "이어서 하려면 합치기·승격에서 먼저 받는 가지에 합친 뒤 출발합니다. 그대로 출발해도 되고, 지난 가지는 남습니다.")
+            APButton(title: "합치기·승격 →", primary: true, help: "지난 실행의 합치기·승격을 엽니다. 이 준비는 남습니다", axid: "ap-unmerged-merge") { s.toMerge() }
         }
     }
 }

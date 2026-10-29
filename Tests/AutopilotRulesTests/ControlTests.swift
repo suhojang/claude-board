@@ -1,6 +1,7 @@
 // 사람이 끼어드는 요청 control.json 규칙(Sources/AutopilotRules/Control.swift) 시험 — 2026-10-30 2단계 5-4.
 // 옮기기 때 옮기기 전 식(b6cb0eb 의 엔진 readControl·pollControl·pausedLoop·cmdControl, 보드 send)과 같은 입력 234줄
-// (control.json 꼴 열 × 받은 ts 여섯 × 파일 시각 둘, 요청 여덟 × 도는 중·일시정지, 요청 여덟 × 상태 열)의 덤프가 같았다. 표는 그 가운데 갈래마다 고른 줄
+// (control.json 꼴 열 × 받은 ts 여섯 × 파일 시각 둘, 요청 여덟 × 도는 중·일시정지, 요청 여덟 × 상태 열)의 덤프가 같았다. 표는 그 가운데 갈래마다 고른 줄.
+// 같은 차례의 고치기에서 멈추고 다시 출발(restart_from_intake)을 받게 바꾼 줄은 note 에 "5-4" 를 적었다
 import Foundation
 import Testing
 import AutopilotRules
@@ -40,6 +41,8 @@ private let outcomeRows: [OutcomeRow] = [
     .init(note: "일시정지 중 중단은 엔진이 마치며 적는다", action: "stop", paused: true, step: .stop, text: nil),
     .init(note: "일시정지 중 일시정지", action: "pause", paused: true, step: .none, text: "이미 일시정지 상태입니다."),
     .init(note: "일시정지 중 모르는 요청", action: "giveback", paused: true, step: .none, text: "아직 엔진이 하지 못하는 요청(giveback)이라 넘깁니다."),
+    .init(note: "5-4: 멈추고 다시 출발(전에는 넘김), 언제 멈출지는 apRestartPlan", action: "restart_from_intake", paused: false, step: .restart, text: nil),
+    .init(note: "5-4: 일시정지 중 멈추고 다시 출발", action: "restart_from_intake", paused: true, step: .restart, text: nil),
 ]
 
 struct BoardControlRow: Row {
@@ -56,6 +59,8 @@ private let boardControlRows: [BoardControlRow] = [
     .init(note: "끝난 실행에는 쓰지 않는다", action: "stop", state: "done", want: false),
     .init(note: "중단된 실행에는 쓰지 않는다", action: "resume", state: "stopped", want: false),
     .init(note: "모르는 요청은 쓰지 않는다", action: "takeover", state: "running", want: false),
+    .init(note: "5-4: 멈추고 다시 출발(전에는 쓰지 않음)", action: "restart_from_intake", state: "waiting_stopline", want: true),
+    .init(note: "5-4: 끝난 실행에는 멈추고 다시 출발도 쓰지 않는다", action: "restart_from_intake", state: "stopped", want: false),
 ]
 
 @Suite("자율주행 control.json: 사람이 끼어드는 요청") struct ControlTests {
@@ -78,6 +83,6 @@ private let boardControlRows: [BoardControlRow] = [
     func 이름() {
         #expect(["done", "stopped", "error"].allSatisfy(apRunEnded))
         #expect(!["", "starting", "running", "paused", "waiting_limit", "waiting_stopline", "waiting_precheck"].contains(where: apRunEnded))
-        #expect(apControlActions.map { apControlNames[$0] ?? "" } == ["일시정지", "재개", "중단"])
+        #expect(apControlActions.map { apControlNames[$0] ?? "" } == ["일시정지", "재개", "중단", "멈추고 다시 출발"])   // 5-4 에서 넷째
     }
 }

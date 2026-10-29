@@ -1479,16 +1479,35 @@ extension RecordsDB {
 
 // MARK: - 엔진
 
-enum Stop { case pause, stop }
+enum Stop { case pause, stop, restart }   // restart: 멈추고 다시 출발을 받았고 도는 단위가 없어 바로 멈춘다(5-4)
 enum TurnEnd { case finished, limit(Double?), capped(String), paused, stopped, failed(String) }
 enum CheckEnd { case passed, failed(Int32, String), capped(String), paused, stopped }
-enum WaitEnd { case elapsed, paused, stopped }
+enum WaitEnd { case elapsed, paused, stopped, restart }
 
 let stateLabel = ["starting": "준비 중", "running": "진행 중", "waiting_limit": "한도 대기", "waiting_stopline": "멈출 선 대기",
                   "waiting_precheck": "시험 환경 대기",
                   "paused": "일시정지", "stopped": "중단됨", "done": "끝남", "error": "엔진 오류로 멈춤"]
 let unitLabel = ["pending": "대기", "running": "진행 중", "done": "통과", "failed": "미통과", "capped": "상한에서 멈춤", "stopped": "중단", "skipped": "건너뜀"]
 let capLabel = ["minutes": "시간", "usd": "비용", "weekly": "주간 사용률"]
+
+// 방향을 바꿀 말(inbox/, 2단계 5-4)의 진짜 어댑터 — 규칙 apInboxReceive(AutopilotRules/Inbox.swift)가 이 포트로만 읽는다.
+// 폴더가 링크이거나 없으면 빈 목록, 파일은 링크가 아닌 보통 파일만, 크기 상한 안에서 UTF-8 글로
+struct EngineInboxFiles: APInboxFiles {
+    let dir: String
+    func names() -> [String] {
+        guard !isLink(dir), isDir(dir) else { return [] }
+        return (try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? []
+    }
+    func read(_ name: String) -> APInboxRead {
+        let p = dir + "/" + name
+        var st = stat()
+        guard lstat(p, &st) == 0, (st.st_mode & S_IFMT) == S_IFREG else { return .notFile }
+        if st.st_size > off_t(apInboxMaxBytes) { return .tooBig(Int(st.st_size)) }
+        guard let d = FileManager.default.contents(atPath: p), let t = String(data: d, encoding: .utf8) else { return .unreadable }
+        return .text(t)
+    }
+}
+struct EngineClock: APClock { var now: Date { Date() } }
 
 final class Engine {
     let dir: String
@@ -1608,9 +1627,10 @@ final class Engine {
         return a
     }
 
-    // 도는 동안 1초마다 부른다: 일시정지·중단이면 그 값을, 아니면 nil
+    // 도는 동안 1초마다 부른다: 일시정지·중단(도는 단위가 없을 때의 멈추고 다시 출발 포함)이면 그 값을, 아니면 nil. 방향을 바꿀 말(inbox/)도 같은 때 읽는다
     func pollControl() -> Stop? {
         if gotTerm != 0 { terminated() }
+        pollInbox()
         guard let a = readControl() else { return nil }
         // 받은 요청으로 할 일은 규칙 apControlOutcome
         let o = apControlOutcome(a, paused: false)
@@ -1618,8 +1638,60 @@ final class Engine {
         switch o.step {
         case .pause: return .pause
         case .stop: return .stop
+        case .restart: return askRestart(paused: false) ? .restart : nil
         case .resume, .none: return nil
         }
+    }
+
+    // MARK: 방향을 바꿀 말과 멈추고 다시 출발(2단계 5-4)
+
+    var statuses: [String] { queue.map { $0["status"] as? String ?? "pending" } }
+    // run.json 의 inbox — 받은 말과 그 말이 어떻게 됐는지(규칙의 APInboxEntry 를 JSON 그대로)
+    var inbox: [APInboxEntry] {
+        get {
+            guard let a = run["inbox"] as? [Any], let d = try? JSONSerialization.data(withJSONObject: a) else { return [] }
+            return (try? JSONDecoder().decode([APInboxEntry].self, from: d)) ?? []
+        }
+        set { run["inbox"] = (try? JSONEncoder().encode(newValue)).flatMap { try? JSONSerialization.jsonObject(with: $0) } ?? [] as [Any] }
+    }
+    // inbox/ 의 새 파일을 읽어 run.json 에 받은 줄을 더하고 진행 기록에 한 줄씩(규칙 apInboxReceive). 어느 단위에 붙일지는 받을 때 정한다
+    func pollInbox() {
+        let new = apInboxReceive(files: EngineInboxFiles(dir: dir + "/inbox"), known: inbox, statuses: statuses, clock: EngineClock())
+        guard !new.isEmpty else { return }
+        inbox = inbox + new
+        saveRun()
+        for e in new { event("board", apInboxReceivedText(e, unitRunning: e.unit.map { statuses.indices.contains($0 - 1) && statuses[$0 - 1] == "running" } ?? false)) }
+    }
+    // 단위가 끝날 때 그 단위에 넘기지 못한 말을 닫는다(규칙 apInboxCloseUnit)
+    func closeInbox(unit n: Int, _ status: String) {
+        var es = inbox
+        let k = apInboxCloseUnit(&es, unit: n, ended: status)
+        guard k > 0 else { return }
+        inbox = es; saveRun()
+        event("board", "단위 \(n) 에 넘기지 못한 사람의 말이 \(k)개 있습니다(단위가 \(unitLabel[status] ?? status)(으)로 끝남). 보드의 보낸 말 줄에 남습니다.")
+    }
+    // 멈추고 다시 출발을 받음 — 언제 멈출지는 규칙 apRestartPlan. run.json 의 restart 에 받은 것을 남긴다. 바로 멈춰야 하면 true
+    func askRestart(paused: Bool) -> Bool {
+        let cur = run["restart"] as? [String: Any]
+        let plan = apRestartPlan(statuses: statuses, asked: cur != nil)
+        event("board", apRestartText(plan, paused: paused, unit: (cur?["unit"] as? NSNumber)?.intValue))
+        switch plan {
+        case .already: return false
+        case .afterUnit(let n):
+            run["restart"] = ["asked": r3(now()), "ts": run["control_seen"] ?? NSNull(), "unit": n, "plan": "after_unit"] as [String: Any]
+            saveRun(); return false
+        case .now:
+            run["restart"] = ["asked": r3(now()), "ts": run["control_seen"] ?? NSNull(), "unit": NSNull(), "plan": "now"] as [String: Any]
+            saveRun(); return true
+        }
+    }
+    // 멈추고 다시 출발로 멈춘다 — 남은 단위는 대기 그대로(보드가 이 실행을 이어 가는 출발 준비를 연다). 상태는 stopped, 이유는 apRestartReason
+    func restartStop() -> Never {
+        var r = run["restart"] as? [String: Any] ?? [:]
+        r["stopped"] = r3(now()); run["restart"] = r
+        let left = statuses.filter { $0 == "pending" }.count
+        event("board", "멈추고 다시 출발: 사람이 요청해 여기서 멈춥니다. 남은 단위 \(left)개는 출발 준비에서 다시 고릅니다.")
+        finish("stopped", apRestartReason)
     }
 
     // 누가 엔진을 끄면(SIGTERM) claude 는 같은 group 이라 함께 끝난다. 상태는 그대로 두어 다시 뜨면 잇는다
@@ -1711,6 +1783,7 @@ final class Engine {
         }
         while true {
             if state == "paused" { pausedLoop(); continue }
+            pollInbox()
             guard let n = queue.firstIndex(where: { $0["status"] as? String == "running" }).map({ $0 + 1 })
                     ?? queue.firstIndex(where: { ($0["status"] as? String ?? "pending") == "pending" }).map({ $0 + 1 }) else {
                 let c = { (s: String) in self.queue.filter { $0["status"] as? String == s }.count }
@@ -1718,6 +1791,8 @@ final class Engine {
                 finish("done", "대기열을 모두 마쳤습니다.")
             }
             if queue[n - 1]["status"] as? String != "running" {
+                // 멈추고 다시 출발을 받았으면 새 단위를 시작하지 않고 멈춘다(규칙 apRestartStopsBefore, 남은 단위가 없으면 위에서 보통처럼 끝남)
+                if apRestartStopsBefore(asked: run["restart"] is [String: Any], hasPending: true) { restartStop() }
                 guard stoplineGate(), unitBranchGate(n), precheckGate(n) else { continue }   // 건너뛸 단위는 시험 환경을 기다리지 않는다
                 beginUnit(n)
             }
@@ -1753,6 +1828,8 @@ final class Engine {
     }
 
     func finish(_ s: String, _ reason: String) -> Never {
+        var es = inbox
+        if apInboxCloseRun(&es) > 0 { inbox = es; event("board", "실행이 끝나 넘기지 못했거나 붙일 단위가 없던 사람의 말이 있습니다. 보드의 보낸 말 줄에 남습니다.") }
         run["ended"] = r3(now())
         setState(s, reason)
         wrapUp()
@@ -1858,6 +1935,7 @@ final class Engine {
     func pausedLoop() {
         while true {
             if gotTerm != 0 { terminated() }
+            pollInbox()
             if let a = readControl() {
                 let o = apControlOutcome(a, paused: true)
                 if let t = o.text { event("board", t) }
@@ -1866,6 +1944,7 @@ final class Engine {
                     setState("running", "재개했습니다.")
                     return
                 case .stop: stopRun()
+                case .restart: if askRestart(paused: true) { restartStop() }   // 도는 단위가 없는 일시정지만 바로 멈춘다
                 case .pause, .none: break
                 }
             }
@@ -1892,6 +1971,7 @@ final class Engine {
             switch pollControl() {
             case .pause: return .paused
             case .stop: return .stopped
+            case .restart: return .restart
             case nil: break
             }
             sleep(1)
@@ -1968,6 +2048,7 @@ final class Engine {
         case .elapsed: setState("running", "멈출 선 대기를 마치고 다시 확인합니다.")
         case .paused: pause()
         case .stopped: stopRun()
+        case .restart: restartStop()
         }
         return false
     }
@@ -1999,6 +2080,7 @@ final class Engine {
         case .elapsed: break
         case .paused: pause()
         case .stopped: stopRun()
+        case .restart: restartStop()
         }
         return false
     }
@@ -2288,6 +2370,7 @@ final class Engine {
         if let task = def(n)["branch"] as? String { u["branch"] = task }
         saveUnit(n, u)
         queue[n - 1]["status"] = "skipped"; saveQueue()
+        closeInbox(unit: n, "skipped")
         noteUnmerged(n, "건너뜀: " + why)
         event("board", "단위 \(n)/\(total) 건너뜀: \(why)")
         record("단위 \(n) 건너뜀")
@@ -2448,10 +2531,11 @@ final class Engine {
 
     // MARK: 단위
 
-    func firstMessage(_ n: Int) -> String {
+    // directions: 사람이 "다음 단위부터"로 보낸 방향(규칙 apInboxNextText) — 단위 글 바로 뒤에 붙인다(5-4)
+    func firstMessage(_ n: Int, directions: String = "") -> String {
         let q = def(n)
         let tickets = (q["tickets"] as? [Any] ?? []).map { "\($0)" }
-        var s = (q["prompt"] as? String ?? "") + "\n\n---\n"
+        var s = (q["prompt"] as? String ?? "") + (directions.isEmpty ? "" : "\n\n" + directions) + "\n\n---\n"
         s += "이 일은 Claude Board 자율주행의 작업 단위 하나입니다(「\(title(n))」).\n"
         s += "- 작업 폴더: \(cwd(n))\n"
         s += "- 판정 명령: `\(q["check"] as? String ?? "")` (일을 마치면 엔진이 작업 폴더에서 돌려 종료 코드 0 이면 통과로 봅니다. 마치기 전에 직접 돌려 보세요.)\n"
@@ -2494,6 +2578,18 @@ final class Engine {
 
     func beginUnit(_ n: Int) {
         try? fm.createDirectory(atPath: unitDir(n), withIntermediateDirectories: true)
+        // 사람이 "다음 단위부터"로 보낸 방향을 이 단위의 첫 입력에 붙인다(규칙 apInboxNextFor·apInboxNextText). 대기열·판정은 그대로
+        pollInbox()
+        var directions = ""
+        let ni = apInboxNextFor(inbox, unit: n)
+        if !ni.isEmpty {
+            var es = inbox
+            directions = apInboxNextText(ni.map { es[$0].text })
+            for i in ni { es[i].status = "applied"; es[i].units.append(n); if es[i].done == nil { es[i].done = r3(now()) } }
+            inbox = es; saveRun()
+            event("board", "사람이 보낸 방향 \(ni.count)개를 단위 \(n) 의 첫 입력에 붙였습니다.")
+        }
+        let first = firstMessage(n, directions: directions)
         if def(n)["context"] is String {   // 근거 묶음: 출발 때 뜬 사본을 단위 폴더로 넘긴다. 모델 쪽은 쓰기 금지(권한 규칙·샌드박스), 파일은 읽기 전용
             let dst = unitDir(n) + "/context"
             try? fm.removeItem(atPath: dst)
@@ -2507,7 +2603,7 @@ final class Engine {
             "phase": (def(n)["action"] as? String ?? "").isEmpty ? "model" : "action",
             "started": r3(now()), "active_sec": 0, "cost_usd": 0, "cost_done": 0, "turns": 0, "caps": caps(n),
             "try": 0, "errors": 0, "checks": [] as [Any], "sessions": [] as [Any], "denials": [] as [Any],
-            "first_message": firstMessage(n), "next_message": firstMessage(n),
+            "first_message": first, "next_message": first, "directions": directions,
             "weekly_base": (run["usage"] as? [String: Any])?["seven_day"] ?? NSNull()]
         saveUnit(n, u)
         queue[n - 1]["status"] = "running"
@@ -2541,6 +2637,7 @@ final class Engine {
         queue[n - 1]["status"] = status
         saveQueue()
         if status != "done" { noteUnmerged(n, unitLabel[status] ?? status) }   // Jira 작업: 합치지 않고 작업 가지만 남긴다
+        closeInbox(unit: n, status)
         checkGitPlaces("단위 \(n) 뒤")
         let spent = "\(dur(num(u["active_sec"]) ?? 0)), \(usd(num(u["cost_usd"]) ?? 0)) USD"
         event("board", "단위 \(n)/\(total) \(unitLabel[status] ?? status): \(reason) (\(spent))")
@@ -2567,7 +2664,14 @@ final class Engine {
                 let end = turn(n, &u, message: u["next_message"] as? String ?? msgRestart)
                 switch end {
                 case .finished:
-                    u["phase"] = "check"; saveUnit(n, u)
+                    // 턴 동안 이 단위에 사람의 말이 왔으면 판정 전에 같은 세션으로 한 번 더(규칙 apAfterTurn). 말은 다음 turn 이 붙인다
+                    pollInbox()
+                    if apAfterTurn(waitingNow: !apInboxNowFor(inbox, unit: n).isEmpty) == .again {
+                        u["next_message"] = ""; saveUnit(n, u)
+                        event("board", "턴을 마쳤지만 그 사이 사람이 이 단위에 보낸 말이 있어, 판정 전에 같은 세션으로 한 번 더 맡깁니다.")
+                    } else {
+                        u["phase"] = "check"; saveUnit(n, u)
+                    }
                 case .limit(let resets):
                     let t = now()
                     let until = (resets.map { $0 > t ? $0 : t + 1800 } ?? t + 1800) + 120   // 초기화 2분 뒤. 모르거나 이미 지났으면 30분 뒤
@@ -2588,7 +2692,7 @@ final class Engine {
                     if e >= 3 { endUnit(n, "failed", "claude 가 세 번 오류로 끝나 미통과로 기록합니다: \(msg)"); return }
                     event("board", "claude 가 오류로 끝났습니다(\(msg)). 1분 뒤 같은 세션으로 다시 엽니다(\(e)/3).")
                     switch waitUntil(now() + 60) {
-                    case .elapsed: break
+                    case .elapsed, .restart: break   // 도는 단위가 있으면 멈추고 다시 출발은 단위를 마친 뒤라 여기로 오지 않는다
                     case .paused: pause(); return
                     case .stopped: stopRun()
                     }
@@ -2612,11 +2716,20 @@ final class Engine {
                     setState("running", "단위 \(n)/\(total) 하는 중: \(title(n))")
                 case .paused: pause(); return
                 case .stopped: stopRun()
+                case .restart: return   // 오지 않는다(도는 단위가 있음) — 돌아가 다시 기다린다
                 }
             case "check":
                 stashReadOnly(unit: n)   // 읽기 전용 자리에 남긴 변경으로 판정이 통과하지 않게 판정 전에 보관한다
-                switch check(n, &u) {
+                let judged = check(n, &u)
+                pollInbox()
+                let waitingNow = !apInboxNowFor(inbox, unit: n).isEmpty   // 판정 동안 이 단위에 사람의 말이 왔나(규칙 apAfterCheck)
+                switch judged {
                 case .passed:
+                    if apAfterCheck(passed: true, tries: Int(num(u["try"]) ?? 0), retries: retries, waitingNow: waitingNow) == .note {
+                        u["phase"] = "model"; u["next_message"] = apInboxPassedText; saveUnit(n, u)
+                        event("board", "판정은 통과했지만 그 사이 사람이 이 단위에 보낸 말이 있어, 그 말을 넘기고 같은 세션으로 다시 맡깁니다.")
+                        continue
+                    }
                     var why = "판정 명령을 통과했습니다."
                     if def(n)["story"] != nil {   // Jira 작업: 판정 통과 때 엔진이 바로 스토리 가지로 합친다
                         let m = mergeTask(n)
@@ -2625,7 +2738,7 @@ final class Engine {
                     endUnit(n, "done", why); return
                 case .failed(let code, let tail):
                     let k = Int(num(u["try"]) ?? 0)
-                    if k >= retries {
+                    if apAfterCheck(passed: false, tries: k, retries: retries, waitingNow: waitingNow) == .fail {
                         endUnit(n, "failed", "\(k == 0 ? "" : "\(k)번 다시 해도 ")판정 명령을 통과하지 못해 미통과로 기록하고 다음 단위로 갑니다. 기준은 낮추지 않습니다.")
                         return
                     }
@@ -2639,7 +2752,8 @@ final class Engine {
                     ```
                     """
                     saveUnit(n, u)
-                    event("board", "판정 실패(종료 코드 \(code)). 실패 출력을 모델에게 넘겨 다시 고치게 합니다(\(k + 1)/\(retries)).")
+                    event("board", k < retries ? "판정 실패(종료 코드 \(code)). 실패 출력을 모델에게 넘겨 다시 고치게 합니다(\(k + 1)/\(retries))."
+                          : "판정 실패(종료 코드 \(code)). 다시 맡길 횟수는 다 찼지만 그 사이 사람이 이 단위에 보낸 말이 있어, 그 말과 실패 출력을 넘겨 한 번 더 맡깁니다.")
                 case .capped(let kind):
                     endUnit(n, "capped", "\(capLabel[kind] ?? kind) 상한에 닿아 멈췄습니다. 바뀐 파일 목록을 남기고 다음 단위로 갑니다.")
                     return
@@ -2838,7 +2952,17 @@ final class Engine {
         let sid = u["session_id"] as? String ?? ""
         let resumed = args.contains("--resume")
         // 새 세션이면(처음이거나, 세션이 만들어지기 전에 끊겼다) 이어 가는 말이 아니라 단위의 첫 입력을 넘긴다
-        let message = resumed ? message : (u["first_message"] as? String ?? firstMessage(n))
+        var message = resumed ? message : (u["first_message"] as? String ?? firstMessage(n))
+        // 사람이 "지금 단위에"로 보낸 말을 이 차례의 입력에 붙인다(규칙 apInboxNowFor·apInboxNowText, 와이어프레임 "이 세션의 다음 차례에 들어갑니다")
+        pollInbox()
+        let now_ = apInboxNowFor(inbox, unit: n)
+        if !now_.isEmpty {
+            var es = inbox
+            message = [message, apInboxNowText(now_.map { es[$0].text })].filter { !$0.isEmpty }.joined(separator: "\n\n")
+            for i in now_ { es[i].status = "delivered"; es[i].units = [n]; es[i].done = r3(now()) }
+            inbox = es; saveRun()
+            event("board", "사람이 보낸 말 \(now_.count)개를 단위 \(n) 의 세션에 넘겼습니다(\(resumed ? "이어 가는 입력" : "첫 입력")에 붙임).")
+        }
         saveUnit(n, u)
         guard let c = Child(claude, args, env: claudeEnv(n), cwd: cwd(n), stdinPipe: true, stdoutPipe: true,
                             errFile: unitDir(n) + "/stderr.log") else {
@@ -2895,7 +3019,7 @@ final class Engine {
             if c.poll() != nil, c.atEOF || x - t.lastLine >= 3 { break }
             if x - lastCtl >= 1 {
                 lastCtl = x
-                if let s = pollControl() { stopped = s == .pause ? .paused : .stopped; break }
+                if let s = pollControl(), s != .restart { stopped = s == .pause ? .paused : .stopped; break }
                 // 단위 주간 %p = 단위를 시작할 때부터 오른 계정 주간 사용률. 초기화 시각이 지난 값은 낡아서 쓰지 않는다
                 let usage = run["usage"] as? [String: Any] ?? [:]
                 if num(usage["seven_day_resets"]).map({ $0 > x }) ?? true, let cur = num(usage["seven_day"]) {
@@ -3100,7 +3224,7 @@ final class Engine {
         if let stop = r.interrupt { return stop }
         u["action_result"] = ["exit": Int(r.code), "sec": r3(r.sec), "evidence": "evidence/action", "files": r.files, "tail": r.tail]
         event("board", "고정 단계 \(r.code == 0 ? "끝" : "실패(종료 코드 \(r.code))")(\(dur(r.sec))). 결과를 모델에게 넘깁니다.")
-        u["first_message"] = firstMessage(n) + """
+        u["first_message"] = firstMessage(n, directions: u["directions"] as? String ?? "") + """
 
         ---
         엔진이 이 단위를 시작하기 전에 고정 단계(action)를 돌렸습니다: 종료 코드 \(r.code)\(r.timedOut ? "(시간 상한에 닿아 멈춤)" : ""). 출력과 남긴 파일은 `\(unitDir(n))/evidence/action/` 에 있습니다(\(r.files.joined(separator: ", "))).
@@ -3137,7 +3261,7 @@ final class Engine {
         while c.poll() == nil {
             let x = now()
             u["active_sec"] = r3((num(u["active_sec"]) ?? 0) + min(max(x - tick, 0), 5)); tick = x
-            if let s = pollControl() { interrupt = s == .pause ? .paused : .stopped; break }
+            if let s = pollControl(), s != .restart { interrupt = s == .pause ? .paused : .stopped; break }
             if (num(u["active_sec"]) ?? 0) >= cap { interrupt = .capped("minutes"); break }
             if x - start >= limit { timedOut = true; break }
             usleep(500_000)
@@ -3200,7 +3324,8 @@ func usage() -> Never {
     fail("""
     사용법: claude-autopilot start <실행 폴더> [--dev]
            claude-autopilot run <실행 폴더> <고정 설정 해시>
-           claude-autopilot control <실행 폴더> pause|resume|stop
+           claude-autopilot control <실행 폴더> pause|resume|stop|restart_from_intake
+             restart_from_intake: 멈추고 다시 출발(지금 단위를 마친 뒤 멈춤, 보드가 이 실행을 이어 가는 출발 준비를 연다)
            claude-autopilot status <실행 폴더> [--dev] [--json]
              출발 전 --json: 보드가 읽는 확인 결과(고칠 것·어디서·저장소·Jira 단위의 가지)
            claude-autopilot records import [--dev | --db <파일>] [--project <이름>] [--unit-key <칸 경로>] <원본…>
@@ -3803,6 +3928,15 @@ func cmdStatus(_ args: [String]) -> Never {
         for f in b["failed"] as? [[String: Any]] ?? [] {
             out += "하지 못함: \(f["op"] ?? "?") \(f["branch"] ?? "?")\((f["into"] as? String).map { " → " + $0 } ?? "") (\(repoName(f["repo"] as? String ?? "")): \(f["why"] ?? ""))\n"
         }
+    }
+    // 방향을 바꿀 말과 멈추고 다시 출발(5-4)
+    if let a = run["inbox"] as? [[String: Any]], !a.isEmpty {
+        let c = { (s: String) in a.filter { $0["status"] as? String == s }.count }
+        let parts = [("넘김", c("delivered")), ("붙임", c("applied")), ("기다림", c("waiting")), ("넘기지 않음", c("late") + c("dropped") + c("unused")), ("읽지 못함", c("bad"))]
+        out += "보낸 말: \(a.count)개(" + parts.filter { $0.1 > 0 }.map { "\($0.0) \($0.1)" }.joined(separator: " · ") + ")\n"
+    }
+    if let r = run["restart"] as? [String: Any] {
+        out += "멈추고 다시 출발: " + (r["stopped"] != nil ? "멈췄습니다(보드가 이어 가는 출발 준비를 엽니다)" : (num(r["unit"]).map { "지금 단위(단위 \(Int($0)))를 마친 뒤 멈춥니다" } ?? "곧 멈춥니다")) + "\n"
     }
     for (i, q) in queue.enumerated() {
         let n = i + 1
