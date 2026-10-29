@@ -2006,14 +2006,15 @@ final class Engine {
         guard gitDirOK(r) else { return "\(repoName(r)) 의 git 폴더가 바뀌어 \(want) 로 바꾸지 않았습니다" }
         if cur != on { return "\(repoName(r)) 의 가지가 실행 중에 바뀌어(지금 \(cur.isEmpty ? "가지 없음" : cur)) \(want) 로 바꾸지 않았습니다" }
         let dirty = porcelain(w), dirtyStart = i["dirty_start"] as? [String] ?? []
-        if dirty != dirtyStart {
+        // 남은 변경을 어떻게 할지는 규칙 apLeftover(AutopilotRules/Leftovers.swift)가 정한다
+        switch apLeftover(dirty: dirty, dirtyStart: dirtyStart, onStoryBranch: storyBranchNames.contains(on), madeByRun: (i["made"] as? [String] ?? []).contains(on)) {
+        case .clean: break
+        case .refuse(.readOnly):
             // 스토리 가지(다른 저장소 작업 동안 읽기 전용으로 걸어 둔 자리)에는 엔진도 커밋하지 않는다 — 스토리에는 판정을 통과한 작업만 합친다
-            if storyBranchNames.contains(on) {
-                return "\(repoName(r)) 의 스토리 가지 \(on)(읽기 전용으로 걸어 둔 자리)에 커밋하지 않은 변경 \(dirty.count)개가 있어 \(want) 로 바꾸지 않았습니다"
-            }
-            guard dirtyStart.isEmpty, (i["made"] as? [String] ?? []).contains(on) else {
-                return "\(repoName(r)) 에 커밋하지 않은 변경 \(dirty.count)개가 있어 \(want) 로 바꾸지 않았습니다"
-            }
+            return "\(repoName(r)) 의 스토리 가지 \(on)(읽기 전용으로 걸어 둔 자리)에 커밋하지 않은 변경 \(dirty.count)개가 있어 \(want) 로 바꾸지 않았습니다"
+        case .refuse(.dirty):
+            return "\(repoName(r)) 에 커밋하지 않은 변경 \(dirty.count)개가 있어 \(want) 로 바꾸지 않았습니다"
+        case .commit:
             let a = gitRun(["add", "-A"], cwd: w)
             let c = a.code == 0 ? gitRun(["commit", "-q", "--no-verify", "-m", "자율주행 \(id): \(on) 에 커밋하지 않고 남은 변경(다음 단위로 가지를 바꾸기 전에 엔진이 남김)"], cwd: w, commit: true) : a
             guard c.code == 0 else { return "\(repoName(r)) 에 남은 변경을 \(on) 에 커밋하지 못해 \(want) 로 바꾸지 않았습니다: \(firstLine(c.out))" }
@@ -3846,8 +3847,11 @@ func cmdFinish(_ args: [String]) -> Never {
             let h = headOf(r, "refs/heads/" + x) ?? ""
             let c = gitRun(["branch", "-D", x], cwd: r)
             print(c.code == 0 ? "  지움: \(repoName(r)) \(x) (\(h.prefix(7)))" : "  지우지 못함: \(repoName(r)) \(x): \(firstLine(c.out))")
-            if c.code == 0 { gone.append(["source": label, "repo": r, "branch": x, "head": h, "at": r3(now())]) }
-            else { failed.append(["op": "discard", "source": label, "repo": r, "branch": x, "why": firstLine(c.out), "at": r3(now())]) }
+            // 무엇을 적을지는 규칙 apDiscardRows(AutopilotRules/Branches.swift)
+            let row = apDiscardRows(source: label, repo: r, branch: x, fate: c.code == 0 ? .deleted(head: h) : .failed(firstLine(c.out)),
+                                    isSource: refs.contains { $0 == (r, x) }, at: r3(now()))
+            if let d = row.discarded { gone.append(d) }
+            if let f = row.failed { failed.append(f) }
         }
         b["discarded"] = (b["discarded"] as? [Any] ?? []) + gone
     case "cleanup":

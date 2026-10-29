@@ -431,7 +431,8 @@ struct APLogGroup: Identifiable {
             history = APRecords.list(db)
             detailKey = ""
         }
-        let id = sel ?? history.runs.first?.id ?? ""
+        // 상세에 보일 실행은 규칙 apHistoryPick(AutopilotRules/History.swift)
+        let id = apHistoryPick(selected: sel, runs: history.runs.map { APRunTag(id: $0.id, project: $0.projectName) }, project: nil) ?? ""
         guard id != detailKey else { return }
         detailKey = id
         detail = id.isEmpty ? nil : history.runs.first { $0.id == id }.flatMap { APRecords.detail(db, $0) }
@@ -4397,7 +4398,7 @@ struct APRepoPlan: Identifiable { let repo: String; let plan: APMergePlan?; var 
             }
             for st in steps {
                 for (r, src) in st.refs {
-                    let base = st.after != nil && m.run.bases[r] == st.after ? m.baseHeads[r] : nil
+                    let base = apCarriesBase(source: st.source, after: st.after, base: m.run.bases[r]) ? m.baseHeads[r] : nil   // 규칙 AutopilotRules/Branches.swift
                     plans[st.id + "|" + r] = have[r] == nil ? APMergePlan(state: "nosrc") : APMerge.plan(r, src: src, into: st.into, wts: wts[r] ?? [:], baseHead: base)
                 }
             }

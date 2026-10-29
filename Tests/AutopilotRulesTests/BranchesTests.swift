@@ -308,3 +308,63 @@ private let storyRows: [StoryRow] = [
         #expect(text(apStoryRepos(v)) == r.repos)
     }
 }
+
+// MARK: - 버리기 기록 (apDiscardRows — 엔진 finish discard)
+// 2026-10-29 5-3b 에서 엔진 cmdFinish 에서 옮길 때 옮기기 전 식(46d9a0f)과 같은 입력으로 돌린 덤프가 같았다. 기대값은 지금 동작 그대로다
+
+struct DiscardRow: Row {
+    let note: String
+    let fate: APRefFate
+    let isSource: Bool
+    let discarded: String?   // 키 차례 JSON, nil 이면 적지 않음
+    let failed: String?
+}
+
+private let discardRows: [DiscardRow] = [
+    .init(note: "지운 합칠 쪽 가지 → 버린 줄", fate: .deleted(head: "abc1234"), isSource: true,
+          discarded: #"{"at":5,"branch":"f/S1","head":"abc1234","repo":"/r/a","source":"story:S1"}"#, failed: nil),
+    .init(note: "지운 작업 가지도 버린 줄", fate: .deleted(head: "def5678"), isSource: false,
+          discarded: #"{"at":5,"branch":"f/S1","head":"def5678","repo":"/r/a","source":"story:S1"}"#, failed: nil),
+    .init(note: "지우지 못함 → 못 한 줄", fate: .failed("잠금 파일"), isSource: true,
+          discarded: nil, failed: #"{"at":5,"branch":"f/S1","op":"discard","repo":"/r/a","source":"story:S1","why":"잠금 파일"}"#),
+    .init(note: "지금 동작: 이미 없는 합칠 쪽 가지는 적지 않는다(5-3b ④, 합치기 기다림이 남음)", fate: .missing, isSource: true, discarded: nil, failed: nil),
+    .init(note: "지금 동작: 같은 이름으로 다시 만든 합칠 쪽 가지는 적지 않는다", fate: .foreign, isSource: true, discarded: nil, failed: nil),
+    .init(note: "이미 없는 작업 가지는 적지 않는다", fate: .missing, isSource: false, discarded: nil, failed: nil),
+]
+
+@Suite("자율주행 버리기 기록") struct DiscardRowsTests {
+    @Test("지운 가지는 버린 줄, 지우지 못한 가지는 못 한 줄", arguments: discardRows)
+    func 표(_ r: DiscardRow) {
+        let x = apDiscardRows(source: "story:S1", repo: "/r/a", branch: "f/S1", fate: r.fate, isSource: r.isSource, at: 5)
+        #expect(x.discarded.map(text) == r.discarded)
+        #expect(x.failed.map(text) == r.failed)
+    }
+}
+
+// MARK: - 출발 가지에만 있던 커밋 경고 (apCarriesBase — 보드 합치기·승격 시트)
+// 2026-10-29 5-3b 에서 보드 readGit 에서 옮길 때 옮기기 전 식과 같은 입력(합칠 쪽 셋 × after 다섯 × 출발 가지 다섯)으로 돌린 덤프가 같았다
+
+struct CarriesRow: Row {
+    let note: String
+    let source: String
+    let after: String?
+    let base: String?
+    let want: Bool
+}
+
+private let carriesRows: [CarriesRow] = [
+    .init(note: "② live ← 자율주행 가지(after dev), 출발 가지 dev → 센다", source: "autopilot", after: "dev", base: "dev", want: true),
+    .init(note: "스토리 가지도 같다", source: "story:S1", after: "dev", base: "dev", want: true),
+    .init(note: "① dev ← 자율주행 가지(after 없음) → 세지 않는다", source: "autopilot", after: nil, base: "dev", want: false),
+    .init(note: "② 인데 출발 가지가 live → 세지 않는다", source: "autopilot", after: "dev", base: "live", want: false),
+    .init(note: "출발 가지를 모름 → 세지 않는다", source: "autopilot", after: "dev", base: nil, want: false),
+    .init(note: "지금 동작: ③ master ← live(after live), 출발 가지 live → 센다(앞 실행의 커밋까지, 5-3b ③)", source: "branch:live", after: "live", base: "live", want: true),
+    .init(note: "③ 인데 출발 가지가 dev → 세지 않는다", source: "branch:live", after: "live", base: "dev", want: false),
+]
+
+@Suite("자율주행 합치기·승격: 출발 가지에만 있던 커밋 경고") struct CarriesBaseTests {
+    @Test("앞 단계 가지가 출발 가지인 단계에서 센다", arguments: carriesRows)
+    func 표(_ r: CarriesRow) {
+        #expect(apCarriesBase(source: r.source, after: r.after, base: r.base) == r.want)
+    }
+}

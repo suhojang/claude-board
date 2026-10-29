@@ -122,3 +122,33 @@ public func apMergeMark(_ br: [String: Any]) -> APMergeMark? {
     if let last = (br["promoted"] as? [[String: Any]] ?? []).compactMap({ $0["into"] as? String }).last { return .promoted(last) }
     return .waiting
 }
+
+// MARK: - 버리기 기록
+
+// 엔진 finish discard 가 가지 하나를 어떻게 했는가
+public enum APRefFate: Equatable, Sendable {
+    case deleted(head: String)   // 지웠다(지우기 전 머리)
+    case failed(String)          // 지우지 못했다(git 이 실패한 까닭)
+    case missing                 // 이미 없다(보드 밖에서 지웠거나 앞서 버림)
+    case foreign                 // 이 실행이 끝난 뒤 같은 이름으로 다시 만들어진 가지라 남겼다
+}
+
+// 버리기 한 가지의 기록 줄(2026-10-29 5-3b 에서 엔진 cmdFinish 에서 옮김): 지운 가지는 branches.discarded, 지우지 못한 가지는 branches.failed.
+// isSource 는 그 가지가 합칠 쪽 자체(자율주행 가지, 스토리 가지)인가 — 작업 가지는 false.
+// 지금 동작: 이미 없거나 남긴 가지는 아무것도 적지 않는다
+public func apDiscardRows(source: String, repo: String, branch: String, fate: APRefFate, isSource: Bool, at: Double) -> (discarded: [String: Any]?, failed: [String: Any]?) {
+    switch fate {
+    case .deleted(let h): return (["source": source, "repo": repo, "branch": branch, "head": h, "at": at], nil)
+    case .failed(let why): return (nil, ["op": "discard", "source": source, "repo": repo, "branch": branch, "why": why, "at": at])
+    case .missing, .foreign: return (nil, nil)
+    }
+}
+
+// MARK: - 합치기·승격 시트
+
+// 단계의 "출발 가지에만 있던 커밋 n개가 함께 갑니다" 경고를 셀 단계인가(보드 합치기·승격 시트, 2026-10-29 5-3b 에서 보드 readGit 에서 옮김).
+// 세면 받는 가지에 없는 출발 머리(출발 때 출발 가지 머리)의 커밋 수(받는 가지..출발 머리)를 보인다.
+// 지금 동작: 단계에 after(앞 단계)가 있고 그 가지가 이 실행의 출발 가지면 센다
+public func apCarriesBase(source: String, after: String?, base: String?) -> Bool {
+    after != nil && base == after
+}
