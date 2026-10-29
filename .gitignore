@@ -6,7 +6,6 @@
 !/CHANGELOG.md
 !/LICENSE
 !/docs/
-!/ClaudeBoard.swift
 !/Package.swift
 !/Package.resolved
 !/Sources/
@@ -22,6 +21,7 @@
 !/board-tui.py
 !/hooks.py
 !/hook-table/
+!/tools/
 !/build-board.sh
 !/packaging/
 !/plugins/

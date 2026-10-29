@@ -24,14 +24,7 @@ let package = Package(
                 .product(name: "GhosttyTerminal", package: "libghostty-spm"),
                 .product(name: "GhosttyTheme", package: "libghostty-spm"),   // 사용자 Ghostty 설정의 theme 이름을 색으로
             ],
-            path: ".",
-            exclude: [
-                "windows", "packaging", "plugins", "docs", "dist", "Sources", "Tests", "clt-testing.json", "hook-table",
-                "ClaudeNotifier.swift", "ClaudeAutopilot.swift", "ClaudeStatus.swift", "AppIcon.swift", "AppIcon.icns",
-                "notify.py", "state.py", "hooks.py", "board-tui.py", "build-board.sh",
-                "README.md", "CHANGELOG.md", "CLAUDE.md", "LICENSE",
-            ],
-            sources: ["ClaudeBoard.swift"],
+            path: "Sources/ClaudeBoard",
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
         // Foundation 만 쓰는 순수 규칙 — 앱·엔진 없이 시험한다
