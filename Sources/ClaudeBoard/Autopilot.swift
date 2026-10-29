@@ -26,13 +26,13 @@ var autopilotRoot: String {
         + (Bundle.main.bundleIdentifier == "com.claude.board.dev" ? "Claude Board Dev" : "Claude Board") + "/autopilot"
 }
 
-private func apRead(_ path: String) -> Any? {
+func apRead(_ path: String) -> Any? {
     FileManager.default.contents(atPath: path).flatMap { try? JSONSerialization.jsonObject(with: $0) }
 }
-private func apNum(_ v: Any?) -> Double? { (v as? NSNumber)?.doubleValue }
-private func apStamp(_ path: String) -> Double { mtime(path)?.timeIntervalSince1970 ?? 0 }
-private func apStrings(_ v: Any?) -> [String] { (v as? [Any] ?? []).map { "\($0)" } }
-private func apText(_ v: Any?) -> String? { (v as? String).flatMap { $0.isEmpty ? nil : $0 } }
+func apNum(_ v: Any?) -> Double? { (v as? NSNumber)?.doubleValue }
+func apStamp(_ path: String) -> Double { mtime(path)?.timeIntervalSince1970 ?? 0 }
+func apStrings(_ v: Any?) -> [String] { (v as? [Any] ?? []).map { "\($0)" } }
+func apText(_ v: Any?) -> String? { (v as? String).flatMap { $0.isEmpty ? nil : $0 } }
 
 // 모델이 쓴 글의 긴 줄표는 보드에 그릴 때 쉼표로 바꾼다(설계: 보고서를 그릴 때 바꾼다, 사용자에게 보이는 글에는 긴 줄표를 쓰지 않는다)
 func apPlain(_ s: String) -> String {
@@ -2676,16 +2676,11 @@ extension APRecords {
                 if f.count == 2, f[0].hasPrefix("refs/heads/") { let b = String(f[0].dropFirst(11)); i.branches.append(b); i.heads[b] = String(f[1]) }
             }
             i.dirty = (apGit(["status", "--porcelain"], r) ?? "").split(separator: "\n").map(String.init)
-            let names = APStart.roles(i.branches)
+            let names = apBranchRoles(i.branches)
             if let dev = names.dev, let live = names.live { i.devAhead = Int(apGit(["rev-list", "--count", "\(live)..\(dev)"], r) ?? "") }
             info[r] = i
         }
         return (repos, info)
-    }
-
-    // 가지 자리 — dev(develop), live(staging), master(main). 승격 차례를 저장소 가지로 채울 때 같은 자리로 짝짓는다(설계 2장 끝)
-    nonisolated static func roles(_ b: [String]) -> (dev: String?, live: String?, master: String?) {
-        (["dev", "develop"].first { b.contains($0) }, ["live", "staging"].first { b.contains($0) }, ["master", "main"].first { b.contains($0) })
     }
 
     // 출발 가지 기본값(설계 판단): 프로젝트 설정 last_base → 지난 실행에서 고른 출발 가지 → 처음이면 승격 차례에서 master 바로 앞 가지.
@@ -2698,7 +2693,7 @@ extension APRecords {
         var notes: [String] = []
         for r in repos {
             let i = repoInfo[r] ?? APRepoInfo()
-            let n = APStart.roles(i.branches)
+            let n = apBranchRoles(i.branches)
             if let b = last[r] as? String, i.branches.contains(b) { bases[r] = b; notes.append("지난 실행에서 고른 가지(\(b))") }
             else if let b = pastBases[r], i.branches.contains(b) { bases[r] = b; notes.append("지난 실행에서 고른 가지(\(b))") }
             else if let b = n.live ?? n.dev ?? n.master ?? i.current { bases[r] = b; notes.append("처음이라 master 바로 앞 가지") }
@@ -2708,12 +2703,7 @@ extension APRecords {
             promotion = p.compactMap { s in (s["from"] as? String).flatMap { f in (s["into"] as? String).map { APStep(from: f, into: $0, after: s["after"] as? String) } } }
             promotionSaved = true
         } else {
-            let n = APStart.roles(repos.first.flatMap { repoInfo[$0]?.branches } ?? [])
-            var st: [APStep] = []
-            if let d = n.dev { st.append(APStep(from: "autopilot", into: d)) }
-            if let l = n.live { st.append(APStep(from: "autopilot", into: l, after: n.dev)) }
-            if let m = n.master { st.append(n.live.map { APStep(from: $0, into: m, after: $0) } ?? APStep(from: "autopilot", into: m, after: n.dev)) }
-            promotion = st
+            promotion = apDefaultPromotion(repos.first.flatMap { repoInfo[$0]?.branches } ?? [])
             promotionSaved = false
         }
     }
@@ -3744,7 +3734,7 @@ struct APConfirm: View {
 
     private func baseRow(_ i: Int, _ r: String) -> some View {
         let info = s.repoInfo[r] ?? APRepoInfo()
-        let roles = APStart.roles(info.branches)
+        let roles = apBranchRoles(info.branches)
         var cand: [String] = []
         for b in [roles.dev, roles.live, roles.master, info.current, s.bases[r]].compactMap({ $0 }) where info.branches.contains(b) && !cand.contains(b) { cand.append(b) }
         let chosen = s.bases[r] ?? ""
@@ -4249,11 +4239,7 @@ struct APRepoPlan: Identifiable { let repo: String; let plan: APMergePlan?; var 
         m.promotionSaved = !m.steps.isEmpty
         if m.steps.isEmpty, let first = m.repos.first {
             // 저장소 가지는 엔진이 출발 때 남긴 가지 머리(branches.start)로 본다(메인 스레드에서 git 을 부르지 않는다)
-            let b = (((br["start"] as? [String: Any])?[first] as? [String: Any]) ?? [:]).keys.sorted()
-            let n = APStart.roles(b)
-            if let d = n.dev { m.steps.append(APStep(from: "autopilot", into: d)) }
-            if let l = n.live { m.steps.append(APStep(from: "autopilot", into: l, after: n.dev)) }
-            if let ms = n.master { m.steps.append(n.live.map { APStep(from: $0, into: ms, after: $0) } ?? APStep(from: "autopilot", into: ms, after: n.dev)) }
+            m.steps = apDefaultPromotion((((br["start"] as? [String: Any])?[first] as? [String: Any]) ?? [:]).keys.sorted())
         }
         // Jira 스토리 — 엔진 branches.stories(저장소마다, 옛 꼴은 저장소 하나)와 대기열의 작업
         let st = br["stories"] as? [String: Any] ?? [:]
