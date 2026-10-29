@@ -148,6 +148,7 @@ struct APRun: Equatable, Identifiable {
     var units: [APUnit] = []
     var wrapped = false                 // 끝 정리(하네스 끝 검사·기록)를 마침 — 엔진 finish 가 받는 실행
     var mergeWaiting = false            // 끝났고 합치기·승격에 남은 단계가 있음(보드 본체의 끝난 실행 줄, 2단계 5-3)
+    var stashes: [APStash] = []         // 읽기 전용 자리에 남은 변경을 엔진이 보관한 것(branches.stashed, 5-3b ①)
 
     var active: Bool { !state.isEmpty && !["done", "stopped", "error"].contains(state) }
     var jira: Bool { units.contains { $0.story != nil } }
@@ -224,6 +225,7 @@ struct APRun: Equatable, Identifiable {
             for (r, e) in apStoryRepos(v) where e["head"] != nil { if let b = e["branch"] as? String, !b.isEmpty { x.storyRepos[k, default: [:]][r] = b } }
         }
         x.storyBranches = Set(x.storyRepos.values.flatMap(\.values)).sorted()
+        x.stashes = apStashes(br)
         let start = br["start"] as? [String: Any] ?? [:]
         x.existing = Set(start.values.flatMap { ($0 as? [String: Any])?.keys.map { String($0) } ?? [] })
             .subtracting([x.work]).subtracting(x.storyBranches).sorted()
@@ -286,6 +288,39 @@ func apPromotion(_ project: String?) -> [APStep] {
 // 가지 기록 읽기·합치기 상태(APStep·APPromoted·APFailed·apStoryRepos·apPromotedRows·apFailedRows·apUnresolved·apStepDone·apMergeOpen·apMergeMark)는
 // 규칙 라이브러리 AutopilotRules(Sources/AutopilotRules/Branches.swift)로 옮겼다 — 엔진과 함께 쓰고 표 시험이 붙어 있다
 
+// 읽기 전용으로 걸어 둔 자리(같은 스토리의 다른 저장소 작업 동안 스토리 가지)에 모델이 남긴 변경을 엔진이 따로 보관한 것(엔진 branches.stashed,
+// 2026-10-29 5-3b ①) — 자율주행 중·지난 실행에 한 줄씩. 사람이 그 저장소에서 git stash list 로 찾아 쓸지 정한다
+struct APStash: Equatable, Identifiable {
+    let sha: String
+    var id: String { sha }
+    var unit: Int?, repo = "", branch = "", files = 0
+}
+func apStashes(_ br: [String: Any]) -> [APStash] {
+    (br["stashed"] as? [[String: Any]] ?? []).compactMap { x in
+        guard let sha = x["stash"] as? String, !sha.isEmpty else { return nil }
+        return APStash(sha: sha, unit: apNum(x["unit"]).map { Int($0) }, repo: ((x["repo"] as? String ?? "") as NSString).lastPathComponent,
+                       branch: x["branch"] as? String ?? "", files: Int(apNum(x["files"]) ?? 0))
+    }
+}
+struct APStashNote: View {
+    let stashes: [APStash]
+    var body: some View {
+        if !stashes.isEmpty {
+            VStack(alignment: .leading, spacing: 2) {
+                Label("읽기 전용으로 걸어 둔 자리에 남은 변경을 엔진이 따로 보관했습니다(판정·다음 단위에 넣지 않음). 그 저장소에서 git stash list 로 봅니다.",
+                      systemImage: "tray.and.arrow.down")
+                    .boardFont(11).foregroundStyle(APColor.limit).fixedSize(horizontal: false, vertical: true)
+                ForEach(stashes) { x in
+                    Text("단위 \(x.unit.map(String.init) ?? "?") · \(x.repo) \(x.branch) · 변경 \(x.files)개 · git stash \(x.sha.prefix(7))")
+                        .boardFont(10, design: .monospaced).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true).padding(.leading, 18)
+                }
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("ap-stashed")
+        }
+    }
+}
+
 // 작업 폴더가 든 저장소(branches.repos 의 키, 따로 작업 트리면 그 작업 트리 자리도 본다) — 엔진 repoFor 와 같다
 func apRepoFor(_ path: String, _ repos: [String: Any]) -> String? {
     repos.keys.filter { r in
@@ -318,6 +353,9 @@ struct APLogGroup: Identifiable {
     @Published private(set) var sent: [String: APSent] = [:]   // 보낸 요청 — 엔진이 받을 때(run.json control_seen)까지 단추를 잠근다
     @Published private(set) var history = APHistory()
     @Published private(set) var detail: APPastDetail?
+    // 지난 실행에서 거른 프로젝트(nil 이면 모든 프로젝트)와 상세에 보이는 실행 — 상세는 거른 목록 안에서 고른다(규칙 apHistoryPick, 5-3b ⑥)
+    @Published var historyProject: String? { didSet { if historyProject != oldValue { tick() } } }
+    @Published private(set) var historyShown: String?
     @Published private(set) var awaiting: [APRun] = []    // 끝났고 합치기·승격을 기다리는 실행(최근 것부터) — 보드 본체의 끝난 실행 줄
     @Published var screen: APScreen = .board { didSet { if screen != oldValue { tick() } } }
     private var cache: [String: (stamp: [Double], run: APRun?)] = [:]
@@ -431,8 +469,10 @@ struct APLogGroup: Identifiable {
             history = APRecords.list(db)
             detailKey = ""
         }
-        // 상세에 보일 실행은 규칙 apHistoryPick(AutopilotRules/History.swift)
-        let id = apHistoryPick(selected: sel, runs: history.runs.map { APRunTag(id: $0.id, project: $0.projectName) }, project: nil) ?? ""
+        // 상세에 보일 실행은 규칙 apHistoryPick(AutopilotRules/History.swift) — 거른 프로젝트 안에서
+        let pick = apHistoryPick(selected: sel, runs: history.runs.map { APRunTag(id: $0.id, project: $0.projectName) }, project: historyProject)
+        if pick != historyShown { historyShown = pick }
+        let id = pick ?? ""
         guard id != detailKey else { return }
         detailKey = id
         detail = id.isEmpty ? nil : history.runs.first { $0.id == id }.flatMap { APRecords.detail(db, $0) }
@@ -536,6 +576,7 @@ struct APPastRun: Equatable, Identifiable {
     var harnessFiles = 0
     var harnessChanged: [APChange] = []
     var merge: APMergeMark?                             // 합치기 상태(규칙 apMergeMark). 가지 기록이 없는 실행은 nil
+    var stashes: [APStash] = []                         // 읽기 전용 자리에 남은 변경을 엔진이 보관한 것(5-3b ①)
     var epic: String?
     var storyRepos: [String: [APPastStoryRepo]] = [:]   // 스토리 키 → 저장소마다 스토리 가지·합친 작업 수·마지막으로 받은 가지(기록 저장소 runs.branches)
     var jira: Bool { jiraUnits > 0 }
@@ -557,6 +598,7 @@ struct APPastRun: Equatable, Identifiable {
         case .discarded: return (m.label, APColor.muted)
         case .promoted: return (m.label, APColor.ok)
         case .waiting: return (m.label, APColor.wait)
+        case .mixed(_, _, let w): return (m.label, w > 0 ? APColor.wait : APColor.ok)
         }
     }
     var stateLabel: (String, Color)? {
@@ -673,9 +715,14 @@ enum APRecords {
             r.activeSec = c[14] as? Double ?? 0
             r.cost = c[15] as? Double ?? 0
             r.mode = (json(c[16]) as? [String: Any])?["mode"] as? String ?? ""
+            r.skipped = Int(c[21] as? Double ?? 0)
+            r.jiraUnits = Int(c[22] as? Double ?? 0)
+            r.stories = Int(c[23] as? Double ?? 0)
             if let b = json(c[17]) as? [String: Any] {
                 r.hasBranches = !((b["repos"] as? [String: Any]) ?? [:]).isEmpty
-                r.merge = apMergeMark(b)
+                // 합칠 쪽마다(Jira 면 스토리마다) 정한다. 자율주행 가지는 Jira 실행이면 스토리 없는 단위가 있을 때만 합칠 쪽(보드 본체 줄과 같은 기준)
+                r.merge = apMergeMark(b, stories: r.jiraUnits == 0 || r.jiraUnits < r.total)
+                r.stashes = apStashes(b)
                 let pro = apPromotedRows(b)
                 let gone = (b["discarded"] as? [[String: Any]] ?? []).map { (($0["source"] as? String) ?? "") + "|" + (($0["repo"] as? String) ?? "") }
                 for (k, v) in b["stories"] as? [String: Any] ?? [:] {
@@ -697,9 +744,6 @@ enum APRecords {
             }
             r.epic = c[19] as? String
             r.runDir = c[20] as? String ?? ""
-            r.skipped = Int(c[21] as? Double ?? 0)
-            r.jiraUnits = Int(c[22] as? Double ?? 0)
-            r.stories = Int(c[23] as? Double ?? 0)
             h.runs.append(r)
         }
         h.error = err
@@ -1562,6 +1606,7 @@ struct APRunningScreen: View {
                 APChip(text: "바깥 쓰기 도구 없음")
             }
             Text(guardLine(run)).boardFont(10, design: .monospaced).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            APStashNote(stashes: run.stashes)
         }
     }
 
@@ -1590,10 +1635,9 @@ struct APHistoryScreen: View {
     let selected: String?
     @ObservedObject private var fit = BoardFit.shared
     @State private var folded: Set<String> = []     // 접은 프로젝트 묶음
-    @State private var project: String?             // 고른 프로젝트(nil 이면 모든 프로젝트)
     @State private var reports: Set<Int> = []       // 보고서를 펼친 단위
 
-    private var shown: [APPastRun] { ap.history.runs.filter { project == nil || $0.projectName == project } }
+    private var shown: [APPastRun] { ap.history.runs.filter { ap.historyProject == nil || $0.projectName == ap.historyProject } }
     // 프로젝트별 묶음 — 마지막 실행이 최근인 프로젝트부터
     private var byProject: [(name: String, runs: [APPastRun])] {
         var order: [String] = [], out: [String: [APPastRun]] = [:]
@@ -1670,10 +1714,10 @@ struct APHistoryScreen: View {
 
     private var projectMenu: some View {
         Menu {
-            Button("모든 프로젝트") { project = nil }
-            ForEach(Array(Set(ap.history.runs.map(\.projectName))).sorted(), id: \.self) { n in Button(n) { project = n } }
+            Button("모든 프로젝트") { ap.historyProject = nil }
+            ForEach(Array(Set(ap.history.runs.map(\.projectName))).sorted(), id: \.self) { n in Button(n) { ap.historyProject = n } }
         } label: {
-            Text(project ?? "모든 프로젝트").boardFont(11, weight: .semibold)
+            Text(ap.historyProject ?? "모든 프로젝트").boardFont(11, weight: .semibold)
         }
         .menuStyle(.button)
         .buttonStyle(.borderless)
@@ -1705,7 +1749,7 @@ struct APHistoryScreen: View {
         }
     }
 
-    private func isOn(_ r: APPastRun) -> Bool { (selected ?? ap.history.runs.first?.id) == r.id }
+    private func isOn(_ r: APPastRun) -> Bool { ap.historyShown == r.id }
 
     private func row(_ r: APPastRun) -> some View {
         Button { ap.screen = .history(r.id) } label: {
@@ -1781,7 +1825,7 @@ struct APHistoryScreen: View {
             APButton(title: "이 실행 이어 가기", primary: true, enabled: r.project != nil,
                      help: r.project == nil ? "프로젝트가 없는 실행이라 이어 갈 수 없습니다" : "남은 단위와 미룬 사람 몫을 불러와 출발 준비를 엽니다",
                      axid: "ap-continue-\(r.id)") { APStart.shared.open(continuing: r.id) }
-            APButton(title: "합치기·승격", icon: "arrow.triangle.merge", primary: r.merge == .waiting, enabled: r.hasBranches && FileManager.default.fileExists(atPath: r.runDir + "/run.json"),
+            APButton(title: "합치기·승격", icon: "arrow.triangle.merge", primary: r.merge?.hasWaiting == true, enabled: r.hasBranches && FileManager.default.fileExists(atPath: r.runDir + "/run.json"),
                      help: r.hasBranches ? "바뀐 줄을 보고 승격 차례대로 합치거나 버립니다" : "엔진이 만든 가지가 없는 실행입니다(또는 실행 폴더를 지웠습니다)",
                      axid: "ap-merge-\(r.id)") { APMerge.shared.open(r.runDir) }
             APButton(title: "보고서 보기", enabled: false, help: "아직 만들지 않았습니다(보고서 틀과 함께)") {}
@@ -1803,6 +1847,7 @@ struct APHistoryScreen: View {
                 unitRows(d)
             }
             harnessLine(r)
+            APStashNote(stashes: r.stashes)
             carryBlock(d)
             actionButtons(r)
         }
@@ -4354,7 +4399,7 @@ struct APRepoPlan: Identifiable { let repo: String; let plan: APMergePlan?; var 
         busy = what; result = nil; confirm = nil
         let d = dir
         queue.async {
-            let r = apEngine(args)
+            let r = apEngine(args + (apDevBuild ? ["--dev"] : []))   // 엔진은 그 실행의 뿌리와 맞는지만 본다(5-3b ⑨)
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     self.busy = nil
@@ -4375,6 +4420,8 @@ struct APRepoPlan: Identifiable { let repo: String; let plan: APMergePlan?; var 
         gen += 1
         let g = gen, steps = allSteps(m), lastAuto = m.lastAuto
         reading = true
+        // 앞 읽기 값(앞 실행이나 엔진이 한 일 전의 가지)을 그대로 보이지 않게 비운다(5-3b ⑦) — 읽는 동안 단계·저장소 줄·지우기 글은 "읽는 중"
+        plans = [:]; spans = [:]; existing = [:]; contained = []; foreign = []
         queue.async {
             var plans: [String: APMergePlan] = [:], spans: [String: APMergePlan] = [:], have: [String: Set<String>] = [:], contained = Set<String>()
             var wts: [String: [String: String]] = [:], heads: [String: [String: String]] = [:], foreign = Set<String>()
@@ -4555,14 +4602,11 @@ struct APMergeSheet: View {
                     APChip(text: sc.0, color: sc.1, strong: true)
                 }
                 Spacer(minLength: 4)
-                if m.reading { APChip(text: "가지를 읽는 중", color: APColor.muted) }
-                if let b = m.busy { APChip(text: "엔진이 하는 중: \(b)", color: APColor.work, strong: true).lineLimit(1) }
-                if m.fromStart, APStart.shared.hasDraft {
-                    APButton(title: "출발 준비로 돌아가기", enabled: m.busy == nil, help: "닫아 둔 출발 준비를 다시 엽니다", axid: "ap-merge-to-start") { m.backToStart() }
-                }
                 APButton(title: "다시 보기", icon: "arrow.clockwise", enabled: m.busy == nil && !m.reading, help: "run.json 과 가지를 다시 읽습니다(저장소에서 사람이 고친 뒤)", axid: "ap-merge-reload") { m.reload() }
                 APButton(title: "닫기", enabled: m.busy == nil, help: "가지는 그대로 남습니다", axid: "ap-merge-close") { m.close() }
             }
+            // 첫 줄에는 늘 같은 폭의 것만 둔다 — 엔진이 하는 일(스토리 키·"합치지 못한 작업 가지까지 지우기" 등)·읽는 중 꼬리표·출발 준비로 돌아가기를
+            // 첫 줄에 두면 줄이 시트보다 넓어져 머리 전체가 밀리고 실행 이름이 잘렸다(5-3b ⑤). 돌아가기는 둘째 줄(접힘), 하는 일은 셋째 줄(줄 바꿈)
             if let r = v?.run {
                 WrapRow(spacing: 6) {
                     Text(r.name).boardFont(12.5, weight: .bold).lineLimit(1)
@@ -4570,7 +4614,18 @@ struct APMergeSheet: View {
                     APChip(text: r.modeLabel, color: r.inPlace ? APColor.wait : APColor.muted)
                     if v?.jira == true { APChip(text: "Jira 연결" + (v?.epic.map { " · 에픽 \($0)" } ?? ""), color: APColor.jira) }
                     if let p = r.project, p != r.name { APChip(text: p, color: APColor.board) }
+                    if m.fromStart, APStart.shared.hasDraft {
+                        APButton(title: "출발 준비로 돌아가기", enabled: m.busy == nil, help: "닫아 둔 출발 준비를 다시 엽니다", axid: "ap-merge-to-start") { m.backToStart() }
+                    }
                 }
+            }
+            if let b = m.busy {
+                Text("엔진이 하는 중: \(b)").boardFont(11, weight: .semibold).foregroundStyle(APColor.work)
+                    .fixedSize(horizontal: false, vertical: true).accessibilityIdentifier("ap-merge-busy")
+            } else if m.reading {
+                Text("가지를 읽는 중").boardFont(11).foregroundStyle(.secondary).accessibilityIdentifier("ap-merge-reading")
+            }
+            if v?.run != nil {
                 apNote("실행이 끝나도 가지는 그대로 남고, 사람이 바뀐 줄을 본 뒤 단계마다 합칩니다. 자동으로 합치지 않습니다.")
             }
         }
@@ -4877,8 +4932,17 @@ struct APMergeSheet: View {
     private func discardBox(_ v: APMergeView) -> some View {
         let lock = m.discardLock("autopilot")
         let commits = v.repos.compactMap { m.spans["all|" + $0]?.commits }.reduce(0, +)
+        // 자율주행 가지를 보드 밖에서 지웠다(저장소를 다 읽었고 어디에도 없음, 작업 트리도 없음) — 지울 것이 없어 버린 것으로만 적는다(5-3b ④)
+        let gone = !m.reading && !v.run.work.isEmpty && !v.repos.isEmpty
+            && v.repos.allSatisfy { m.existing[$0].map { !$0.contains(v.run.work) } ?? false }
+            && !(v.run.worktreePath.map { FileManager.default.fileExists(atPath: $0) } ?? false)
         return APBox(title: "버리기", note: "어느 단계도 합치기 전에만", axid: "ap-merge-discard-box") {
-            if m.confirm == "discard" {
+            if gone, lock == nil {
+                HStack(spacing: 8) {
+                    APButton(title: "버린 것으로 적기", icon: "checkmark.circle", help: "엔진 finish discard: 지울 가지가 없으면 버린 것으로만 적습니다", axid: "ap-merge-discard-gone") { m.discard(nil) }
+                    apNote("\(v.run.work) 가지가 이미 없습니다(보드 밖에서 지움). 버린 것으로 적으면 합치기 기다림이 닫힙니다.")
+                }
+            } else if m.confirm == "discard" {
                 VStack(alignment: .leading, spacing: 6) {
                     Text(v.run.mode == "worktree" ? "가지와 작업 트리를 지웁니다." : "가지를 지웁니다.").boardFont(12, weight: .bold)
                     apNote((v.repos.count > 1 ? "저장소 \(v.repos.count)개의 " : "") + "\(v.run.work) 가지의 커밋 \(commits)개" + (v.run.mode == "worktree" ? "와 작업 트리가" : "가")
@@ -4990,7 +5054,9 @@ struct APMergeSheet: View {
                 Spacer(minLength: 4)
                 if has, p != nil { APButton(title: m.openDiff.contains(key) ? "바뀐 줄 닫기" : "바뀐 줄 보기", axid: "ap-merge-task-\(t.key ?? "\(t.n)")") { m.toggleDiff(key) } }
             }
-            if t.status == "skipped" {
+            if !t.repo.isEmpty, m.existing[t.repo] == nil, m.reading {
+                apNote(t.branch.isEmpty ? "가지를 읽는 중" : "\(t.branch) · 가지를 읽는 중")
+            } else if t.status == "skipped" {
                 apNote((t.depends.isEmpty ? "시작하지 않음" : "\(t.depends.joined(separator: ", ")) 에 기대어 시작하지 않음") + (has ? " · \(t.branch)" : " · 가지 없음"))
             } else if has {
                 apNote("\(t.branch) · 커밋 \(p?.commits ?? 0)" + (t.why.isEmpty || t.why == apUnitLabel(t.status) ? "" : " · " + t.why))
@@ -5023,9 +5089,19 @@ struct APMergeSheet: View {
         let storyCount = mine.filter(isStory).count
         let where_ = s.made.count > 1 ? "저장소 \(s.made.count)곳의 " : ""
         if v.discarded.contains(source) {
-            apNote("이 스토리를 버렸습니다(스토리 가지와 작업 가지를 지움).")
+            apNote("이 스토리를 버렸습니다(남은 스토리 가지와 작업 가지를 지우고 버린 것으로 적음).")
+        } else if m.reading || pairs.contains(where: { m.existing[$0.repo] == nil && FileManager.default.fileExists(atPath: $0.repo) }) {
+            apNote("가지를 읽는 중입니다")   // 앞 읽기 값으로 지우기 글을 보이지 않는다(5-3b ⑦)
+        } else if s.made.isEmpty {
+            // 어느 저장소에도 스토리 가지를 만들지 않음(첫 작업이 시작하지 않음) — 합칠 것도 버릴 것도 없어 합치기 기다림에 세지 않는다(5-3b ④)
+            apNote("작업이 시작하지 않아 스토리 가지가 없습니다. 합칠 것도 버릴 것도 없습니다.")
         } else if !m.reached(source, nil), mine.isEmpty {
-            apNote("이 실행이 만든 이 스토리의 가지가 남아 있지 않습니다.")
+            // 보드 밖에서 지웠거나 같은 이름으로 다시 만든 가지만 남음 — 엔진 discard 가 버린 것으로 적어 합치기 기다림을 닫는다(5-3b ④)
+            HStack(spacing: 8) {
+                APButton(title: "버린 것으로 적기", icon: "checkmark.circle", enabled: m.discardLock(source) == nil,
+                         help: m.discardLock(source) ?? "엔진 finish discard: 지울 가지가 없으면 버린 것으로만 적습니다(가지는 건드리지 않음)", axid: "ap-merge-gone-\(s.key)") { m.discard(s.key) }
+                apNote("이 실행이 만든 이 스토리의 가지가 남아 있지 않습니다(보드 밖에서 지웠거나 다시 만들어짐). 버린 것으로 적으면 합치기 기다림이 닫힙니다.")
+            }
         } else if !m.reached(source, nil) {
             if m.confirm == "discard:" + s.key {
                 VStack(alignment: .leading, spacing: 6) {

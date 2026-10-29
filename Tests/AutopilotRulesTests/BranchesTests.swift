@@ -3,8 +3,9 @@
 // 진짜 입력은 시험 빌드 뿌리(~/Library/Application Support/Claude Board Dev/autopilot)의 장난감 실행 run.json·기록 저장소 runs.branches 26개를
 // 판정에 쓰는 칸만 남기고 경로를 /w/<폴더>/<저장소> 로, 커밋을 7자로 줄인 것이다(줄인 입력도 옮기기 전 함수로 원래 입력과 같은 결과가 나왔다).
 // 승격 차례는 그 실행의 프로젝트 설정(projects/<프로젝트>.json promotion), withAutopilot 은 보드가 넘기는 값(Jira 실행이면 스토리 없는 단위가 있는가, 아니면 늘 참).
-// 기대값은 지금 동작 그대로다 — 5-3b 에서 고칠 것(② 버린 스토리 하나만 있어도 실행 전체가 버림, ④ 합치기 기다림이 사라지지 않음)도 고치지 않은 채로 적었다.
-// 고치면 그 줄의 기대값을 바꾸고 note 에 까닭을 적는다
+// 기대값은 옮길 때의 동작 그대로 적었고, 2026-10-29 5-3b 에서 고친 줄(② 지난 실행 표지를 합칠 쪽마다, ④ 스토리 가지를 만들지 않은 스토리와
+// 보드 밖에서 지운 가지, ③ 기존 가지끼리 올리는 단계의 경고)은 기대값을 바꾸고 note 에 "5-3b" 와 까닭을 적었다.
+// 장난감 줄의 새 기대값은 그 장난감의 기록(진행 상황.md 5-3·여러 저장소 절: 어느 스토리를 어디까지 합치고 어느 것을 버렸나)에서 정했다
 import Foundation
 import Testing
 import AutopilotRules
@@ -87,9 +88,15 @@ private let openRows: [OpenRow] = [
     .init(note: "merge·promote 가 아닌 못 한 일(cleanup)은 단계를 막지 않는다", branches: #"{"failed":[{"at":11,"into":"live","op":"cleanup","repo":"/r/b","source":"autopilot"}],"promoted":[{"at":10,"into":"live","repo":"/r/a","source":"autopilot"}]}"#, steps: "autopilot>live", withAutopilot: true, open: false),
     .init(note: "시각이 없으면 0 으로 보고 견준다(다시 합친 것으로 셈)", branches: #"{"failed":[{"into":"live","op":"merge","repo":"/r/b","source":"autopilot"}],"promoted":[{"into":"live","repo":"/r/a","source":"autopilot"},{"into":"live","repo":"/r/b","source":"autopilot"}]}"#, steps: "autopilot>live", withAutopilot: true, open: false),
     .init(note: "master 올리기를 한 저장소만 못 함 → 남음", branches: #"{"failed":[{"at":21,"into":"master","op":"promote","repo":"/r/b","source":"branch:live"}],"promoted":[{"at":10,"into":"live","repo":"/r/a","source":"autopilot"},{"at":20,"into":"master","repo":"/r/a","source":"branch:live"}]}"#, steps: "autopilot>live live>master@live", withAutopilot: true, open: true),
-    .init(note: "Jira: 한 스토리는 버리고 한 스토리는 live 까지 → 남은 것 없음", branches: #"{"discarded":[{"repo":"/r/a","source":"story:S1"}],"promoted":[{"at":10,"into":"live","repo":"/r/a","source":"story:S2"}],"stories":{"S1":{},"S2":{}}}"#, steps: "autopilot>live", withAutopilot: false, open: false),
-    .init(note: "Jira: 스토리 하나가 아직 → 남음", branches: #"{"promoted":[{"at":10,"into":"live","repo":"/r/a","source":"story:S2"}],"stories":{"S1":{},"S2":{}}}"#, steps: "autopilot>live", withAutopilot: false, open: true),
-    .init(note: "스토리는 합쳤지만 withAutopilot 이라 자율주행 가지가 남음", branches: #"{"promoted":[{"at":10,"into":"live","repo":"/r/a","source":"story:S1"}],"stories":{"S1":{}}}"#, steps: "autopilot>live", withAutopilot: true, open: true),
+    .init(note: "Jira: 한 스토리는 버리고 한 스토리는 live 까지 → 남은 것 없음(스토리 기록에 head — 가지를 만든 스토리)", branches: #"{"discarded":[{"repo":"/r/a","source":"story:S1"}],"promoted":[{"at":10,"into":"live","repo":"/r/a","source":"story:S2"}],"stories":{"S1":{"repos":{"/r/a":{"branch":"f/S1","head":"h1"}}},"S2":{"repos":{"/r/a":{"branch":"f/S2","head":"h2"}}}}}"#, steps: "autopilot>live", withAutopilot: false, open: false),
+    .init(note: "Jira: 스토리 하나가 아직 → 남음", branches: #"{"promoted":[{"at":10,"into":"live","repo":"/r/a","source":"story:S2"}],"stories":{"S1":{"repos":{"/r/a":{"branch":"f/S1","head":"h1"}}},"S2":{"repos":{"/r/a":{"branch":"f/S2","head":"h2"}}}}}"#, steps: "autopilot>live", withAutopilot: false, open: true),
+    .init(note: "스토리는 합쳤지만 withAutopilot 이라 자율주행 가지가 남음", branches: #"{"promoted":[{"at":10,"into":"live","repo":"/r/a","source":"story:S1"}],"stories":{"S1":{"repos":{"/r/a":{"branch":"f/S1","head":"h1"}}}}}"#, steps: "autopilot>live", withAutopilot: true, open: true),
+    .init(note: "5-3b ④: 어느 저장소에도 스토리 가지를 만들지 않은 스토리(head 없음)는 합칠 쪽이 아니다 → S2 만 live 에 합쳐 남은 것 없음(전에는 S1 이 늘 남음)", branches: #"{"promoted":[{"at":10,"into":"live","repo":"/r/a","source":"story:S2"}],"stories":{"S1":{"repos":{"/r/a":{"branch":"f/S1","merged":[],"unmerged":[{"task":"f/T1","why":"건너뜀"}]},"/r/b":{"branch":"f/S1","merged":[]}}},"S2":{"repos":{"/r/a":{"branch":"f/S2","head":"h2"}}}}}"#, steps: "autopilot>live", withAutopilot: false, open: false),
+    .init(note: "5-3b ④: 옛 꼴(repo 하나)도 head 가 없으면 합칠 쪽이 아니다", branches: #"{"promoted":[{"at":10,"into":"live","repo":"/r/a","source":"story:S2"}],"stories":{"S1":{"branch":"f/S1","repo":"/r/a","unmerged":[]},"S2":{"branch":"f/S2","head":"h2","repo":"/r/a"}}}"#, steps: "autopilot>live", withAutopilot: false, open: false),
+    .init(note: "5-3b ④: 한 저장소에라도 head 가 있으면 합칠 쪽이다", branches: #"{"promoted":[{"at":10,"into":"live","repo":"/r/a","source":"story:S2"}],"stories":{"S1":{"repos":{"/r/a":{"branch":"f/S1"},"/r/b":{"branch":"f/S1","head":"h1"}}},"S2":{"repos":{"/r/a":{"branch":"f/S2","head":"h2"}}}}}"#, steps: "autopilot>live", withAutopilot: false, open: true),
+    .init(note: "5-3b ④: 모든 스토리가 가지를 만들지 않았으면 자율주행 가지만 합칠 쪽(스토리가 없을 때와 같다) → 남음", branches: #"{"stories":{"S1":{"repos":{"/r/a":{"branch":"f/S1"}}}}}"#, steps: "autopilot>live", withAutopilot: false, open: true),
+    .init(note: "5-3b ④: 그 자율주행 가지를 버리면 → 남은 것 없음", branches: #"{"discarded":[{"repo":"/r/a","source":"autopilot"}],"stories":{"S1":{"repos":{"/r/a":{"branch":"f/S1"}}}}}"#, steps: "autopilot>live", withAutopilot: false, open: false),
+    .init(note: "5-3b ④: 보드 밖에서 지운 가지를 엔진 discard 가 버린 것으로 적음(left missing) → 남은 것 없음", branches: #"{"discarded":[{"branch":"autopilot/x","left":"missing","repo":"/r/a","source":"autopilot"}]}"#, steps: "autopilot>dev autopilot>live@dev", withAutopilot: true, open: false),
     .init(note: "stories 가 빈 객체면 자율주행 가지를 넣는다", branches: #"{"stories":{}}"#, steps: "", withAutopilot: false, open: true),
     .init(note: "stories 가 객체가 아니면 스토리 없음으로 본다", branches: #"{"promoted":[{"at":1,"into":"dev","repo":"/r/a","source":"autopilot"}],"stories":["S1"]}"#, steps: "", withAutopilot: false, open: false),
     .init(note: "자율주행 단계 없는 차례(live → master 뿐): 합친 줄은 닿음, master 를 안 함 → 남음", branches: #"{"promoted":[{"at":1,"into":"dev","repo":"/r/a","source":"autopilot"}]}"#, steps: "live>master", withAutopilot: true, open: true),
@@ -191,6 +198,7 @@ struct MarkRow: Row {
     let branches: String    // branches JSON, 또는 "toy:<실행 id>"
     let mark: APMergeMark?
     let label: String?
+    var withAutopilot = true   // 보드가 넘기는 값(Jira 실행이면 스토리 없는 단위가 있는가) — Jira 장난감은 모두 스토리 단위뿐이라 거짓
 }
 
 private let markRows: [MarkRow] = [
@@ -200,8 +208,16 @@ private let markRows: [MarkRow] = [
     .init(note: "가지는 있고 합친 줄·버린 줄이 없으면 합치기 기다림", branches: #"{"repos":{"/r/a":{}}}"#, mark: .waiting, label: "합치기 기다림"),
     .init(note: "빈 promoted·discarded 도 합치기 기다림", branches: #"{"discarded":[],"promoted":[],"repos":{"/r/a":{}}}"#, mark: .waiting, label: "합치기 기다림"),
     .init(note: "버린 줄이 있으면 버림", branches: #"{"discarded":[{"repo":"/r/a","source":"autopilot"}],"repos":{"/r/a":{}}}"#, mark: .discarded, label: "버림"),
-    .init(note: "지금 동작: 버린 스토리 하나만 있어도 master 까지 올린 실행 전체가 버림(5-3b ②)", branches: #"{"discarded":[{"repo":"/r/a","source":"story:S1"}],"promoted":[{"into":"master","repo":"/r/a","source":"autopilot"}],"repos":{"/r/a":{}}}"#, mark: .discarded, label: "버림"),
-    .init(note: "discarded 의 줄 꼴은 보지 않는다(무엇이든 하나 있으면 버림)", branches: #"{"discarded":["x"],"repos":{"/r/a":{}}}"#, mark: .discarded, label: "버림"),
+    .init(note: "5-3b ②: 합칠 쪽이 아닌 버린 줄(스토리 기록이 없는 story:S1)은 세지 않는다 → master 까지 올림(전에는 실행 전체가 버림)", branches: #"{"discarded":[{"repo":"/r/a","source":"story:S1"}],"promoted":[{"into":"master","repo":"/r/a","source":"autopilot"}],"repos":{"/r/a":{}}}"#, mark: .promoted("master"), label: "master 까지 올림"),
+    .init(note: "5-3b ②: 버린 줄은 source 가 있는 객체만 센다(전에는 무엇이든 하나 있으면 버림)", branches: #"{"discarded":["x"],"repos":{"/r/a":{}}}"#, mark: .waiting, label: "합치기 기다림"),
+    .init(note: "5-3b ②: 한 스토리는 live 에 합치고 한 스토리는 버림 → 섞임", branches: #"{"discarded":[{"repo":"/r/a","source":"story:S1"}],"promoted":[{"into":"live","repo":"/r/a","source":"story:S2"}],"repos":{"/r/a":{}},"stories":{"S1":{"repos":{"/r/a":{"branch":"f/S1","head":"h1"}}},"S2":{"repos":{"/r/a":{"branch":"f/S2","head":"h2"}}}}}"#, mark: .mixed(promoted: 1, discarded: 1, waiting: 0), label: "합침 1 · 버림 1", withAutopilot: false),
+    .init(note: "5-3b ②: 합침·버림·기다림이 섞임", branches: #"{"discarded":[{"repo":"/r/a","source":"story:S1"}],"promoted":[{"into":"dev","repo":"/r/a","source":"story:S2"}],"repos":{"/r/a":{}},"stories":{"S1":{"repos":{"/r/a":{"branch":"f/S1","head":"h1"}}},"S2":{"repos":{"/r/a":{"branch":"f/S2","head":"h2"}}},"S3":{"repos":{"/r/a":{"branch":"f/S3","head":"h3"}}}}}"#, mark: .mixed(promoted: 1, discarded: 1, waiting: 1), label: "합침 1 · 버림 1 · 기다림 1", withAutopilot: false),
+    .init(note: "5-3b ②: 버림과 기다림만", branches: #"{"discarded":[{"repo":"/r/a","source":"story:S1"}],"repos":{"/r/a":{}},"stories":{"S1":{"repos":{"/r/a":{"branch":"f/S1","head":"h1"}}},"S2":{"repos":{"/r/a":{"branch":"f/S2","head":"h2"}}}}}"#, mark: .mixed(promoted: 0, discarded: 1, waiting: 1), label: "버림 1 · 기다림 1", withAutopilot: false),
+    .init(note: "5-3b ②: 모든 스토리를 합침 → 마지막으로 받은 가지(기존 가지끼리 올린 master 까지)", branches: #"{"promoted":[{"into":"live","repo":"/r/a","source":"story:S1"},{"into":"live","repo":"/r/a","source":"story:S2"},{"into":"master","repo":"/r/a","source":"branch:live"}],"repos":{"/r/a":{}},"stories":{"S1":{"repos":{"/r/a":{"branch":"f/S1","head":"h1"}}},"S2":{"repos":{"/r/a":{"branch":"f/S2","head":"h2"}}}}}"#, mark: .promoted("master"), label: "master 까지 올림", withAutopilot: false),
+    .init(note: "5-3b ②: Jira 단위만 있는 실행의 쓰이지 않은 자율주행 가지를 지운 줄은 세지 않는다", branches: #"{"discarded":[{"repo":"/r/a","source":"autopilot"}],"promoted":[{"into":"live","repo":"/r/a","source":"story:S1"}],"repos":{"/r/a":{}},"stories":{"S1":{"repos":{"/r/a":{"branch":"f/S1","head":"h1"}}}}}"#, mark: .promoted("live"), label: "live 에 합침", withAutopilot: false),
+    .init(note: "5-3b ②: 스토리 없는 단위가 있는 Jira 실행은 자율주행 가지도 합칠 쪽 — 그 가지만 버림 → 섞임", branches: #"{"discarded":[{"repo":"/r/a","source":"autopilot"}],"promoted":[{"into":"live","repo":"/r/a","source":"story:S1"}],"repos":{"/r/a":{}},"stories":{"S1":{"repos":{"/r/a":{"branch":"f/S1","head":"h1"}}}}}"#, mark: .mixed(promoted: 1, discarded: 1, waiting: 0), label: "합침 1 · 버림 1", withAutopilot: true),
+    .init(note: "5-3b ②④: 가지를 만들지 않은 스토리는 세지 않는다", branches: #"{"promoted":[{"into":"live","repo":"/r/a","source":"story:S2"}],"repos":{"/r/a":{}},"stories":{"S1":{"repos":{"/r/a":{"branch":"f/S1"}}},"S2":{"repos":{"/r/a":{"branch":"f/S2","head":"h2"}}}}}"#, mark: .promoted("live"), label: "live 에 합침", withAutopilot: false),
+    .init(note: "5-3b ④: 보드 밖에서 지운 가지를 버린 것으로 적은 줄(left missing)도 버림", branches: #"{"discarded":[{"branch":"autopilot/x","left":"missing","repo":"/r/a","source":"autopilot"}],"repos":{"/r/a":{}}}"#, mark: .discarded, label: "버림"),
     .init(note: "discarded 가 배열이 아니면 버린 것 없음", branches: #"{"discarded":{"source":"autopilot"},"repos":{"/r/a":{}}}"#, mark: .waiting, label: "합치기 기다림"),
     .init(note: "dev 에 합침", branches: #"{"promoted":[{"into":"dev","repo":"/r/a","source":"autopilot"}],"repos":{"/r/a":{}}}"#, mark: .promoted("dev"), label: "dev 에 합침"),
     .init(note: "마지막으로 받은 가지가 master 면 까지 올림", branches: #"{"promoted":[{"into":"dev","repo":"/r/a","source":"autopilot"},{"into":"master","repo":"/r/a","source":"branch:dev"}],"repos":{"/r/a":{}}}"#, mark: .promoted("master"), label: "master 까지 올림"),
@@ -210,21 +226,21 @@ private let markRows: [MarkRow] = [
     .init(note: "into 가 없는 줄은 건너뛰고 그 앞 줄", branches: #"{"promoted":[{"into":"live","repo":"/r/a","source":"autopilot"},{"repo":"/r/a","source":"autopilot"}],"repos":{"/r/a":{}}}"#, mark: .promoted("live"), label: "live 에 합침"),
     .init(note: "into 가 있는 줄이 없으면 합치기 기다림", branches: #"{"promoted":[{"repo":"/r/a","source":"autopilot"}],"repos":{"/r/a":{}}}"#, mark: .waiting, label: "합치기 기다림"),
     .init(note: "가지 이름은 대소문자를 가린다(Master 는 에 합침)", branches: #"{"promoted":[{"into":"Master","repo":"/r/a","source":"autopilot"}],"repos":{"/r/a":{}}}"#, mark: .promoted("Master"), label: "Master 에 합침"),
-    .init(note: "여러 저장소 스토리: 한 저장소의 스토리를 버렸으면 실행 전체가 버림(지금 동작)", branches: #"{"discarded":[{"repo":"/r/b","source":"story:S1"}],"promoted":[{"into":"dev","repo":"/r/a","source":"story:S1"},{"into":"live","repo":"/r/a","source":"story:S1"}],"repos":{"/r/a":{},"/r/b":{}},"stories":{"S1":{"repos":{"/r/a":{"branch":"f/S1","head":"h1","merged":["T1","T2"]},"/r/b":{"branch":"f/S1","unmerged":["T3"]}}}}}"#, mark: .discarded, label: "버림"),
+    .init(note: "여러 저장소 스토리: 버린 줄이 있는 스토리는 합친 줄이 있어도 버림(엔진은 합친 뒤 버리지 않아 생기지 않는 꼴)", branches: #"{"discarded":[{"repo":"/r/b","source":"story:S1"}],"promoted":[{"into":"dev","repo":"/r/a","source":"story:S1"},{"into":"live","repo":"/r/a","source":"story:S1"}],"repos":{"/r/a":{},"/r/b":{}},"stories":{"S1":{"repos":{"/r/a":{"branch":"f/S1","head":"h1","merged":["T1","T2"]},"/r/b":{"branch":"f/S1","unmerged":["T3"]}}}}}"#, mark: .discarded, label: "버림", withAutopilot: false),
     .init(note: "장난감 20261027-1909-zz-ap52-todo(저장소 1·버린 줄 1)", branches: "toy:20261027-1909-zz-ap52-todo", mark: .discarded, label: "버림"),
-    .init(note: "장난감 20261027-1918-zz-ap52-jira(저장소 1·스토리 3·버린 줄 7)", branches: "toy:20261027-1918-zz-ap52-jira", mark: .discarded, label: "버림"),
-    .init(note: "장난감 20261028-1043-zz-ap53-jira(저장소 1·스토리 2·합친 줄 3·버린 줄 3)", branches: "toy:20261028-1043-zz-ap53-jira", mark: .discarded, label: "버림"),
+    .init(note: "장난감 20261027-1918-zz-ap52-jira(저장소 1·스토리 3·버린 줄 7) · 스토리 셋 모두 버림", branches: "toy:20261027-1918-zz-ap52-jira", mark: .discarded, label: "버림", withAutopilot: false),
+    .init(note: "장난감 20261028-1043-zz-ap53-jira(저장소 1·스토리 2·합친 줄 3·버린 줄 3) · 5-3b ②: SHOP-12 는 live·master 까지, SHOP-20 은 버림(전에는 버림)", branches: "toy:20261028-1043-zz-ap53-jira", mark: .mixed(promoted: 1, discarded: 1, waiting: 0), label: "합침 1 · 버림 1", withAutopilot: false),
     .init(note: "장난감 merge-check-1(저장소 1·버린 줄 1)", branches: "toy:merge-check-1", mark: .discarded, label: "버림"),
     .init(note: "장난감 zz-ap51-inplace(저장소 1)", branches: "toy:zz-ap51-inplace", mark: .waiting, label: "합치기 기다림"),
-    .init(note: "장난감 zz-ap51-jira(저장소 1·스토리 2)", branches: "toy:zz-ap51-jira", mark: .waiting, label: "합치기 기다림"),
+    .init(note: "장난감 zz-ap51-jira(저장소 1·스토리 2) · 두 스토리 모두 기다림", branches: "toy:zz-ap51-jira", mark: .waiting, label: "합치기 기다림", withAutopilot: false),
     .init(note: "장난감 zz-ap51-judge(저장소 1)", branches: "toy:zz-ap51-judge", mark: .waiting, label: "합치기 기다림"),
     .init(note: "장난감 zz-ap51-long(저장소 1)", branches: "toy:zz-ap51-long", mark: .waiting, label: "합치기 기다림"),
     .init(note: "장난감 zz-ap51-wt(저장소 1)", branches: "toy:zz-ap51-wt", mark: .waiting, label: "합치기 기다림"),
     .init(note: "장난감 zz-ap52-p1(저장소 1·버린 줄 1)", branches: "toy:zz-ap52-p1", mark: .discarded, label: "버림"),
-    .init(note: "장난감 zz-ap52-pj(저장소 1·스토리 3·버린 줄 8)", branches: "toy:zz-ap52-pj", mark: .discarded, label: "버림"),
+    .init(note: "장난감 zz-ap52-pj(저장소 1·스토리 3·버린 줄 8) · 스토리 셋 모두 버림", branches: "toy:zz-ap52-pj", mark: .discarded, label: "버림", withAutopilot: false),
     .init(note: "장난감 zz-ap53-cpu(저장소 1·버린 줄 1)", branches: "toy:zz-ap53-cpu", mark: .discarded, label: "버림"),
     .init(note: "장난감 zz-ap53-inplace(저장소 2·합친 줄 6)", branches: "toy:zz-ap53-inplace", mark: .promoted("master"), label: "master 까지 올림"),
-    .init(note: "장난감 zz-ap53-jira(저장소 1·스토리 3·합친 줄 5·버린 줄 3)", branches: "toy:zz-ap53-jira", mark: .discarded, label: "버림"),
+    .init(note: "장난감 zz-ap53-jira(저장소 1·스토리 3·합친 줄 5·버린 줄 3) · 5-3b ②: SHOP-16·SHOP-12 는 live·master 까지, SHOP-20 은 버림(전에는 버림)", branches: "toy:zz-ap53-jira", mark: .mixed(promoted: 2, discarded: 1, waiting: 0), label: "합침 2 · 버림 1", withAutopilot: false),
     .init(note: "장난감 zz-ap53-wt(저장소 1·버린 줄 1)", branches: "toy:zz-ap53-wt", mark: .discarded, label: "버림"),
     .init(note: "장난감 zz-ap53-wt2(저장소 1·합친 줄 3)", branches: "toy:zz-ap53-wt2", mark: .promoted("master"), label: "master 까지 올림"),
     .init(note: "장난감 zz-ap53-wt3(저장소 1·버린 줄 1)", branches: "toy:zz-ap53-wt3", mark: .discarded, label: "버림"),
@@ -232,19 +248,19 @@ private let markRows: [MarkRow] = [
     .init(note: "장난감 zz-cpu-ap2(저장소 1·버린 줄 1)", branches: "toy:zz-cpu-ap2", mark: .discarded, label: "버림"),
     .init(note: "장난감 zz-cpu-run(저장소 1·버린 줄 1)", branches: "toy:zz-cpu-run", mark: .discarded, label: "버림"),
     .init(note: "장난감 zz-merge-gui(저장소 1·버린 줄 1)", branches: "toy:zz-merge-gui", mark: .discarded, label: "버림"),
-    .init(note: "장난감 zz-mr-before(저장소 2·스토리 3·버린 줄 10)", branches: "toy:zz-mr-before", mark: .discarded, label: "버림"),
-    .init(note: "장난감 zz-mr-jira(저장소 2·스토리 3·합친 줄 7·못 한 줄 1·버린 줄 6)", branches: "toy:zz-mr-jira", mark: .discarded, label: "버림"),
-    .init(note: "장난감 zz-mr-jira2(저장소 2·스토리 3·합친 줄 5·못 한 줄 1·버린 줄 8)", branches: "toy:zz-mr-jira2", mark: .discarded, label: "버림"),
-    .init(note: "장난감 zz-mr-jira3(저장소 2·스토리 1·합친 줄 4·버린 줄 2)", branches: "toy:zz-mr-jira3", mark: .discarded, label: "버림"),
-    .init(note: "장난감 zz-mr-old(저장소 1·스토리 1·합친 줄 2·버린 줄 1)", branches: "toy:zz-mr-old", mark: .discarded, label: "버림"),
+    .init(note: "장난감 zz-mr-before(저장소 2·스토리 3·버린 줄 10) · 스토리 셋 모두 버림", branches: "toy:zz-mr-before", mark: .discarded, label: "버림", withAutopilot: false),
+    .init(note: "장난감 zz-mr-jira(저장소 2·스토리 3·합친 줄 7·못 한 줄 1·버린 줄 6) · 5-3b ②: SHOP-1 은 두 저장소 live·master 까지, SHOP-4·SHOP-6 은 버림(전에는 버림)", branches: "toy:zz-mr-jira", mark: .mixed(promoted: 1, discarded: 2, waiting: 0), label: "합침 1 · 버림 2", withAutopilot: false),
+    .init(note: "장난감 zz-mr-jira2(저장소 2·스토리 3·합친 줄 5·못 한 줄 1·버린 줄 8) · 5-3b ②: SHOP-11 은 두 저장소 live 까지, SHOP-14·SHOP-21 은 버림(전에는 버림)", branches: "toy:zz-mr-jira2", mark: .mixed(promoted: 1, discarded: 2, waiting: 0), label: "합침 1 · 버림 2", withAutopilot: false),
+    .init(note: "장난감 zz-mr-jira3(저장소 2·스토리 1·합친 줄 4·버린 줄 2) · 5-3b ②: SHOP-41 을 두 저장소 live 에 합침, 버린 줄은 쓰이지 않은 자율주행 가지뿐(전에는 버림)", branches: "toy:zz-mr-jira3", mark: .promoted("live"), label: "live 에 합침", withAutopilot: false),
+    .init(note: "장난감 zz-mr-old(저장소 1·스토리 1·합친 줄 2·버린 줄 1) · 5-3b ②: SHOP-31 을 live 에 합침, 버린 줄은 쓰이지 않은 자율주행 가지뿐(전에는 버림)", branches: "toy:zz-mr-old", mark: .promoted("live"), label: "live 에 합침", withAutopilot: false),
 ]
 
 @Suite("자율주행 합치기 상태: 지난 실행 표지") struct MergeMarkTests {
-    @Test("가지 기록 없음은 nil, 버린 줄이 있으면 버림, 합친 줄이 있으면 마지막으로 받은 가지, 아니면 합치기 기다림", arguments: markRows)
+    @Test("가지 기록 없음은 nil, 합칠 쪽마다 버림·합침·기다림 — 모두 같으면 그것(합침은 마지막으로 받은 가지), 섞이면 섞인 수", arguments: markRows)
     func 표(_ r: MarkRow) {
         let br = r.branches.hasPrefix("toy:") ? object(toys[String(r.branches.dropFirst(4))] ?? "") : object(r.branches)
         #expect(!br.isEmpty, "장난감 기록을 찾지 못했다")
-        let m = apMergeMark(br)
+        let m = apMergeMark(br, stories: r.withAutopilot)
         #expect(m == r.mark)
         #expect(m?.label == r.label)
     }
@@ -316,6 +332,7 @@ struct DiscardRow: Row {
     let note: String
     let fate: APRefFate
     let isSource: Bool
+    var recorded = false     // 그 가지에 버린 줄이 이미 있음
     let discarded: String?   // 키 차례 JSON, nil 이면 적지 않음
     let failed: String?
 }
@@ -327,15 +344,22 @@ private let discardRows: [DiscardRow] = [
           discarded: #"{"at":5,"branch":"f/S1","head":"def5678","repo":"/r/a","source":"story:S1"}"#, failed: nil),
     .init(note: "지우지 못함 → 못 한 줄", fate: .failed("잠금 파일"), isSource: true,
           discarded: nil, failed: #"{"at":5,"branch":"f/S1","op":"discard","repo":"/r/a","source":"story:S1","why":"잠금 파일"}"#),
-    .init(note: "지금 동작: 이미 없는 합칠 쪽 가지는 적지 않는다(5-3b ④, 합치기 기다림이 남음)", fate: .missing, isSource: true, discarded: nil, failed: nil),
-    .init(note: "지금 동작: 같은 이름으로 다시 만든 합칠 쪽 가지는 적지 않는다", fate: .foreign, isSource: true, discarded: nil, failed: nil),
+    .init(note: "5-3b ④: 이미 없는 합칠 쪽 가지(보드 밖에서 지움)도 버린 줄로 적는다(전에는 적지 않아 합치기 기다림이 남음)", fate: .missing, isSource: true,
+          discarded: #"{"at":5,"branch":"f/S1","left":"missing","repo":"/r/a","source":"story:S1"}"#, failed: nil),
+    .init(note: "5-3b ④: 같은 이름으로 다시 만든 합칠 쪽 가지는 남기되 버린 줄로 적는다", fate: .foreign, isSource: true,
+          discarded: #"{"at":5,"branch":"f/S1","left":"foreign","repo":"/r/a","source":"story:S1"}"#, failed: nil),
+    .init(note: "같은 이름으로 다시 만든 작업 가지는 적지 않는다", fate: .foreign, isSource: false, discarded: nil, failed: nil),
+    .init(note: "5-3b ④: 이미 버린 줄이 있는 가지가 없으면 다시 적지 않는다(버리기를 다시 눌러도 줄이 늘지 않게)", fate: .missing, isSource: true, recorded: true, discarded: nil, failed: nil),
+    .init(note: "이미 버린 줄이 있는 남긴 가지도 다시 적지 않는다", fate: .foreign, isSource: true, recorded: true, discarded: nil, failed: nil),
+    .init(note: "이미 버린 줄이 있어도 지운 가지는 적는다(같은 이름으로 다시 생겼다가 지움)", fate: .deleted(head: "abc1234"), isSource: true, recorded: true,
+          discarded: #"{"at":5,"branch":"f/S1","head":"abc1234","repo":"/r/a","source":"story:S1"}"#, failed: nil),
     .init(note: "이미 없는 작업 가지는 적지 않는다", fate: .missing, isSource: false, discarded: nil, failed: nil),
 ]
 
 @Suite("자율주행 버리기 기록") struct DiscardRowsTests {
     @Test("지운 가지는 버린 줄, 지우지 못한 가지는 못 한 줄", arguments: discardRows)
     func 표(_ r: DiscardRow) {
-        let x = apDiscardRows(source: "story:S1", repo: "/r/a", branch: "f/S1", fate: r.fate, isSource: r.isSource, at: 5)
+        let x = apDiscardRows(source: "story:S1", repo: "/r/a", branch: "f/S1", fate: r.fate, isSource: r.isSource, recorded: r.recorded, at: 5)
         #expect(x.discarded.map(text) == r.discarded)
         #expect(x.failed.map(text) == r.failed)
     }
@@ -358,13 +382,42 @@ private let carriesRows: [CarriesRow] = [
     .init(note: "① dev ← 자율주행 가지(after 없음) → 세지 않는다", source: "autopilot", after: nil, base: "dev", want: false),
     .init(note: "② 인데 출발 가지가 live → 세지 않는다", source: "autopilot", after: "dev", base: "live", want: false),
     .init(note: "출발 가지를 모름 → 세지 않는다", source: "autopilot", after: "dev", base: nil, want: false),
-    .init(note: "지금 동작: ③ master ← live(after live), 출발 가지 live → 센다(앞 실행의 커밋까지, 5-3b ③)", source: "branch:live", after: "live", base: "live", want: true),
+    .init(note: "5-3b ③: ③ master ← live(after live)는 출발 가지가 live 여도 세지 않는다(전에는 앞 실행의 커밋까지 셈)", source: "branch:live", after: "live", base: "live", want: false),
+    .init(note: "기존 가지끼리 올리는 단계는 출발 가지와 상관없이 세지 않는다", source: "branch:dev", after: "dev", base: "dev", want: false),
     .init(note: "③ 인데 출발 가지가 dev → 세지 않는다", source: "branch:live", after: "live", base: "dev", want: false),
 ]
 
 @Suite("자율주행 합치기·승격: 출발 가지에만 있던 커밋 경고") struct CarriesBaseTests {
-    @Test("앞 단계 가지가 출발 가지인 단계에서 센다", arguments: carriesRows)
+    @Test("이 실행의 가지를 합치는 단계에서 앞 단계 가지가 출발 가지면 센다", arguments: carriesRows)
     func 표(_ r: CarriesRow) {
         #expect(apCarriesBase(source: r.source, after: r.after, base: r.base) == r.want)
+    }
+}
+
+// MARK: - finish 의 뿌리 (apFinishRoot — 엔진 finish --dev, 5-3b ⑨)
+
+struct FinishRootRow: Row {
+    let note: String
+    let flag: Bool
+    let runDev: Bool?
+    let dev: Bool
+    let refuse: Bool
+}
+
+private let finishRootRows: [FinishRootRow] = [
+    .init(note: "시험 빌드 실행에 --dev → 시험 빌드 뿌리", flag: true, runDev: true, dev: true, refuse: false),
+    .init(note: "시험 빌드 실행에 --dev 가 없어도 run.json 을 따른다(보드·옛 손 명령)", flag: false, runDev: true, dev: true, refuse: false),
+    .init(note: "설치판 실행 → 설치판 뿌리", flag: false, runDev: false, dev: false, refuse: false),
+    .init(note: "설치판 실행에 --dev → 거부(다른 뿌리의 승격 차례·기록으로 가지를 움직이지 않게)", flag: true, runDev: false, dev: false, refuse: true),
+    .init(note: "run.json 에 dev 가 없는 옛 실행은 --dev 를 따른다", flag: true, runDev: nil, dev: true, refuse: false),
+    .init(note: "옛 실행에 --dev 가 없으면 설치판 뿌리", flag: false, runDev: nil, dev: false, refuse: false),
+]
+
+@Suite("자율주행 finish 의 뿌리") struct FinishRootTests {
+    @Test("뿌리는 그 실행이 출발한 뿌리, --dev 는 맞는지만 본다", arguments: finishRootRows)
+    func 표(_ r: FinishRootRow) {
+        let x = apFinishRoot(flag: r.flag, runDev: r.runDev)
+        #expect(x.dev == r.dev)
+        #expect(x.refuse == r.refuse)
     }
 }

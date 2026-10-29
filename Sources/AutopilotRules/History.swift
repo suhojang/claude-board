@@ -10,7 +10,9 @@ public struct APRunTag: Equatable, Sendable {
 }
 
 // 상세에 보일 실행. selected 는 사람이 고른 실행(nil 이면 고르지 않음), runs 는 최근 것부터, project 는 거른 프로젝트(nil 이면 모든 프로젝트).
-// 지금 동작: 고른 실행이 있으면 그것, 없으면 전체 목록의 첫 실행 — 거른 프로젝트는 보지 않는다
+// 거른 목록 안에서 고른다(5-3b ⑥): 고른 실행이 거른 목록에 있으면 그것, 아니면 거른 목록의 첫 실행(거른 목록이 비면 없음)
 public func apHistoryPick(selected: String?, runs: [APRunTag], project: String?) -> String? {
-    selected ?? runs.first?.id
+    let shown = runs.filter { project == nil || $0.project == project }
+    if let s = selected, shown.contains(where: { $0.id == s }) { return s }
+    return shown.first?.id
 }

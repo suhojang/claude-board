@@ -12,7 +12,8 @@
 //        claude-autopilot finish <실행 폴더> merge --into <가지> [--story <키>] | promote <가지> --into <가지> | discard [--story <키>]
 //                                            | cleanup --story <키> [--unmerged]
 //                                                                   끝난 실행의 가지 승격과 합친 가지 지우기(사람이 부른다. 엔진이 스스로 부르지 않는다).
-//                                                                   --story 는 그 스토리가 가지를 만든 모든 저장소에 대해 먼저 다 보고 한다
+//                                                                   --story 는 그 스토리가 가지를 만든 모든 저장소에 대해 먼저 다 보고 한다.
+//                                                                   [--dev] 는 받되 그 실행의 뿌리(run.json dev)와 맞는지만 본다
 import Foundation
 import Darwin
 import CryptoKit
@@ -706,9 +707,11 @@ func currentBranch(_ repo: String) -> String? { gitOut(["symbolic-ref", "-q", "-
 func headOf(_ repo: String, _ ref: String) -> String? { gitOut(["rev-parse", "-q", "--verify", ref + "^{commit}"], cwd: repo).flatMap { $0.isEmpty ? nil : $0 } }
 func branchExists(_ repo: String, _ b: String) -> Bool { headOf(repo, "refs/heads/" + b) != nil }
 func isAncestor(_ repo: String, _ a: String, _ b: String) -> Bool { gitRun(["merge-base", "--is-ancestor", a, b], cwd: repo).code == 0 }
-// 작업 트리 상태 줄(추적 안 하는 파일 포함, 무시 파일 제외). 색인을 고쳐 쓰지 않게 --no-optional-locks
+// 작업 트리 상태 줄(추적 안 하는 파일 포함, 무시 파일 제외). 색인을 고쳐 쓰지 않게 --no-optional-locks.
+// 줄 앞 빈칸이 상태 글자라("XY 경로") 출력 전체를 다듬지 않는다 — gitOut 은 다듬어 첫 줄의 " M" 이 "M" 이 됐다(5-3b ①, 경로만 보관할 때 경로가 어긋남)
 func porcelain(_ repo: String) -> [String] {
-    (gitOut(["--no-optional-locks", "status", "--porcelain"], cwd: repo) ?? "").split(separator: "\n").map(String.init)
+    let r = runTool("/usr/bin/env", gitHardenEnv + ["/usr/bin/git"] + gitHardenC + ["--no-optional-locks", "status", "--porcelain"], cwd: repo)
+    return r.code == 0 ? r.out.split(separator: "\n").map(String.init).filter { !$0.isEmpty } : []
 }
 // 가지가 걸려 있는 작업 트리(가지 이름 → 작업 트리 경로)
 func checkedOut(_ repo: String) -> [String: String] {
@@ -1558,7 +1561,11 @@ final class Engine {
             }
             for r in repos {
                 let i = repoInfo(r), base = (i["base"] as? [String: Any])?["branch"] as? String ?? "?"
-                event("engine", "\(repoName(r)): 출발 가지 \(base) 에서 만든 \(i["work"] ?? "?") 로 원래 작업 트리를 바꿔 돕니다. 끝나면 깨끗할 때 \((i["original"] as? String) ?? "출발 때 자리") 로 되돌립니다.")
+                if let w = i["work_tree"] as? String {   // 따로 작업 트리(5-3b ⑧: 전에는 이 모드에서도 "원래 작업 트리를 바꿔"라고 적었다)
+                    event("engine", "\(repoName(r)): 출발 가지 \(base) 에서 만든 \(i["work"] ?? "?") 를 따로 작업 트리(\(w))에서 돕니다. 원래 작업 트리와 가지(\((i["original"] as? String) ?? "출발 때 자리"))는 건드리지 않습니다.")
+                } else {
+                    event("engine", "\(repoName(r)): 출발 가지 \(base) 에서 만든 \(i["work"] ?? "?") 로 원래 작업 트리를 바꿔 돕니다. 끝나면 깨끗할 때 \((i["original"] as? String) ?? "출발 때 자리") 로 되돌립니다.")
+                }
             }
             setState("running", "단위를 시작하는 중입니다.")
             record("출발")
@@ -1645,7 +1652,16 @@ final class Engine {
                 event("engine", "출발 때 남긴 하네스 지문을 찾지 못해 끝 검사를 하지 못했습니다.")
             }
         }
-        if !repos.isEmpty, br["end"] == nil { endBranches() }
+        if !repos.isEmpty, br["end"] == nil {
+            // 마지막 단위가 읽기 전용 자리에 남긴 변경 — 보관해야 원래 작업 트리를 출발 때 가지로 되돌릴 수 있다
+            stashReadOnly(unit: apStashUnit(statuses: queue.map { $0["status"] as? String ?? "pending" }, before: nil))
+            let st = br["stashed"] as? [[String: Any]] ?? []
+            if !st.isEmpty {
+                let where_ = Set(st.map { "\(repoName($0["repo"] as? String ?? "")) \($0["branch"] ?? "")" }).sorted()
+                event("engine", "읽기 전용으로 걸어 둔 자리에 남은 변경을 \(st.count)번 따로 보관했습니다(\(where_.joined(separator: ", "))). 그 저장소에서 git stash list 로 보고, 쓸 것이면 사람이 apply 합니다.")
+            }
+            endBranches()
+        }
         saveRun()
         record("끝")
         if restoreBranches() { record("되돌린 뒤") }
@@ -1956,6 +1972,8 @@ final class Engine {
                 return false
             }
         }
+        // 앞 단위가 읽기 전용 자리에 남긴 변경을 먼저 보관한다 — 다음 단위가 같은 스토리 가지에 그대로 걸려 있어도(바꾸지 않아도) 그 변경을 보지 않게
+        stashReadOnly(unit: apStashUnit(statuses: queue.map { $0["status"] as? String ?? "pending" }, before: n))
         let target = def(n)["story"] == nil ? nil : repoOf(cwd(n))
         for r in repos {
             var want = repoInfo(r)["work"] as? String ?? ""
@@ -1996,6 +2014,38 @@ final class Engine {
         return nil
     }
 
+    // 읽기 전용으로 걸어 둔 자리(같은 스토리의 다른 저장소 작업 동안 스토리 가지)에 모델이 남긴 변경을 엔진이 따로 보관한다(2026-10-28 사용자 결정,
+    // 5-3b ①) — 판정과 다음 단위에 들어가지 않게 하고 다음 단위를 이어 간다(전에는 뒤 단위를 모두 건너뜀). 보관은 git stash(메시지에 실행 id·단위·
+    // 저장소, 추적 안 하는 파일도), 출발 때부터 있던 사람의 변경은 남긴다(그 경로만 보관, 갈라 낼 수 없으면 보관하지 않음 — 규칙 apLeftover).
+    // 기록은 events.jsonl, run.json 의 branches.stashed(보드 자율주행 중·지난 실행, 끝 보고 status). 부르는 때: 판정 전(그 단위), 단위를 시작하기 전과
+    // 끝 정리 때(앞에서 마지막으로 돈 단위). only 가 있으면 그 저장소만
+    func stashReadOnly(unit: Int?, only: String? = nil) {
+        for r in repos where only == nil || only == r {
+            let i = repoInfo(r), on = i["on"] as? String ?? "", w = wt(r)
+            guard storyBranchNames.contains(on) else { continue }
+            let dirty = porcelain(w), start = i["dirty_start"] as? [String] ?? []
+            guard case .stash(let paths) = apLeftover(dirty: dirty, dirtyStart: start, onStoryBranch: true, madeByRun: true) else { continue }
+            // 가지가 바뀌었거나 git 폴더가 바뀌었으면 손대지 않는다(switchTo·gitDirOK 가 까닭을 남긴다)
+            guard currentBranch(w) == on, gitDirOK(r) else { continue }
+            let msg = apStashMessage(run: id, unit: unit, repo: repoName(r), branch: on)
+            let before = gitOut(["rev-parse", "-q", "--verify", "refs/stash"], cwd: w)
+            let c = gitRun(["stash", "push", "--include-untracked", "-m", msg] + (paths.map { ["--"] + $0.map { ":(literal)" + $0 } } ?? []), cwd: w, commit: true)
+            let after = gitOut(["rev-parse", "-q", "--verify", "refs/stash"], cwd: w)
+            let k = dirty.filter { !start.contains($0) }.count
+            guard c.code == 0, let sha = after, sha != before else {
+                event("board", "단위 \(unit.map(String.init) ?? "?") 이 읽기 전용으로 걸어 둔 \(repoName(r)) \(on) 에 남긴 변경 \(k)개를 보관하지 못했습니다: \(firstLine(c.out))")
+                continue
+            }
+            var b = br
+            let row: [String: Any] = ["repo": r, "branch": on, "unit": unit.map { $0 as Any } ?? NSNull(), "stash": sha, "message": msg,
+                                      "files": k, "paths": Array(dirty.filter { !start.contains($0) }.prefix(20)), "at": r3(now())]
+            b["stashed"] = (b["stashed"] as? [Any] ?? []) + [row]; br = b; saveRun()
+            let still = porcelain(w) != start
+            event("board", "단위 \(unit.map(String.init) ?? "?") 이 읽기 전용으로 걸어 둔 \(repoName(r)) \(on) 에 남긴 변경 \(k)개를 엔진이 따로 보관했습니다"
+                  + "(git stash \(sha.prefix(7)), 판정·다음 단위에 넣지 않음)" + (still ? ". 보관하지 못한 변경이 남았습니다" : "") + ".")
+        }
+    }
+
     // 원래 작업 트리를 want 가지로 바꾼다. 앞 단위가 커밋하지 않고 남긴 변경은 그 가지(이 실행이 만든 가지)에 엔진이 커밋해 남긴다 —
     // 다음 작업 가지에 섞이지 않게. 출발 때부터 더러웠거나 실행 중에 누가 가지를 바꿨으면 바꾸지 않는다(까닭을 돌려줌)
     func switchTo(_ r: String, _ want: String) -> String? {
@@ -2009,9 +2059,17 @@ final class Engine {
         // 남은 변경을 어떻게 할지는 규칙 apLeftover(AutopilotRules/Leftovers.swift)가 정한다
         switch apLeftover(dirty: dirty, dirtyStart: dirtyStart, onStoryBranch: storyBranchNames.contains(on), madeByRun: (i["made"] as? [String] ?? []).contains(on)) {
         case .clean: break
+        case .stash:
+            // 읽기 전용 자리의 남은 변경은 단위를 시작하기 전(unitBranchGate)에 이미 보관한다. 여기 온 것은 보관하지 못한 것 — 한 번 더 해 보고 남으면 바꾸지 않는다
+            stashReadOnly(unit: apStashUnit(statuses: queue.map { $0["status"] as? String ?? "pending" }, before: nil), only: r)
+            let left = porcelain(w)
+            if left != dirtyStart {
+                return "\(repoName(r)) 의 스토리 가지 \(on)(읽기 전용으로 걸어 둔 자리)에 커밋하지 않은 변경 \(left.count)개가 남아(따로 보관하지 못함) \(want) 로 바꾸지 않았습니다"
+            }
         case .refuse(.readOnly):
-            // 스토리 가지(다른 저장소 작업 동안 읽기 전용으로 걸어 둔 자리)에는 엔진도 커밋하지 않는다 — 스토리에는 판정을 통과한 작업만 합친다
-            return "\(repoName(r)) 의 스토리 가지 \(on)(읽기 전용으로 걸어 둔 자리)에 커밋하지 않은 변경 \(dirty.count)개가 있어 \(want) 로 바꾸지 않았습니다"
+            // 스토리 가지(다른 저장소 작업 동안 읽기 전용으로 걸어 둔 자리)에는 엔진도 커밋하지 않는다 — 스토리에는 판정을 통과한 작업만 합친다.
+            // 출발 때부터 있던 사람의 변경과 갈라 보관할 수 없으면(같은 파일 등) 보관하지 않고 바꾸지 않는다
+            return "\(repoName(r)) 의 스토리 가지 \(on)(읽기 전용으로 걸어 둔 자리)에 커밋하지 않은 변경 \(dirty.count)개가 있는데 출발 때부터 있던 변경과 갈라 보관할 수 없어 \(want) 로 바꾸지 않았습니다"
         case .refuse(.dirty):
             return "\(repoName(r)) 에 커밋하지 않은 변경 \(dirty.count)개가 있어 \(want) 로 바꾸지 않았습니다"
         case .commit:
@@ -2211,7 +2269,7 @@ final class Engine {
             }
             if !ro.isEmpty {
                 let ros = ro.map { "\(repoName($0)) `\(repoInfo($0)["on"] as? String ?? "?")`" }
-                s += "- 읽기만 하는 저장소: \(ros.joined(separator: ", ")). 같은 스토리의 앞 작업이 합쳐진 스토리 가지에 걸어 두었으니 그 변경을 보고 일합니다. 이 저장소의 파일은 고치지 않고 커밋하지 않습니다(커밋은 막혀 있고, 남긴 변경이 있으면 다음 작업이 시작하지 못합니다). 거기서 바꿀 것이 있으면 next_start 에 적습니다.\n"
+                s += "- 읽기만 하는 저장소: \(ros.joined(separator: ", ")). 같은 스토리의 앞 작업이 합쳐진 스토리 가지에 걸어 두었으니 그 변경을 보고 일합니다. 이 저장소의 파일은 고치지 않고 커밋하지 않습니다(커밋은 막혀 있고, 남긴 변경은 엔진이 판정 전에 따로 보관해 판정과 다음 작업에 넣지 않습니다). 거기서 바꿀 것이 있으면 next_start 에 적습니다.\n"
             }
         }
         if let k = def(n)["story"] as? String {
@@ -2331,6 +2389,7 @@ final class Engine {
                 case .stopped: stopRun()
                 }
             case "check":
+                stashReadOnly(unit: n)   // 읽기 전용 자리에 남긴 변경으로 판정이 통과하지 않게 판정 전에 보관한다
                 switch check(n, &u) {
                 case .passed:
                     var why = "판정 명령을 통과했습니다."
@@ -2916,7 +2975,9 @@ func usage() -> Never {
            claude-autopilot finish <실행 폴더> cleanup --story <키> [--unmerged]
              끝난 실행의 가지 승격(사람이 부름): 자율주행 가지(Jira 실행은 스토리 가지)를 합치기·기존 가지 올리기·합치기 전에 버리기,
              Jira 스토리를 승격 차례의 마지막 가지(live)에 합친 뒤 이 실행이 만든 그 스토리의 가지 지우기(--unmerged: 합치지 못한 작업 가지도).
-             --story 는 그 스토리가 가지를 만든 모든 저장소를 먼저 보고, 하나라도 안 되면 아무것도 바꾸지 않는다
+             --story 는 그 스토리가 가지를 만든 모든 저장소를 먼저 보고, 하나라도 안 되면 아무것도 바꾸지 않는다.
+             finish 는 어디에든 --dev 를 붙여도 된다: 뿌리(기록 저장소·승격 차례)는 그 실행이 출발한 뿌리(run.json dev)이고,
+             설치판 뿌리에서 출발한 실행에 --dev 를 붙이면 거부한다
     """)
 }
 
@@ -3484,6 +3545,7 @@ func cmdStatus(_ args: [String]) -> Never {
             let i = v as? [String: Any] ?? [:]
             let restored = i["restored"] as? Bool
             out += "가지: \(repoName(r)) · 출발 \((i["base"] as? [String: Any])?["branch"] ?? "?") → \(i["work"] ?? "?") · 지금 \(i["on"] ?? "?")"
+                + ((i["work_tree"] as? String).map { " · 따로 작업 트리 \($0)" } ?? " · 원래 작업 트리")
                 + (restored == nil ? "" : restored! ? " · 출발 때 가지로 되돌림" : " · 되돌리지 않음(\(i["restore_note"] ?? ""))") + "\n"
         }
         for (k, v) in (b["stories"] as? [String: Any] ?? [:]).sorted(by: { $0.key < $1.key }) {
@@ -3496,6 +3558,10 @@ func cmdStatus(_ args: [String]) -> Never {
         }
         if let m = b["moved"] as? [Any] { out += "움직인 기존 가지: \(m.count)개\n" }
         for p in b["promoted"] as? [[String: Any]] ?? [] { out += "합침: \(p["branch"] ?? "?") → \(p["into"] ?? "?") (\(repoName(p["repo"] as? String ?? "")), \(p["how"] ?? ""))\n" }
+        // 읽기 전용으로 걸어 둔 자리에 남은 변경을 엔진이 따로 보관한 것(5-3b ①) — 그 저장소에서 git stash list 로 찾는다
+        for x in b["stashed"] as? [[String: Any]] ?? [] {
+            out += "보관함: \(repoName(x["repo"] as? String ?? "")) \(x["branch"] ?? "?") · 단위 \(x["unit"].flatMap { $0 is NSNull ? nil : "\($0)" } ?? "?") · 변경 \(x["files"] ?? "?")개 · git stash \(((x["stash"] as? String) ?? "").prefix(7))\n"
+        }
         for f in b["failed"] as? [[String: Any]] ?? [] {
             out += "하지 못함: \(f["op"] ?? "?") \(f["branch"] ?? "?")\((f["into"] as? String).map { " → " + $0 } ?? "") (\(repoName(f["repo"] as? String ?? "")): \(f["why"] ?? ""))\n"
         }
@@ -3708,6 +3774,10 @@ func cmdFinish(_ args: [String]) -> Never {
     guard args.count >= 2 else { usage() }
     let dir = runDir(args[0])
     var rest = Array(args.dropFirst())
+    // --dev 는 어디에 와도 받는다(5-3b ⑨). 뿌리는 그 실행이 출발한 뿌리(run.json dev)이고 --dev 는 맞는지만 본다 — 규칙 apFinishRoot
+    let devFlag = rest.contains("--dev")
+    rest.removeAll { $0 == "--dev" }
+    guard !rest.isEmpty else { usage() }
     let op = rest.removeFirst()
     func opt(_ k: String) -> String? {
         guard let i = rest.firstIndex(of: k), i + 1 < rest.count else { return nil }
@@ -3715,6 +3785,8 @@ func cmdFinish(_ args: [String]) -> Never {
     }
     let into = opt("--into"), storyKey = opt("--story")
     guard var run = readJSON(dir + "/run.json") as? [String: Any] else { fail("run.json 을 읽지 못했습니다") }
+    let root = apFinishRoot(flag: devFlag, runDev: run["dev"] as? Bool)
+    if root.refuse { fail("이 실행은 설치판 뿌리에서 출발해 --dev 로는 합치거나 버리지 않습니다(기록 저장소·승격 차례가 다른 뿌리). --dev 없이 부릅니다.") }
     let state = run["state"] as? String ?? ""
     guard ["done", "stopped", "error"].contains(state), run["wrapped"] != nil else {
         fail("실행이 아직 끝나지 않았습니다(\(stateLabel[state] ?? state)). 끝난 뒤에 합치거나 버립니다.")
@@ -3746,7 +3818,7 @@ func cmdFinish(_ args: [String]) -> Never {
     }
     let refs = refsOf(label)
     if storyKey != nil { noBranch = storyEntries.keys.sorted().filter { r in !refs.contains { $0.repo == r } } }
-    let steps = (run["project"] as? String).flatMap { projectSettings($0, dev: run["dev"] as? Bool ?? false)?["promotion"] as? [[String: Any]] }
+    let steps = (run["project"] as? String).flatMap { projectSettings($0, dev: root.dev)?["promotion"] as? [[String: Any]] }
     // 이 합칠 쪽을 into 에 아직 합치지 않은 저장소(into 가지가 없는 저장소는 엔진이 건너뛰므로 뺀다). 저장소가 여럿이면 모두 합쳐야 그 단계가 끝난 것이다 —
     // 중간에 실패한 저장소가 남으면 다음 단계(live·master·합친 가지 지우기)를 막는다
     func pending(_ source: String, _ into: String) -> [String] {
@@ -3826,10 +3898,10 @@ func cmdFinish(_ args: [String]) -> Never {
     case "discard":
         guard rest.isEmpty, into == nil else { usage() }
         if let p = promoted.first(where: { $0["source"] as? String == label }) { fail("이미 \(p["into"] ?? "?") 에 합친 단계가 있어 버리지 않습니다. 버리기는 합치기 전에만 합니다.") }
-        var del = refs
+        var del = refs, kept: [(repo: String, branch: String)] = []
         if let k = storyKey {   // 스토리 단위: 모든 저장소의 스토리 가지와 그 작업 가지(작업 폴더가 든 저장소의 것)를 함께. 이 실행 뒤 다시 만들어진 같은 이름의 가지는 남긴다
             for t in taskBranches(k) where branchExists(t.repo, t.branch) && !del.contains(where: { $0 == t }) { del.append(t) }
-            for (rr, x) in del where branchExists(rr, x) && !ours(rr, x) { print("  남김: \(repoName(rr)) \(x): \(foreign)") }
+            for (rr, x) in del where branchExists(rr, x) && !ours(rr, x) { print("  남김: \(repoName(rr)) \(x): \(foreign)"); kept.append((rr, x)) }
             del = del.filter { !branchExists($0.repo, $0.branch) || ours($0.repo, $0.branch) }
         }
         // 엔진 자신의 작업 트리에 걸린 가지는 먼저 작업 트리를 지워(force) 떼어 내면 된다. 다른 작업 트리에 걸린 것만 거부(모든 저장소를 먼저 본다)
@@ -3843,6 +3915,16 @@ func cmdFinish(_ args: [String]) -> Never {
         for r in Set(del.map { $0.repo }) { if let note = finishWorktreeRemove(r, info, force: true) { print("  " + note) } }
         var gone: [[String: Any]] = []
         if !del.contains(where: { branchExists($0.repo, $0.branch) }) { print("  지울 가지가 없습니다(이미 버렸거나 지워짐).") }
+        // 합칠 쪽 가지가 이미 없거나(보드 밖에서 지움) 남겼어도 버린 것으로 적는다(5-3b ④) — 더 합칠 것이 없어 "합치기 기다림"이 남지 않게
+        let recorded = Set((b["discarded"] as? [[String: Any]] ?? []).map { "\($0["source"] ?? "")|\($0["repo"] ?? "")|\($0["branch"] ?? "")" })
+        for (r, x) in refs where !branchExists(r, x) || kept.contains(where: { $0 == (r, x) }) {
+            let row = apDiscardRows(source: label, repo: r, branch: x, fate: branchExists(r, x) ? .foreign : .missing, isSource: true,
+                                    recorded: recorded.contains("\(label)|\(r)|\(x)"), at: r3(now()))
+            if let d = row.discarded { gone.append(d); print("  버린 것으로 적음: \(repoName(r)) \(x)(\(branchExists(r, x) ? "같은 이름의 다른 가지라 남김" : "이미 없음"))") }
+        }
+        if let k = storyKey, refs.isEmpty {   // 어느 저장소에도 스토리 가지를 만들지 않은 스토리 — 합칠 것이 없다(보드는 합칠 쪽으로 세지 않는다)
+            print("  스토리 \(k) 는 스토리 가지를 만든 저장소가 없어 합칠 것도 버릴 것도 없습니다(작업이 시작하지 않음).")
+        }
         for (r, x) in del where branchExists(r, x) {
             let h = headOf(r, "refs/heads/" + x) ?? ""
             let c = gitRun(["branch", "-D", x], cwd: r)
@@ -3933,7 +4015,7 @@ func cmdFinish(_ args: [String]) -> Never {
     run["branches"] = b; run["updated"] = r3(now())
     writeJSON(dir + "/run.json", run)
     // 기록 저장소의 runs.branches 도 새로(실패해도 run.json 은 이미 썼다)
-    if let db = try? RecordsDB(recordsPath(dev: run["dev"] as? Bool ?? false)) {
+    if let db = try? RecordsDB(recordsPath(dev: root.dev)) {
         do { try db.transaction { _ = try db.syncRun(RunSource(dir: dir, origin: "engine", frozen: nil)) } }
         catch { print("  실행 기록 저장소에 쓰지 못했습니다: \(error)") }
         db.close()
