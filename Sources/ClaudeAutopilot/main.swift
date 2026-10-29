@@ -790,12 +790,15 @@ func gitPlaceIn(_ d: String) -> String? {
 // 읽지 못한 폴더가 있으면 complete=false(놓쳤을 수 있음 — 알림은 "있을 수 있음"으로)
 // 모델이 쓸 수 있는 자리의 파일 하나를 샌드박스 밖에서 볼 때의 표지(5-4 보안 검토 넷째): readHarnessFile 처럼 lstat 으로 보통 파일이고 1 MiB 아래일 때만
 // O_NOFOLLOW|O_NONBLOCK 으로 열어 상한까지 읽어 해시한다. 링크는 가리키는 글, FIFO·장치·소켓은 종류만, 큰 파일은 크기만(엔진이 멈추거나 메모리를 다 쓰지 않게)
-func fileMark(_ p: String) -> String {
-    switch readHarnessFile(p, budget: harnessFileCap) {
-    case .data(let d)?: return "file:" + sha256(d)
-    case .large(let n)?: return "large:\(n)"
-    case .other(let k)?: return k
-    case nil: return "-"
+func fileMark(_ p: String, budget: inout Int) -> (mark: String, full: Bool) {
+    switch readHarnessFile(p, budget: min(harnessFileCap, max(budget, 0))) {
+    case .data(let d)?: budget -= d.count; return ("file:" + sha256(d), true)
+    case .large(let n)?:
+        // 해시하지 않은 파일(1 MiB 넘음·읽기 상한 다 씀)은 크기·고친 시각·inode 로 — 같은 크기로 고쳐도 알 수 있게. 그 훑기는 다 본 것이 아니다(full false)
+        var st = stat(); _ = lstat(p, &st)
+        return ("large:\(n):\(st.st_mtimespec.tv_sec).\(st.st_mtimespec.tv_nsec):\(st.st_ino)", false)
+    case .other(let k)?: return (k, true)
+    case nil: return ("-", true)
     }
 }
 // 모델이 쓸 수 있는 자리의 파일(결과 기록 등)을 엔진이 읽을 때 — 보통 파일이고 상한 아래일 때만 내용, 아니면 nil
@@ -804,30 +807,35 @@ func modelFileData(_ p: String) -> Data? {
     return nil
 }
 // git 꼴 자리 하나의 지문과 본 파일 수(훑기 상한에 센다). 폴더가 아니면(.git 파일·링크·FIFO 등) 그 표지 하나
-func gitPlaceDigest(_ p: String) -> (digest: String, cost: Int) {
+func gitPlaceDigest(_ p: String, budget: inout Int) -> (digest: String, cost: Int, full: Bool) {
     var st = stat()
-    guard lstat(p, &st) == 0 else { return ("none", 1) }
-    guard st.st_mode & S_IFMT == S_IFDIR else { return (fileMark(p), 1) }
-    var lines: [String] = [], cost = 0
-    for f in ["config", "config.worktree", "info/attributes", "commondir", "gitdir", "objects/info/alternates"] {
-        lines.append(f + "\t" + fileMark(p + "/" + f)); cost += 1
-    }
+    guard lstat(p, &st) == 0 else { return ("none", 1, true) }
+    guard st.st_mode & S_IFMT == S_IFDIR else { let m = fileMark(p, budget: &budget); return (m.mark, 1, m.full) }
+    var lines: [String] = [], cost = 0, full = true
+    func add(_ label: String, _ path: String) { let m = fileMark(path, budget: &budget); lines.append(label + "\t" + m.mark); cost += 1; full = full && m.full }
+    for f in ["config", "config.worktree", "info/attributes", "commondir", "gitdir", "objects/info/alternates"] { add(f, p + "/" + f) }
     var hs = stat()
     if lstat(p + "/hooks", &hs) == 0 {
         if hs.st_mode & S_IFMT == S_IFDIR {
             let names = ((try? fm.contentsOfDirectory(atPath: p + "/hooks")) ?? []).sorted()
-            for h in names.prefix(256) { lines.append("hooks/" + h + "\t" + fileMark(p + "/hooks/" + h)); cost += 1 }
-            if names.count > 256 { lines.append("hooks/…\t\(names.count)") }
+            for h in names.prefix(256) { add("hooks/" + h, p + "/hooks/" + h) }
+            if names.count > 256 { lines.append("hooks/…\t\(names.count)"); full = false }   // 넘는 몫은 수만 — 다 본 것이 아니다
         } else {
-            lines.append("hooks\t" + fileMark(p + "/hooks")); cost += 1
+            add("hooks", p + "/hooks")
         }
     }
-    return ("dir:" + sha256(Data(lines.joined(separator: "\n").utf8)), cost)
+    return ("dir:" + sha256(Data(lines.joined(separator: "\n").utf8)), cost, full)
 }
-func gitPlaces(_ roots: [String], maxEntries: Int = 2_000_000, maxSec: Double = 30) -> (places: [String: String], complete: Bool, why: String?) {
-    var out: [String: String] = [:], n = 0
+func gitPlaces(_ roots: [String], maxEntries: Int = 2_000_000, maxSec: Double = 30, maxBytes: Int = harnessTotalCap) -> (places: [String: String], complete: Bool, why: String?) {
+    var out: [String: String] = [:], n = 0, checked = 0, budget = maxBytes, partial = false
     let others = Set(roots.map(canonical)), t0 = Date()
     var unread: String?
+    // 시간 상한은 항목 4096개를 넘길 때마다와 지문을 볼 때마다(지문은 한 번에 여러 칸 오른다)
+    func late() -> Bool {
+        guard n - checked >= 4096 else { return false }
+        checked = n
+        return Date().timeIntervalSince(t0) > maxSec
+    }
     for root in roots {
         let base = canonical(root)
         guard let en = fm.enumerator(at: URL(fileURLWithPath: base), includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey], options: [],
@@ -835,22 +843,27 @@ func gitPlaces(_ roots: [String], maxEntries: Int = 2_000_000, maxSec: Double = 
         while let url = en.nextObject() as? URL {
             n += 1
             if n > maxEntries { return (out, false, "항목이 \(maxEntries)개를 넘어") }
-            if n % 4096 == 0, Date().timeIntervalSince(t0) > maxSec { return (out, false, "\(Int(maxSec))초 안에 다 훑지 못해") }
+            if late() { return (out, false, "\(Int(maxSec))초 안에 다 훑지 못해") }
             let full = url.path, name = url.lastPathComponent
             if name == ".git" {
-                if full != base + "/.git" { let g = gitPlaceDigest(full); out[full] = g.digest; n += g.cost }
+                if full != base + "/.git" {
+                    let g = gitPlaceDigest(full, budget: &budget); out[full] = g.digest; n += g.cost; partial = partial || !g.full
+                    if Date().timeIntervalSince(t0) > maxSec { return (out, false, "\(Int(maxSec))초 안에 다 훑지 못해") }
+                }
                 en.skipDescendants()
             } else if others.contains(full) {
                 en.skipDescendants()
             } else if name == "HEAD" {
                 let d = (full as NSString).deletingLastPathComponent
                 if d != base, !d.hasSuffix("/.git"), (isDir(d + "/objects") && isDir(d + "/refs")) || fm.fileExists(atPath: d + "/commondir") {
-                    let g = gitPlaceDigest(d); out[d] = g.digest; n += g.cost
+                    let g = gitPlaceDigest(d, budget: &budget); out[d] = g.digest; n += g.cost; partial = partial || !g.full
+                    if Date().timeIntervalSince(t0) > maxSec { return (out, false, "\(Int(maxSec))초 안에 다 훑지 못해") }
                 }
             }
         }
     }
     if let u = unread { return (out, false, "읽지 못한 자리(\(u))가 있어") }
+    if partial { return (out, false, "해시하지 못한 파일(1 MiB 넘음·읽기 상한·hooks 256개 넘음)이 있어 그 파일은 크기·시각·inode 만 봄") }
     return (out, true, nil)
 }
 // 중첩 .git 막기(2026-10-30 5-4, 보안 검토 지적): 단위 작업 폴더(dir)에서 위로 올라가며 .git 자리(폴더·파일·링크 모두)를 파일 시스템으로만 찾는다.
