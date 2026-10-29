@@ -2023,10 +2023,13 @@ final class Engine {
         for r in repos where only == nil || only == r {
             let i = repoInfo(r), on = i["on"] as? String ?? "", w = wt(r)
             guard storyBranchNames.contains(on) else { continue }
+            // git 폴더가 출발 때와 같은지를 git status 보다 먼저 본다(5-3b 보안, switchTo 와 같은 차례) — 모델이 쓸 수 있는 작업 트리라
+            // 바꿔치기된 git 폴더(모델이 만든 설정의 filter 드라이버 등)로 git status 가 돌지 않게. 바뀌었으면 gitDirOK 가 까닭을 남기고,
+            // 가지가 실행 중에 바뀌었으면 손대지 않는다(switchTo 가 까닭을 남긴다)
+            guard gitDirOK(r), currentBranch(w) == on else { continue }
             let dirty = porcelain(w), start = i["dirty_start"] as? [String] ?? []
             guard case .stash(let paths) = apLeftover(dirty: dirty, dirtyStart: start, onStoryBranch: true, madeByRun: true) else { continue }
-            // 가지가 바뀌었거나 git 폴더가 바뀌었으면 손대지 않는다(switchTo·gitDirOK 가 까닭을 남긴다)
-            guard currentBranch(w) == on, gitDirOK(r) else { continue }
+            guard currentBranch(w) == on else { continue }   // 보관 바로 앞에서 가지를 한 번 더 본다
             let msg = apStashMessage(run: id, unit: unit, repo: repoName(r), branch: on)
             let before = gitOut(["rev-parse", "-q", "--verify", "refs/stash"], cwd: w)
             let c = gitRun(["stash", "push", "--include-untracked", "-m", msg] + (paths.map { ["--"] + $0.map { ":(literal)" + $0 } } ?? []), cwd: w, commit: true)
