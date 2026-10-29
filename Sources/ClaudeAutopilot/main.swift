@@ -2744,21 +2744,14 @@ final class Engine {
                 case .failed(let code, let tail):
                     let k = Int(num(u["try"]) ?? 0)
                     if apAfterCheck(passed: false, tries: k, retries: retries, waitingNow: waitingNow) == .fail {
-                        endUnit(n, "failed", "\(k == 0 ? "" : "\(k)번 다시 해도 ")판정 명령을 통과하지 못해 미통과로 기록하고 다음 단위로 갑니다. 기준은 낮추지 않습니다.")
+                        endUnit(n, "failed", apCheckFailReason(tries: k))
                         return
                     }
                     u["try"] = k + 1; u["phase"] = "model"
-                    u["next_message"] = """
-                    판정 명령이 실패했습니다(종료 코드 \(code)). 판정 명령: `\(def(n)["check"] as? String ?? "")`
-                    아래는 출력 끝부분입니다. 원인을 고쳐 판정을 통과하게 하세요. 판정 명령과 시험 기준은 바꾸지 마세요. 마치면 result.json 을 고쳐 쓰세요.
-
-                    ```
-                    \(tail)
-                    ```
-                    """
+                    // 글은 규칙 apCheckFailMessage·apCheckFailEvent(AutopilotRules/Checks.swift)
+                    u["next_message"] = apCheckFailMessage(code: code, check: def(n)["check"] as? String ?? "", tail: tail)
                     saveUnit(n, u)
-                    event("board", k < retries ? "판정 실패(종료 코드 \(code)). 실패 출력을 모델에게 넘겨 다시 고치게 합니다(\(k + 1)/\(retries))."
-                          : "판정 실패(종료 코드 \(code)). 다시 맡길 횟수는 다 찼지만 그 사이 사람이 이 단위에 보낸 말이 있어, 그 말과 실패 출력을 넘겨 한 번 더 맡깁니다.")
+                    event("board", apCheckFailEvent(code: code, tries: k, retries: retries))
                 case .capped(let kind):
                     endUnit(n, "capped", "\(capLabel[kind] ?? kind) 상한에 닿아 멈췄습니다. 바뀐 파일 목록을 남기고 다음 단위로 갑니다.")
                     return
@@ -3874,7 +3867,7 @@ func statusBeforeStart(_ dir: String, _ run: [String: Any], dev devFlag: Bool, j
             let k = (fm.enumerator(atPath: p)?.allObjects as? [String] ?? []).filter { !isDir(p + "/" + $0) }.count
             out += "     근거 묶음(읽기 전용으로 넘김): \(p) (파일 \(k)개)\n"
         }
-        out += "     판정: \(short(d["check"] as? String ?? "", 160))" + ((d["check_timeout_min"]).map { " (\(num($0).map { String(Int($0)) } ?? "?")분 상한)" } ?? "") + "\n"
+        out += "     판정: \(short(d["check"] as? String ?? "", 160))" + ((d["check_timeout_min"]).map { apCheckLimitNote(minutes: num($0)) } ?? "") + "\n"
         if let k = d["story"] as? String { out += "     스토리 \(k): 작업 가지 \(d["branch"] ?? "?") ← 스토리 가지 \(d["story_branch"] ?? "?")\n" }
         if let a = d["depends"] as? [String], !a.isEmpty { out += "     기대는 앞 단위: \(a.joined(separator: ", ")) (통과하지 않으면 건너뜀)\n" }
         if d["prerun"] as? Bool == false { out += "     판정 미리 돌리기: 넣지 않음(prerun: false)\n" }
