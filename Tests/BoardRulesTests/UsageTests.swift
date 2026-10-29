@@ -45,8 +45,8 @@ private struct FixedClock: Clock { let now: Date }
 
 private func data(_ s: String?) -> Data? { s.map { Data($0.utf8) } }
 
-// 한도를 견주기 쉬운 값으로 — 다시 놓는 시각은 1970 기준 밀리초(형식기가 소수 초를 밀리초까지 읽는다)
-private struct L: Equatable, Sendable, CustomStringConvertible {
+// 한도를 견주기 쉬운 값으로 — 다시 놓는 시각은 1970 기준 밀리초(형식기가 소수 초를 밀리초까지 읽는다). 공유 규칙 표(RulesTableTests)의 parse 도 이것으로 견준다
+struct L: Equatable, Sendable, CustomStringConvertible {
     let id: String, label: String, pct: Double, resets: Int64?
     init(_ id: String, _ label: String, _ pct: Double, _ resets: Int64? = nil) { self.id = id; self.label = label; self.pct = pct; self.resets = resets }
     init(_ l: Limit) { self.init(l.id, l.label, l.pct, l.resets.map { Int64(($0.timeIntervalSince1970 * 1000).rounded()) }) }
@@ -447,4 +447,27 @@ private let settleRows: [SettleRow] = [
         #expect(check.cached?.map(L.init) == fiveOnlyLimits)
         #expect(!check.fetch)
     }
+}
+
+// MARK: - 공유 규칙 표(rules-table/usage.json) — RulesTableTests 가 이 파일의 가짜(FakeUsageCache·FixedClock)로 돌린다.
+// FixedClock·data 가 다른 시험 파일의 private 이름과 겹쳐 internal 로 넓히면 다시 선언 오류가 나므로, 넘겨 주는 함수만 둔다. 시각은 지금(u0) 기준 초
+
+/// cache 한 번 — modified 는 캐시 수정 시각(nil 이면 파일 없음), body 는 내용(nil 이면 못 읽음), trustAfter 는 nil 이면 아주 먼 과거.
+/// 결과는 적용할 한도의 id(nil 이면 적용하지 않음)와 받을지
+func runCacheRow(modified: Double?, body: Data?, trustAfter: Double?, fetching: Bool) -> (cached: [String]?, fetch: Bool) {
+    let cache = FakeUsageCache()
+    cache.modified = modified.map { u0 + $0 }
+    cache.content = body
+    let check = checkUsageCache(cache: cache, clock: FixedClock(now: u0), trustAfter: trustAfter.map { u0 + $0 } ?? .distantPast,
+                                fetching: fetching)
+    return (check.cached?.map(\.id), check.fetch)
+}
+
+/// settle 한 번 — body 는 200 으로 받은 본문(nil 이면 200 아님·받지 않음), currentEmpty 는 앞서 보이던 한도가 없는가(있으면 5시간 1% 하나).
+/// 결과는 받은 한도를 적용하는가, 캐시에 썼는가, 실패 표시(nil 이면 건드리지 않음)
+func runSettleRow(body: Data?, currentEmpty: Bool) -> (applied: Bool, cacheWritten: Bool, failed: Bool?) {
+    let cache = FakeUsageCache()
+    let current = currentEmpty ? [] : [Limit(id: "5h", label: "5시간", pct: 1, resets: nil)]
+    let settled = settleUsage(UsageFetch(data: body, tokenExpired: false), current: current, trustAfter: u0 + 5, cache: cache)
+    return (settled.limits != nil, !cache.written.isEmpty, settled.failed)
 }

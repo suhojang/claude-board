@@ -9,11 +9,13 @@ on:
     paths:
       - 'windows/**'
       - 'plugins/md-render/**'   # 자산에 싣는 플러그인
+      - 'rules-table/**'
       - '.github/workflows/windows.yml'
   pull_request:
     paths:
       - 'windows/**'
       - 'plugins/md-render/**'
+      - 'rules-table/**'
       - '.github/workflows/windows.yml'
   # 손으로 돌리기 — 기본은 dry run(릴리스 작업의 모든 확인을 하고 만들 명령만 보여 준다). 실제 릴리스(dry_run=false)는 main 에서만
   #   gh workflow run windows.yml --ref <브랜치> -f dry_run=true

@@ -98,8 +98,19 @@ pub fn install_command(version: &str) -> String {
     )
 }
 
+/// 확인해야 하는가 — 손으로 누른 확인(단추·트레이 메뉴)은 늘, 자동 확인(켤 때·1시간마다)은 설정 > 업데이트 > 자동 확인을 켜 둔 때만.
+fn wants_check(manual: bool, auto_update_check: bool) -> bool {
+    manual || auto_update_check
+}
+
 /// 켤 때·1시간마다(manual = false), 업데이트 확인 단추·트레이 메뉴(manual = true).
+/// 자동 확인은 설정을 끄면(`autoUpdateCheck`) 하지 않는다 — 손으로 누른 확인은 그대로 된다.
 pub fn check(board: &Arc<Board>, manual: bool) {
+    // 설정 잠금은 업데이트 잠금보다 먼저·따로 잡는다(둘을 겹쳐 잡지 않는다)
+    let auto = board.settings.lock().unwrap().auto_update_check;
+    if !wants_check(manual, auto) {
+        return;
+    }
     {
         let mut u = board.updater.lock().unwrap();
         if manual {
@@ -236,6 +247,15 @@ mod tests {
       {"tag_name": "v2.12", "draft": false, "prerelease": false},
       {"tag_name": "windows-v2.12", "draft": false, "prerelease": false}
     ]"#;
+
+        #[test]
+    fn auto_check_follows_the_setting_but_manual_check_does_not() {
+        // (manual, autoUpdateCheck) -> 확인하는가
+        assert!(wants_check(false, true));
+        assert!(!wants_check(false, false), "끄면 켤 때·1시간마다 확인하지 않는다");
+        assert!(wants_check(true, false), "손으로 누른 확인은 꺼 둬도 된다");
+        assert!(wants_check(true, true));
+    }
 
     #[test]
     fn picks_first_windows_release() {

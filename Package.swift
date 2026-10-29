@@ -1,5 +1,6 @@
 // swift-tools-version: 6.2
-// 보드 앱(ClaudeBoard.swift)만 SwiftPM 으로 빌드한다 — 내장 터미널 엔진(libghostty-spm)을 쓰기 위해서다.
+// 보드 앱(Sources/ClaudeBoard/)만 SwiftPM 으로 빌드한다 — 내장 터미널 엔진(libghostty-spm)을 쓰기 위해서다.
+// 보드는 한 파일(ClaudeBoard.swift)이던 것을 tools/split-board.py 로 MARK 절마다 나눴다 — 최상위 실행문은 main.swift 에만 둔다.
 // 알림 패널 등 다른 실행 파일은 지금처럼 swiftc 로 빌드한다. 모든 swift build/test/package 명령에 --disable-keychain 을 붙인다
 // (빼면 바이너리 자산을 내려받을 때 키체인 조회에서 멈춘다)
 //

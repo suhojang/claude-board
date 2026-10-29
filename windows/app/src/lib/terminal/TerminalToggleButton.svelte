@@ -3,15 +3,18 @@
   // 미니 단계에서는 부르는 쪽이 그리지 않는다
   import { setTerminalExpanded } from "$lib/backend";
   import { hint } from "$lib/board/hint.svelte";
+  import { keyLabel } from "$lib/shortcuts/store.svelte";
   import type { BoardSide } from "$lib/types";
 
   let { expanded, side }: { expanded: boolean; side: BoardSide } = $props();
 
   const left = $derived(side === "left");
+  const key = $derived(keyLabel("terminal"));
+  const keyNote = $derived(key ? ` (${key})` : "");
   const tip = $derived(
     expanded
-      ? `터미널 접기: 보드만 ${left ? "왼쪽" : "오른쪽"}에 남깁니다 (Ctrl+Alt+T)`
-      : `터미널 펼치기: 보드에서 띄운 세션을 ${left ? "오른쪽" : "왼쪽"} 탭에서 봅니다 (Ctrl+Alt+T)`,
+      ? `터미널 접기: 보드만 ${left ? "왼쪽" : "오른쪽"}에 남깁니다${keyNote}`
+      : `터미널 펼치기: 보드에서 띄운 세션을 ${left ? "오른쪽" : "왼쪽"} 탭에서 봅니다${keyNote}`,
   );
 </script>
 
@@ -23,7 +26,7 @@
       <rect x={left ? 7.7 : 2.2} y="2.2" width="3.6" height="6.6" rx="0.6" fill="currentColor" />
     </svg>
     <span class="text">{expanded ? "터미널 펼침" : "터미널 접힘"}</span>
-    <span class="key">Ctrl+Alt+T</span>
+    {#if key}<span class="key">{key}</span>{/if}
   </span>
 </button>
 

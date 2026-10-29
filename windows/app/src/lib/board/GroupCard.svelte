@@ -5,7 +5,8 @@
   import { fade, fly, slide } from "svelte/transition";
   import type { BoardSettings, Group } from "$lib/types";
   import { place } from "$lib/terminal/hub.svelte";
-  import { DEFAULT_SESSION_COMMAND, startSession } from "$lib/terminal/launch";
+  import { startSession } from "$lib/terminal/launch";
+  import { defaultNewSessionCommand, defaultNewSessionMdRender } from "$lib/terminal/newSessionDefaults";
   import { hideGroup, removeEnded, toggleEndedOpen, toggleKindCollapsed, togglePinGroup } from "$lib/backend";
   import HeaderButton from "./HeaderButton.svelte";
   import Icon from "./Icon.svelte";
@@ -100,8 +101,8 @@
     </div>
     <HeaderButton
       icon="plus"
-      help={`이 경로에서 새 세션 (${DEFAULT_SESSION_COMMAND})`}
-      onclick={() => startSession(DEFAULT_SESSION_COMMAND, g.id)}
+      help={`이 경로에서 새 세션 (${defaultNewSessionCommand(settings)})`}
+      onclick={() => startSession(defaultNewSessionCommand(settings), g.id, defaultNewSessionMdRender(settings))}
     />
     <HeaderButton
       icon={pinned ? "star-fill" : "star"}

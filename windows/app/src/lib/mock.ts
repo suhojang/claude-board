@@ -193,6 +193,11 @@ const S: Snapshot = {
     boardSide: q.has("left") ? "left" : "right",
     boardPaneWidth: 454,
     mdRenderOff: [],
+    shortcuts: {},
+    settingsTransition: "slide",
+    newSessionCommand: "",
+    newSessionMdRender: true,
+    autoUpdateCheck: true,
   },
   claudeVersion: "2.1.301",
   terminals: [
@@ -346,7 +351,7 @@ export async function handle(cmd: string, a: Record<string, unknown>): Promise<u
       });
       break;
     }
-    case "add_account":
+    case "begin_add_account":
       S.accounts.adding = true;
       accountNotice("터미널과 브라우저에서 추가할 계정으로 로그인해 주세요");
       later("add", 6000, () => {
@@ -361,7 +366,7 @@ export async function handle(cmd: string, a: Record<string, unknown>): Promise<u
       clearTimeout(timers.add);
       S.accounts.adding = false;
       break;
-    case "remove_account": {
+    case "delete_account": {
       const acc = S.accounts.saved.find((x) => x.id === str("id"));
       S.accounts.saved = S.accounts.saved.filter((x) => x.id !== str("id"));
       if (acc) accountNotice(`${acc.email} 계정을 목록에서 지웠습니다`);
@@ -406,6 +411,31 @@ export async function handle(cmd: string, a: Record<string, unknown>): Promise<u
     case "set_board_mini":
       st.boardMini = bool("on");
       break;
+    case "set_shortcut": {
+      const combo = a.combo as Snapshot["settings"]["shortcuts"][string] | null;
+      if (combo) st.shortcuts[str("id")] = combo;
+      else delete st.shortcuts[str("id")];
+      break;
+    }
+    case "reset_shortcuts":
+      st.shortcuts = {};
+      break;
+    case "set_settings_transition":
+      st.settingsTransition = a.value as Snapshot["settings"]["settingsTransition"];
+      break;
+    case "set_new_session_defaults":
+      st.newSessionCommand = str("command").trim();
+      st.newSessionMdRender = bool("mdRender");
+      break;
+    case "set_auto_update_check":
+      st.autoUpdateCheck = bool("on");
+      break;
+    case "login_launch":
+      return true;
+    case "set_login_launch":
+    case "submit_login_code":
+    case "open_login_url":
+      return;
     case "set_terminal_expanded":
       st.terminalExpanded = bool("on");
       break;

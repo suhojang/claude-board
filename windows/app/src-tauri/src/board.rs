@@ -220,11 +220,11 @@ impl Board {
     /// 트레이는 메인 스레드에서만 고친다 — 다른 스레드에서 고치면 메인 스레드 응답을 기다리는 동안
     /// 메인 스레드(메뉴 처리)가 같은 잠금을 기다려 서로 멈출 수 있다.
     fn refresh_tray_with(&self, counts: &Counts, force: bool) {
-        let (pinned, mascot, terminal_expanded, side) = {
+        let (pinned, terminal_expanded, terminal_label) = {
             let s = self.settings.lock().unwrap();
-            (s.pinned, s.mascot.clone(), s.terminal_expanded, s.board_side.clone())
+            (s.pinned, s.terminal_expanded, tray::terminal_label(crate::hotkeys::terminal_combo_display(&s.shortcuts).as_deref()))
         };
-        let state = tray::TrayState { counts: counts.clone(), pinned, mascot, position: settings::notify_position(), terminal_expanded, side };
+        let state = tray::TrayState { counts: counts.clone(), pinned, terminal_expanded, terminal_label };
         {
             let mut shown = self.tray_shown.lock().unwrap();
             if !force && shown.as_ref() == Some(&state) {
@@ -442,13 +442,13 @@ impl Board {
     }
 
     /// 터미널을 접고 보드 쪽에 붙인다 — 이미 접혀 있어도 다시 붙인다. 앞으로 가져오되 포커스는 가져가지 않는다.
-    fn snap_right(&self) {
+    pub(crate) fn snap_right(&self) {
         self.apply_terminal(false);
         window::show(&self.app, false);
     }
 
     /// Ctrl+Alt+T — 접힘이면 펼치고, 펼침이고 앞이면 접고, 펼침이지만 뒤에 있으면 앞으로 가져온다.
-    fn toggle_terminal(&self) {
+    pub(crate) fn toggle_terminal(&self) {
         let expanded = self.settings.lock().unwrap().terminal_expanded;
         let front = window::main_window(&self.app).is_some_and(|w| window::is_front(&w));
         match window::term_key(expanded, front) {
@@ -687,18 +687,8 @@ fn state_name(state: &str) -> &str {
 }
 
 #[tauri::command(async)]
-fn add_account(board: B<'_>, email: Option<String>) {
-    accounts::begin_add(&board, email);
-}
-
-#[tauri::command(async)]
 fn cancel_add_account(board: B<'_>) {
     accounts::cancel_add(&board);
-}
-
-#[tauri::command(async)]
-fn remove_account(board: B<'_>, id: String) {
-    accounts::remove_account(&board, id);
 }
 
 #[tauri::command(async)]
@@ -755,6 +745,35 @@ fn kept_md_render_off(list: &[String], exists: impl Fn(&str) -> bool) -> Vec<Str
 fn prune_md_render_off(board: B<'_>) {
     let dir = board.sessions_dir();
     board.update_settings(|s| s.md_render_off = kept_md_render_off(&s.md_render_off, |id| dir.join(format!("{id}.json")).exists()));
+}
+
+/// 설정 화면이 열리고 닫히는 움직임 — `slide` · `fade` · `none`, 모르는 값은 받지 않는다.
+#[tauri::command(async)]
+fn set_settings_transition(board: B<'_>, value: String) {
+    if settings::TRANSITIONS.contains(&value.as_str()) {
+        board.update_settings(|s| s.settings_transition = value);
+    }
+    board.publish();
+}
+
+/// 새 세션의 기본 명령(비면 프런트가 `claude --dangerously-skip-permissions` 로 쓴다)과 답변 꾸미기 기본값.
+#[tauri::command(async)]
+fn set_new_session_defaults(board: B<'_>, command: String, md_render: bool) {
+    board.update_settings(|s| {
+        s.new_session_command = command.trim().to_string();
+        s.new_session_md_render = md_render;
+    });
+    board.publish();
+}
+
+#[tauri::command(async)]
+fn set_auto_update_check(board: B<'_>, on: bool) {
+    board.update_settings(|s| s.auto_update_check = on);
+    board.publish();
+    // 켜면 바로 한 번 확인한다(mac) — 끄는 동안 못 본 새 버전이 있을 수 있다
+    if on {
+        updater::check(&board, false);
+    }
 }
 
 #[tauri::command(async)]
@@ -871,36 +890,6 @@ fn queue_action(board: &Arc<Board>, action: String, id: String) {
     }
 }
 
-fn register_shortcut(app: &AppHandle) {
-    use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
-    let snap = Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyB);
-    let terminal = Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyT);
-    let plugin = tauri_plugin_global_shortcut::Builder::new()
-        .with_handler(move |app, shortcut, event| {
-            if event.state() != ShortcutState::Pressed {
-                return;
-            }
-            let Some(board) = app.try_state::<Arc<Board>>() else { return };
-            if *shortcut == snap {
-                // 터미널을 접고 보드 쪽에 붙여 앞으로 — 포커스는 지금 앱에 남긴다
-                board.snap_right();
-            } else if *shortcut == terminal {
-                board.toggle_terminal();
-            }
-        })
-        .build();
-    if let Err(e) = app.plugin(plugin) {
-        board_log(&format!("전역 단축키 플러그인을 켜지 못했습니다: {e}"));
-        return;
-    }
-    // 다른 앱이 먼저 잡은 단축키면 등록에 실패한다 — 보드는 그대로 동작하고 로그만 남긴다
-    for (shortcut, name) in [(snap, "Ctrl+Alt+B"), (terminal, "Ctrl+Alt+T")] {
-        if let Err(e) = app.global_shortcut().register(shortcut) {
-            board_log(&format!("전역 단축키 {name} 등록 실패 ({e})"));
-        }
-    }
-}
-
 fn create_window(app: &AppHandle, board: &Arc<Board>, background: bool) -> tauri::Result<()> {
     let cfg = app.config().app.windows.iter().find(|w| w.label == "main").cloned().ok_or(tauri::Error::WindowNotFound)?;
     let win = WebviewWindowBuilder::from_config(app, &cfg)?.build()?;
@@ -1014,9 +1003,7 @@ pub fn run(argv: Vec<String>, context: tauri::Context<tauri::Wry>) {
             crate::open_session::reopen_done,
             crate::win::double_click_time,
             switch_account,
-            add_account,
             cancel_add_account,
-            remove_account,
             set_auto_switch,
             check_update,
             run_update,
@@ -1043,6 +1030,18 @@ pub fn run(argv: Vec<String>, context: tauri::Context<tauri::Wry>) {
             crate::shutdown::lifecycle_started,
             crate::shutdown::existing_dirs,
             prune_md_render_off,
+            set_settings_transition,
+            set_new_session_defaults,
+            set_auto_update_check,
+            crate::hotkeys::set_shortcut,
+            crate::hotkeys::reset_shortcuts,
+            crate::hotkeys::sync_hotkeys,
+            crate::login_item::login_launch,
+            crate::login_item::set_login_launch,
+            crate::account_login::begin_add_account,
+            crate::account_login::submit_login_code,
+            crate::account_login::open_login_url,
+            crate::account_login::delete_account,
             crate::proc_wait::pids_alive,
             crate::proc_wait::wait_exit,
             crate::mdrender::md_render_dir,
@@ -1070,7 +1069,7 @@ pub fn run(argv: Vec<String>, context: tauri::Context<tauri::Wry>) {
                 Ok(t) => *board.tray.lock().unwrap() = Some(t),
                 Err(e) => board_log(&format!("트레이 아이콘을 만들지 못했습니다: {e}")),
             }
-            register_shortcut(&handle);
+            crate::hotkeys::register(&handle);
             if let Some((action, id)) = first_action.clone() {
                 *board.pending_action.lock().unwrap() = Some((action, id));
             }

@@ -298,12 +298,14 @@ test("닫기 확인 — 끝나지 않은 세션이 있을 때만 묻고, 셸만 
   for (const s of ["working", "waiting", "idle", "paused"]) assert.equal(needsCloseConfirm(s), true, s);
 });
 
-test("경로 상태 — 가장 급한 탭 상태, 탭이 없으면 idle, 같은 순위면 앞의 것", () => {
+test("경로 상태 — 가장 급한 탭 상태, 탭이 없으면 idle, 일시중지는 대기보다 앞선다", () => {
   assert.equal(mostUrgent([]), "idle");
   assert.equal(mostUrgent(["idle", "working", "waiting"]), "waiting");
-  assert.equal(mostUrgent(["ended", "idle"]), "idle");
+  assert.equal(mostUrgent(["waiting", "working"]), "waiting");           // 승인 대기가 작업 중을 앞선다
+  assert.equal(mostUrgent(["working", "paused"]), "working");            // 작업 중이 일시중지를 앞선다
+  assert.equal(mostUrgent(["waiting", "working", "paused"]), "waiting"); // 승인 대기 > 작업 중 > 일시중지
+  assert.equal(mostUrgent(["ended", "idle"]), "idle");                   // 대기가 끝남을 앞선다
   assert.equal(mostUrgent(["ended"]), "ended");
-  assert.equal(mostUrgent(["working", "paused"]), "working");
-  assert.equal(mostUrgent(["paused", "idle"]), "paused"); // 순위가 같으면 앞
-  assert.equal(mostUrgent(["idle", "paused"]), "idle");
+  assert.equal(mostUrgent(["paused", "idle"]), "paused");                // 점은 일시중지를 대기보다 앞에 친다
+  assert.equal(mostUrgent(["idle", "paused"]), "paused");                // 순서를 바꿔도 일시중지
 });

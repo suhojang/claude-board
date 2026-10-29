@@ -303,6 +303,12 @@ pub struct SettingsView {
     pub board_pane_width: f64,
     /// 답변 꾸미기를 끄고 띄운 세션 id
     pub md_render_off: Vec<String>,
+    /// 사용자가 바꾼 단축키 — 동작 id → `[키 코드, 수정키 비트]`(비움은 `[]`)
+    pub shortcuts: std::collections::BTreeMap<String, Vec<serde_json::Value>>,
+    pub settings_transition: String,
+    pub new_session_command: String,
+    pub new_session_md_render: bool,
+    pub auto_update_check: bool,
     pub notify_position: String,
 }
 

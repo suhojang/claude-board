@@ -78,7 +78,7 @@ private struct ScreenSpec: Sendable {
     var runs = false
 }
 
-private struct SessSpec: Sendable {
+struct SessSpec: Sendable {   // 공유 규칙 표(RulesTableTests)도 세션을 이것으로 넘긴다
     var id: String
     var state: String
     var tty: String = ""
@@ -466,22 +466,26 @@ private let dotCases: [DotCase] = [
     DotCase(name: "끝난 세션뿐이면 끝남", states: ["ended"], dot: "ended"),
 ]
 
+// 경로 /w/a 의 화면마다 그 화면의 세션 하나(상태 차례대로)를 두고 짝짓는다 — 경로 상태 점 표와 공유 규칙 표(runWorkspaceDotRow)가 함께 쓴다
+private func dotPairing(_ states: [String]) -> TabPairing {
+    let log = Log()
+    var names: [UUID: String] = [:], screens: [TabScreen] = [], sessions: [SessSpec] = []
+    for (i, state) in states.enumerated() {
+        let id = UUID(uuidString: String(format: "00000000-0000-0000-0000-%012d", i + 1))!
+        names[id] = "A\(i + 1)"
+        // 끝난 세션은 tty 로 짝짓지 않으므로 같은 세션 id 로 연 화면에서 claude 가 뜨는 중이어야 화면의 세션이 된다
+        screens.append(TabScreen(id: id, workspace: "/w/a", tty: "ttys10\(i)", leader: Int32(1000 + i), sessionId: "s\(i)",
+                                 command: "claude", mdRenderOff: false))
+        sessions.append(SessSpec(id: "s\(i)", state: state, tty: "ttys10\(i)", pid: Int32(2000 + i)))
+    }
+    return pairTabs(sessions.map(session), screens: screens, probe: FakeProbe(log: log, names: names, running: Set(names.keys), modes: [:]),
+                    processes: FakeProcesses(log: log, parents: [:]), live: FakeLive(log: log, jobs: [:]))
+}
+
 @Suite("보드 탭 짝짓기·자리") struct TabPairingTests {
     @Test("경로 상태 점: 승인 대기 > 작업 중 > 일시중지 > 대기 > 끝남", arguments: dotCases)
     fileprivate func workspaceDot(_ c: DotCase) {
-        let log = Log()
-        var names: [UUID: String] = [:], screens: [TabScreen] = [], sessions: [SessSpec] = []
-        for (i, state) in c.states.enumerated() {
-            let id = UUID(uuidString: String(format: "00000000-0000-0000-0000-%012d", i + 1))!
-            names[id] = "A\(i + 1)"
-            // 끝난 세션은 tty 로 짝짓지 않으므로 같은 세션 id 로 연 화면에서 claude 가 뜨는 중이어야 화면의 세션이 된다
-            screens.append(TabScreen(id: id, workspace: "/w/a", tty: "ttys10\(i)", leader: Int32(1000 + i), sessionId: "s\(i)",
-                                     command: "claude", mdRenderOff: false))
-            sessions.append(SessSpec(id: "s\(i)", state: state, tty: "ttys10\(i)", pid: Int32(2000 + i)))
-        }
-        let r = pairTabs(sessions.map(session), screens: screens, probe: FakeProbe(log: log, names: names, running: Set(names.keys), modes: [:]),
-                         processes: FakeProcesses(log: log, parents: [:]), live: FakeLive(log: log, jobs: [:]))
-        #expect(r.workspaceStates == ["/w/a": c.dot])
+        #expect(dotPairing(c.states).workspaceStates == ["/w/a": c.dot])
     }
 
     @Test("짝짓기: 같은 tty 의 끝나지 않은 세션이 여럿이면 updated → since → 세션 id 차례로 하나, 목록 차례와 관계없고 paired 에는 모두", arguments: ttyPicks)
@@ -887,3 +891,73 @@ private let expected: [String: String] = [
     자리 h1[working]: place=tab A1 headless=true shown=tab A1 headless=true parkedTab=nil 조회:
     """,
 ]
+
+// MARK: - 공유 규칙 표(rules-table/pairing.json) — RulesTableTests 가 이 파일의 가짜 포트(FakeProbe·FakeProcesses·FakeLive)로 돌린다.
+// 가짜 이름이 다른 시험 파일의 private 이름과 겹쳐 internal 로 넓히면 다시 선언 오류가 나므로, 넘겨 주는 함수만 둔다.
+// 화면은 표 차례대로 UUID 를 받고 경로는 모두 /w/a, 맨 위 프로세스(leader)는 1000 + 차례, 명령은 없다(짝·자리 판정은 명령을 보지 않는다).
+// 세션 pid 는 2000 + 차례(진짜처럼 0 이 아니게), 시각(updated·since)은 t0 기준 초. 넘긴 작업은 없다
+
+private func tablePairing(screens: [(name: String, tty: String, sessionId: String?)], sessions specs: [SessSpec],
+                          runsClaude: Set<String>, owned: [String: String])
+    -> (pairing: TabPairing, sessions: [Session], probe: FakeProbe, names: [UUID: String]) {
+    var ids: [String: UUID] = [:], names: [UUID: String] = [:], leaders: [String: Int32] = [:]
+    for (i, s) in screens.enumerated() {
+        let id = UUID(uuidString: String(format: "00000000-0000-0000-0000-%012d", i + 1))!
+        ids[s.name] = id; names[id] = s.name; leaders[s.name] = Int32(1000 + i)
+    }
+    var parents: [Int32: Int32] = [:], sessions: [Session] = []
+    for (i, spec) in specs.enumerated() {
+        var spec = spec
+        spec.pid = Int32(2000 + i)
+        // 화면 안에서 시작된 headless — 부모가 그 화면의 맨 위 프로세스라 짝짓기의 조상 찾기(tabAncestor)가 한 칸 올라가 만난다
+        // (위 표본 "화면 안 headless" 들과 같은 꼴). 다른 세션의 부모는 못 읽음(nil)
+        if let screen = owned[spec.id], let leader = leaders[screen] { parents[spec.pid] = leader }
+        sessions.append(session(spec))
+    }
+    let log = Log()
+    let probe = FakeProbe(log: log, names: names, running: Set(runsClaude.compactMap { ids[$0] }), modes: [:])
+    let tabScreens = screens.map {
+        TabScreen(id: ids[$0.name]!, workspace: "/w/a", tty: $0.tty, leader: leaders[$0.name]!, sessionId: $0.sessionId, command: nil, mdRenderOff: false)
+    }
+    let r = pairTabs(sessions, screens: tabScreens, probe: probe, processes: FakeProcesses(log: log, parents: parents),
+                     live: FakeLive(log: log, jobs: [:]))
+    return (r, sessions, probe, names)
+}
+
+/// screen-session 한 판 — 화면 이름마다 그 화면의 세션(ScreenPairing.session 의 id, 없으면 nil)과 짝 표(세션 id → 화면 이름)
+func runScreenSessionRow(screens: [(name: String, tty: String, sessionId: String?)],
+                         sessions: [SessSpec]) -> (screenSession: [String: String?], paired: [String: String]) {
+    let t = tablePairing(screens: screens, sessions: sessions, runsClaude: [], owned: [:])
+    var screenSession: [String: String?] = [:]
+    for p in t.pairing.screens { screenSession.updateValue(p.session?.id, forKey: t.names[p.id] ?? "?") }
+    return (screenSession, t.pairing.paired.mapValues { t.names[$0] ?? "?" })
+}
+
+/// place 한 판 — 짝짓기(pairTabs)의 짝·화면 안 headless·화면의 세션 id 로 세션마다 sessionPlace(앱의 TerminalHub.place 와 같은 값).
+/// owned 는 세션 id → 그 headless 세션을 띄운 화면 이름. 결과는 "tab:<화면 이름>"·"terminal"·"background"·"ended"(tab 의 headless 표시는 글자에 없다)
+func runPlaceRow(screens: [(name: String, tty: String, sessionId: String?)], sessions: [SessSpec], runsClaude: Set<String>,
+                 owned: [String: String]) -> [String: String] {
+    let t = tablePairing(screens: screens, sessions: sessions, runsClaude: runsClaude, owned: owned)
+    let placeScreens = t.pairing.screens.map { ScreenSession(id: $0.id, sessionId: $0.sessionId) }
+    var out: [String: String] = [:]
+    for s in t.sessions {
+        switch sessionPlace(s, paired: t.pairing.paired, ownedHeadless: t.pairing.ownedHeadless, screens: placeScreens, probe: t.probe) {
+        case .tab(let id, _): out[s.id] = "tab:\(t.names[id] ?? "?")"
+        case .terminal: out[s.id] = "terminal"
+        case .background: out[s.id] = "background"
+        case .ended: out[s.id] = "ended"
+        }
+    }
+    return out
+}
+
+/// workspace-dot 한 판 — 경로 /w/a 의 화면 차례대로 그 화면의 세션 상태(위 경로 상태 점 표와 같은 dotPairing).
+/// 빈 목록은 세션이 없는 셸 화면 하나뿐인 경로다 — 경로는 화면이 있어야 생기므로(화면이 없으면 점을 물을 경로도 없다)
+func runWorkspaceDotRow(states: [String]) -> String? {
+    if !states.isEmpty { return dotPairing(states).workspaceStates["/w/a"] }
+    let log = Log(), id = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+    let r = pairTabs([], screens: [TabScreen(id: id, workspace: "/w/a", tty: "ttys100", leader: 1000, sessionId: nil, command: nil, mdRenderOff: false)],
+                     probe: FakeProbe(log: log, names: [id: "A1"], running: [], modes: [:]),
+                     processes: FakeProcesses(log: log, parents: [:]), live: FakeLive(log: log, jobs: [:]))
+    return r.workspaceStates["/w/a"]
+}

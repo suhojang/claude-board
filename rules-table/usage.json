@@ -1,0 +1,436 @@
+{
+  "family": "usage",
+  "schema": 1,
+  "cases": [
+    {
+      "id": "usage.parse.basic-sample",
+      "rule": "parse",
+      "why": "실제 응답 모양이면 5시간, 주간 전체, 모델별 주간을 보인다. limits 의 session 과 weekly_all 항목은 보지 않고 weekly_scoped 만 모델별 주간으로 본다. 값이 null 이거나 비어 있는 seven_day_opus 는 한도가 아니다",
+      "input": {
+        "body": {
+          "five_hour": {
+            "utilization": 5.0,
+            "resets_at": "2026-10-28T10:50:00.697299+00:00",
+            "limit_dollars": null
+          },
+          "seven_day": {
+            "utilization": 13.0,
+            "resets_at": "2026-10-29T07:00:00.697320+00:00"
+          },
+          "seven_day_opus": null,
+          "limits": [
+            {
+              "kind": "session",
+              "percent": 5,
+              "resets_at": "2026-10-28T10:50:00.697299+00:00",
+              "scope": null
+            },
+            {
+              "kind": "weekly_all",
+              "percent": 13,
+              "resets_at": "2026-10-29T07:00:00.697320+00:00",
+              "scope": null
+            },
+            {
+              "kind": "weekly_scoped",
+              "percent": 0,
+              "resets_at": "2026-10-29T06:59:59.697480+00:00",
+              "scope": { "model": { "id": null, "display_name": "Fable" }, "surface": null }
+            }
+          ]
+        }
+      },
+      "expect": {
+        "limits": [
+          { "id": "5h", "label": "5시간", "pct": 5, "resets": 1793184600697 },
+          { "id": "7d", "label": "주간 · 전체", "pct": 13, "resets": 1793257200697 },
+          { "id": "7d-Fable", "label": "주간 · Fable", "pct": 0, "resets": 1793257199697 }
+        ]
+      }
+    },
+    {
+      "id": "usage.parse.five-hour-missing-fails",
+      "rule": "parse",
+      "why": "5시간 항목이 없는 응답은 한도로 믿을 수 없으니 해석에 실패한다",
+      "input": {
+        "body": { "seven_day": { "utilization": 13 } }
+      },
+      "expect": { "limits": null }
+    },
+    {
+      "id": "usage.parse.not-json-fails",
+      "rule": "parse",
+      "why": "JSON 이 아닌 본문은 해석에 실패한다",
+      "input": { "body_raw": "not json" },
+      "expect": { "limits": null }
+    },
+    {
+      "id": "usage.parse.five-hour-empty-fails",
+      "rule": "parse",
+      "why": "5시간 항목이 풀리지 않아 남은 한도가 없는 응답은 해석 실패다. 빈 한도 목록을 성공으로 보여 주면 안 된다",
+      "source": "PR #19",
+      "input": { "body": { "five_hour": {} } },
+      "expect": { "limits": null }
+    },
+    {
+      "id": "usage.parse.five-hour-null-utilization-fails",
+      "rule": "parse",
+      "why": "5시간 값이 숫자가 아니어서 푼 한도가 없으면 해석 실패다",
+      "source": "PR #19",
+      "input": { "body": { "five_hour": { "utilization": null } } },
+      "expect": { "limits": null }
+    },
+    {
+      "id": "usage.parse.five-unparsed-seven-ok",
+      "rule": "parse",
+      "why": "5시간은 못 풀어도 주간이 풀리면 성공이다 - 풀리는 한도는 모두 보이게",
+      "input": {
+        "body": {
+          "five_hour": {},
+          "seven_day": { "utilization": 13 }
+        }
+      },
+      "expect": {
+        "limits": [{ "id": "7d", "label": "주간 · 전체", "pct": 13 }]
+      }
+    },
+    {
+      "id": "usage.parse.five-unparsed-scoped-ok",
+      "rule": "parse",
+      "why": "5시간은 못 풀어도 모델별 주간이 풀리면 성공이다",
+      "input": {
+        "body": {
+          "five_hour": { "utilization": null },
+          "limits": [
+            {
+              "kind": "weekly_scoped",
+              "percent": 3,
+              "scope": {
+                "model": { "id": "cla-opus-4-5", "display_name": "Opus" }
+              }
+            }
+          ]
+        }
+      },
+      "expect": {
+        "limits": [{ "id": "7d-Opus", "label": "주간 · Opus", "pct": 3 }]
+      }
+    },
+    {
+      "id": "usage.parse.same-model-name-three",
+      "rule": "parse",
+      "why": "모델별 주간의 이름이 같으면 화면 목록에서 한도 id 가 겹친다. 처음 것은 그대로 두고 뒤의 것에는 -2,-3 을 붙여 구별한다. 라벨은 이름 그대로 둔다",
+      "source": "PR #20",
+      "input": {
+        "body": {
+          "five_hour": { "utilization": 10 },
+          "limits": [
+            {
+              "kind": "weekly_scoped",
+              "percent": 1,
+              "scope": { "model": { "id": "m1", "display_name": "X" } }
+            },
+            {
+              "kind": "weekly_scoped",
+              "percent": 2,
+              "scope": { "model": { "id": "m2", "display_name": "X" } }
+            },
+            {
+              "kind": "weekly_scoped",
+              "percent": 3,
+              "scope": { "model": { "id": "m3", "display_name": "X" } }
+            }
+          ]
+        }
+      },
+      "expect": {
+        "limits": [
+          { "id": "5h", "label": "5시간", "pct": 10 },
+          { "id": "7d-X", "label": "주간 · X", "pct": 1 },
+          { "id": "7d-X-2", "label": "주간 · X", "pct": 2 },
+          { "id": "7d-X-3", "label": "주간 · X", "pct": 3 }
+        ]
+      }
+    },
+    {
+      "id": "usage.parse.no-name-twice",
+      "rule": "parse",
+      "why": "이름 없는 모델별 주간이 둘이면 기본 이름으로 id 가 겹치니 뒤의 것에 -2 를 붙인다. 라벨은 그대로 둔다",
+      "source": "PR #20",
+      "input": {
+        "body": {
+          "five_hour": { "utilization": 1 },
+          "limits": [
+            { "kind": "weekly_scoped", "percent": 1 },
+            { "kind": "weekly_scoped", "percent": 2 }
+          ]
+        }
+      },
+      "expect": {
+        "limits": [
+          { "id": "5h", "label": "5시간", "pct": 1 },
+          { "id": "7d-모델", "label": "주간 · 모델", "pct": 1 },
+          { "id": "7d-모델-2", "label": "주간 · 모델", "pct": 2 }
+        ]
+      }
+    },
+    {
+      "id": "usage.parse.suffix-meets-real-name",
+      "rule": "parse",
+      "why": "붙인 id 가 다른 모델의 실제 이름과 겹칠 수 있으니 그때는 다음 수를 더 붙인다. -2 를 붙인 자리에 모델-2 라는 이름이 이미 있으면 세 번째 것은 -3 이 된다",
+      "source": "PR #20",
+      "input": {
+        "body": {
+          "five_hour": { "utilization": 1 },
+          "limits": [
+            { "kind": "weekly_scoped", "percent": 1 },
+            {
+              "kind": "weekly_scoped",
+              "percent": 2,
+              "scope": { "model": { "id": "m2", "display_name": "모델-2" } }
+            },
+            { "kind": "weekly_scoped", "percent": 3 }
+          ]
+        }
+      },
+      "expect": {
+        "limits": [
+          { "id": "5h", "label": "5시간", "pct": 1 },
+          { "id": "7d-모델", "label": "주간 · 모델", "pct": 1 },
+          { "id": "7d-모델-2", "label": "주간 · 모델-2", "pct": 2 },
+          { "id": "7d-모델-3", "label": "주간 · 모델", "pct": 3 }
+        ]
+      }
+    },
+    {
+      "id": "usage.parse.skipped-item-takes-no-id",
+      "rule": "parse",
+      "why": "숫자가 아닌 percent 로 빠진 항목은 id 를 차지하지 않는다. 같은 이름의 앞 것이 빠지면 뒤의 것은 -2 없이 그 id 를 그대로 쓴다",
+      "source": "PR #20",
+      "input": {
+        "body": {
+          "five_hour": { "utilization": 1 },
+          "limits": [
+            {
+              "kind": "weekly_scoped",
+              "percent": "x",
+              "scope": { "model": { "id": "m1", "display_name": "Opus" } }
+            },
+            {
+              "kind": "weekly_scoped",
+              "percent": 3,
+              "scope": { "model": { "id": "m2", "display_name": "Opus" } }
+            }
+          ]
+        }
+      },
+      "expect": {
+        "limits": [
+          { "id": "5h", "label": "5시간", "pct": 1 },
+          { "id": "7d-Opus", "label": "주간 · Opus", "pct": 3 }
+        ]
+      }
+    },
+    {
+      "id": "usage.parse.non-object-in-limits-ignored",
+      "rule": "parse",
+      "why": "limits 에 객체 아닌 원소가 섞여도 해석은 실패가 아니다. 그 원소만 빼고 객체인 원소는 응답 차례대로 본다",
+      "source": "PR #20",
+      "input": {
+        "body": {
+          "five_hour": { "utilization": 5 },
+          "limits": [
+            1,
+            { "kind": "weekly_scoped", "percent": 3 }
+          ]
+        }
+      },
+      "expect": {
+        "limits": [
+          { "id": "5h", "label": "5시간", "pct": 5 },
+          { "id": "7d-모델", "label": "주간 · 모델", "pct": 3 }
+        ]
+      }
+    },
+    {
+      "id": "usage.parse.only-non-objects",
+      "rule": "parse",
+      "why": "limits 가 객체 아닌 원소뿐이면 모델별 주간은 없는 것이다. 해석 실패가 아니라 남은 한도만 보인다",
+      "source": "PR #20",
+      "input": {
+        "body": {
+          "five_hour": { "utilization": 5 },
+          "limits": [1, "x", null]
+        }
+      },
+      "expect": {
+        "limits": [{ "id": "5h", "label": "5시간", "pct": 5 }]
+      }
+    },
+    {
+      "id": "usage.cache.no-file-fetches",
+      "rule": "cache",
+      "why": "캐시 파일이 없으면 믿어 쓸 한도가 없으니 바로 새로 받는다",
+      "input": { "modified": null },
+      "expect": { "cached": null, "fetch": true }
+    },
+    {
+      "id": "usage.cache.fresh-applied-no-fetch",
+      "rule": "cache",
+      "why": "싱싱한 캐시(10초 전)는 그대로 적용하고 받지 않는다. 확인마다 API 를 부르지 않게",
+      "input": { "modified": -10, "body": { "five_hour": { "utilization": 42, "resets_at": "2026-10-28T10:50:00Z" } } },
+      "expect": { "cached": ["5h"], "fetch": false }
+    },
+    {
+      "id": "usage.cache.age-120-no-fetch",
+      "rule": "cache",
+      "why": "캐시 나이가 꼭 120초면 아직 받지 않는다. 120초를 넘어야 받는다",
+      "input": { "modified": -120, "body": { "five_hour": { "utilization": 42, "resets_at": "2026-10-28T10:50:00Z" } } },
+      "expect": { "cached": ["5h"], "fetch": false }
+    },
+    {
+      "id": "usage.cache.age-121-applied-fetch",
+      "rule": "cache",
+      "why": "캐시 나이가 120초를 넘으면 내용은 적용하되 낡았으니 새로 받는다",
+      "input": { "modified": -121, "body": { "five_hour": { "utilization": 42, "resets_at": "2026-10-28T10:50:00Z" } } },
+      "expect": { "cached": ["5h"], "fetch": true }
+    },
+    {
+      "id": "usage.cache.untrusted-not-applied-fetch",
+      "rule": "cache",
+      "why": "계정을 바꾼 뒤 trust_after 전에 쓰인 캐시는 상태줄이 앞 계정 토큰으로 늦게 썼을 수 있어 읽지도 않고 바로 받는다",
+      "input": { "modified": -1, "trust_after": 2, "body": { "five_hour": { "utilization": 42, "resets_at": "2026-10-28T10:50:00Z" } } },
+      "expect": { "cached": null, "fetch": true }
+    },
+    {
+      "id": "usage.cache.broken-body-fetch",
+      "rule": "cache",
+      "why": "상태줄이 깨진 내용을 계속 쓰면 믿을 캐시가 없는 것과 같게 확인마다 받는다. 깨진 캐시를 계속 적용하지 않게",
+      "source": "PR #19",
+      "input": { "modified": -10, "body_raw": "{\"five_" },
+      "expect": { "cached": null, "fetch": true }
+    },
+    {
+      "id": "usage.cache.five-hour-missing-fetch",
+      "rule": "cache",
+      "why": "캐시 본문에 5시간 항목이 없으면 풀리지 않은 캐시다. 적용하지 않고 받는다",
+      "source": "PR #19",
+      "input": { "modified": -30, "body": { "seven_day": { "utilization": 1 } } },
+      "expect": { "cached": null, "fetch": true }
+    },
+    {
+      "id": "usage.cache.empty-limits-fetch",
+      "rule": "cache",
+      "why": "푼 한도가 하나도 없는 캐시 본문도 깨진 캐시와 같게 적용하지 않고 받는다. 빈 한도 목록을 적용하지 않게",
+      "source": "PR #19",
+      "input": { "modified": -10, "body": { "five_hour": { "utilization": null } } },
+      "expect": { "cached": null, "fetch": true }
+    },
+    {
+      "id": "usage.cache.future-60-applied-fetch",
+      "rule": "cache",
+      "why": "캐시 수정 시각이 미래면(시계 어긋남) 나이를 셀 수 없다. 내용은 적용하되 낡아 보이지 않게 새로 받는다",
+      "source": "PR #19",
+      "input": { "modified": 60, "body": { "five_hour": { "utilization": 42, "resets_at": "2026-10-28T10:50:00Z" } } },
+      "expect": { "cached": ["5h"], "fetch": true }
+    },
+    {
+      "id": "usage.cache.future-half-second-fetch",
+      "rule": "cache",
+      "why": "0.5초라도 수정 시각이 미래면 나이를 셀 수 없으니 새로 받는다",
+      "source": "PR #19",
+      "input": { "modified": 0.5, "body": { "five_hour": { "utilization": 42, "resets_at": "2026-10-28T10:50:00Z" } } },
+      "expect": { "cached": ["5h"], "fetch": true }
+    },
+    {
+      "id": "usage.cache.age-zero-no-fetch",
+      "rule": "cache",
+      "why": "막 쓴 캐시(나이 0)는 그대로 적용하고 받지 않는다",
+      "input": { "modified": 0, "body": { "five_hour": { "utilization": 42, "resets_at": "2026-10-28T10:50:00Z" } } },
+      "expect": { "cached": ["5h"], "fetch": false }
+    },
+    {
+      "id": "usage.cache.fetching-blocks-future",
+      "rule": "cache",
+      "why": "이미 응답을 받는 중이면 캐시가 미래 시각이어도 다시 받지 않는다. 받는 요청이 겹치지 않게",
+      "input": { "modified": 60, "fetching": true, "body": { "five_hour": { "utilization": 42, "resets_at": "2026-10-28T10:50:00Z" } } },
+      "expect": { "cached": ["5h"], "fetch": false }
+    },
+    {
+      "id": "usage.cache.fetching-blocks-broken",
+      "rule": "cache",
+      "why": "이미 받는 중이면 캐시가 깨졌어도 다시 받지 않는다",
+      "input": { "modified": -10, "fetching": true, "body_raw": "garbage" },
+      "expect": { "cached": null, "fetch": false }
+    },
+    {
+      "id": "usage.cache.fetching-blocks-old",
+      "rule": "cache",
+      "why": "이미 받는 중이면 캐시가 낡았어도 다시 받지 않는다",
+      "input": { "modified": -300, "fetching": true, "body": { "five_hour": { "utilization": 42, "resets_at": "2026-10-28T10:50:00Z" } } },
+      "expect": { "cached": ["5h"], "fetch": false }
+    },
+    {
+      "id": "usage.settle.ok-applied-written",
+      "rule": "settle",
+      "why": "200 으로 받은 본문이 풀리면 한도를 적용하고 상태줄이 같은 캐시에 본문을 그대로 쓴다. 실패 표시도 함께 푼다",
+      "input": {
+        "body": {
+          "five_hour": {
+            "utilization": 11,
+            "resets_at": "2026-10-28T10:50:00.697299+00:00"
+          },
+          "seven_day": { "utilization": 21 },
+          "limits": [
+            {
+              "kind": "weekly_scoped",
+              "percent": 81,
+              "scope": {
+                "model": { "id": "cla-opus-4-5", "display_name": "Opus" }
+              },
+              "resets_at": "2026-10-28T10:50:00.697299+00:00"
+            }
+          ]
+        },
+        "current_empty": true
+      },
+      "expect": { "applied": true, "cache_written": true, "failed": false }
+    },
+    {
+      "id": "usage.settle.empty-limits-current-empty-failed",
+      "rule": "settle",
+      "why": "본문은 200 으로 왔지만 푼 한도가 하나도 없으면 실패다. 실패 표시를 내고 캐시에 쓰지 않는다. 빈 한도를 보여 주거나 빈 한도를 캐시에 쓰지 않게",
+      "source": "PR #19",
+      "input": {
+        "body": { "five_hour": { "utilization": null } },
+        "current_empty": true
+      },
+      "expect": { "applied": false, "cache_written": false, "failed": true }
+    },
+    {
+      "id": "usage.settle.empty-limits-current-kept",
+      "rule": "settle",
+      "why": "푼 한도가 하나도 없는 응답은 실패여도 지금 보이는 한도를 빈 한도로 덮어쓰지 않는다. 실패 표시도 건드리지 않고 캐시에도 쓰지 않는다",
+      "source": "PR #19",
+      "input": {
+        "body": { "five_hour": { "utilization": null } },
+        "current_empty": false
+      },
+      "expect": { "applied": false, "cache_written": false, "failed": null }
+    },
+    {
+      "id": "usage.settle.no-data-current-empty-failed",
+      "rule": "settle",
+      "why": "받은 응답이 없으면 실패다. 실패 표시를 내고 캐시에 쓰지 않는다",
+      "input": { "current_empty": true },
+      "expect": { "applied": false, "cache_written": false, "failed": true }
+    },
+    {
+      "id": "usage.settle.no-data-current-kept",
+      "rule": "settle",
+      "why": "받은 응답이 없어도 지금 보이는 한도를 덮어쓰지 않는다. 실패 표시도 건드리지 않고 캐시에도 쓰지 않는다",
+      "input": { "current_empty": false },
+      "expect": { "applied": false, "cache_written": false, "failed": null }
+    }
+  ]
+}

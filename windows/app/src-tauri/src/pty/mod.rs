@@ -57,6 +57,10 @@ mod stub {
             unsupported()
         }
 
+        pub fn spawn_env(_program: &Path, _args: &[String], _cwd: &Path, _cols: u16, _rows: u16, _vars: &[(String, String)]) -> io::Result<Pty> {
+            unsupported()
+        }
+
         pub fn pid(&self) -> u32 {
             0
         }

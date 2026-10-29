@@ -17,6 +17,7 @@ import {
 } from "$lib/backend";
 import { board } from "$lib/board/store.svelte";
 import type { BoardSurface, ConfirmShutdownPayload, PidTarget, Session, Snapshot, TabEntry } from "$lib/types";
+import { restoreSettingsBeforeQuit } from "$lib/settings/screen.svelte";
 import { TerminalHub, controllerOf, focusActive, select, shownName, surfaceOf } from "./hub.svelte";
 import {
   claudeDirs,
@@ -290,6 +291,8 @@ async function onConfirmRequest(request: ConfirmShutdownPayload) {
     return;
   }
   const { items } = currentShutdownList();
+  // 물어볼 것이 없으면 곧 꺼진다 — 설정 화면이 접힌 보드를 잠깐 펼쳐 둔 것이면 접는 저장을 마친 뒤에 답한다. 확인 창을 띄우는 길은 사용자가 취소할 수 있어 answerConfirm 이 한다
+  if (items.length === 0) await restoreSettingsBeforeQuit();
   const pendingSaved = flushSave();
   if (items.length === 0) {
     frozenUntil = Date.now() + FROZEN_AFTER_SHUTDOWN_MS;
@@ -309,6 +312,7 @@ export async function answerConfirm(ok: boolean) {
   if (!Lifecycle.confirm) return;
   const pause = ok ? currentShutdownList().pause : [];
   Lifecycle.confirm = null;
+  if (ok) await restoreSettingsBeforeQuit();
   const pendingSaved = flushSave();
   if (ok) frozenUntil = Date.now() + FROZEN_AFTER_SHUTDOWN_MS;
   await saved(pendingSaved);

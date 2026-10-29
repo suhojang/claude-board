@@ -53,6 +53,17 @@ pub struct Settings {
     pub terminal_tabs: Vec<serde_json::Value>,
     /// 답변 꾸미기(md-render)를 끄고 띄운 세션 id(mac `mdRenderOff`) — 다시 열 때 같은 모양으로 연다
     pub md_render_off: Vec<String>,
+    /// 사용자가 바꾼 단축키(mac `shortcuts`) — 동작 id → `[키 코드, 수정키 비트]`, 비운 것은 `[]`, 기본값이면 항목이 없다.
+    /// 키 표와 모양은 프론트(`shortcuts/rules.ts`)가 쥐고 백엔드는 모양만 확인해 그대로 둔다
+    pub shortcuts: BTreeMap<String, Vec<serde_json::Value>>,
+    /// 설정 화면이 열리고 닫히는 움직임(mac `settingsTransition`) — `slide` · `fade` · `none`
+    pub settings_transition: String,
+    /// 새 세션의 기본 명령(mac `newSessionCommand`) — 비면 프런트가 `claude --dangerously-skip-permissions` 로 쓴다
+    pub new_session_command: String,
+    /// 새 세션을 열 때 답변 꾸미기(md-render) 기본값(mac `newSessionMdRender`)
+    pub new_session_md_render: bool,
+    /// 시작할 때와 한 시간마다 새 버전을 확인하는가(mac `autoUpdateCheck`)
+    pub auto_update_check: bool,
 }
 
 impl Default for Settings {
@@ -81,18 +92,28 @@ impl Default for Settings {
             mini_from_expanded: false,
             terminal_tabs: Vec::new(),
             md_render_off: Vec::new(),
+            shortcuts: BTreeMap::new(),
+            settings_transition: "slide".into(),
+            new_session_command: String::new(),
+            new_session_md_render: true,
+            auto_update_check: true,
         }
     }
 }
 
 pub const MASCOTS: [&str; 8] = ["tralalero", "bombardiro", "tungtung", "lirili", "patapim", "boneca", "cappuccino", "foreman"];
 pub const SIDES: [&str; 2] = ["right", "left"];
+pub const TRANSITIONS: [&str; 3] = ["slide", "fade", "none"];
 pub const POSITIONS: [&str; 5] = ["center", "top-left", "top-right", "bottom-left", "bottom-right"];
 
 impl Settings {
     /// 읽는다. 없거나 깨졌으면 기본값.
     pub fn load(path: &Path) -> Self {
-        let mut s: Settings = fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        let mut value: Option<serde_json::Value> = fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok());
+        if let Some(serde_json::Value::Object(map)) = value.as_mut() {
+            sanitize_shortcuts(map);
+        }
+        let mut s: Settings = value.and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
         s.opacity = clamp_opacity(s.opacity);
         s.board_pane_width = clamp_pane_width(s.board_pane_width);
         if !SIDES.contains(&s.board_side.as_str()) {
@@ -101,6 +122,10 @@ impl Settings {
         if !MASCOTS.contains(&s.mascot.as_str()) {
             s.mascot = "tralalero".into();
         }
+        if !TRANSITIONS.contains(&s.settings_transition.as_str()) {
+            s.settings_transition = "slide".into();
+        }
+        s.shortcuts.retain(|_, combo| is_shortcut_shape(combo));
         s
     }
 
@@ -130,8 +155,28 @@ impl Settings {
             board_side: self.board_side.clone(),
             board_pane_width: self.board_pane_width,
             md_render_off: self.md_render_off.clone(),
+            shortcuts: self.shortcuts.clone(),
+            settings_transition: self.settings_transition.clone(),
+            new_session_command: self.new_session_command.clone(),
+            new_session_md_render: self.new_session_md_render,
+            auto_update_check: self.auto_update_check,
             notify_position,
         }
+    }
+
+    /// 단축키 하나를 바꾼다. `None` 은 기본값으로 돌아가(항목 삭제), `Some([])` 는 비움, `Some([코드, 수정키])` 는 그 키.
+    /// 모양이 다르면 받지 않고 false(mac `Shortcuts.set` 의 저장 모양)
+    pub fn set_shortcut(&mut self, id: &str, combo: Option<Vec<serde_json::Value>>) -> bool {
+        match combo {
+            None => {
+                self.shortcuts.remove(id);
+            }
+            Some(c) if is_shortcut_shape(&c) && !id.is_empty() => {
+                self.shortcuts.insert(id.to_string(), c);
+            }
+            Some(_) => return false,
+        }
+        true
     }
 
     /// 요약 칩으로 찾아갈 때: 카드와 그 안의 터미널·백그라운드 구역을 편다.
@@ -139,6 +184,47 @@ impl Settings {
         set_in(&mut self.collapsed, cwd, false);
         let prefix = format!("{cwd}|");
         self.kind_collapsed.retain(|k| !k.starts_with(&prefix));
+    }
+}
+
+/// 파일의 `shortcuts` 에서 배열이 아닌 항목(`"snap":"KeyB"`·null·숫자)을 버린다. 항목 하나가 틀렸다고 파일 전체가 안 읽혀 설정이 모두 초기화되지 않게 한다.
+/// `shortcuts` 자체가 객체가 아니면 그 키를 지운다(기본값으로 읽는다)
+fn sanitize_shortcuts(map: &mut serde_json::Map<String, serde_json::Value>) {
+    match map.get_mut("shortcuts") {
+        Some(serde_json::Value::Object(entries)) => entries.retain(|_, v| v.is_array()),
+        Some(_) => {
+            map.remove("shortcuts");
+        }
+        None => {}
+    }
+}
+
+/// 저장된 단축키 한 항목의 모양 — `[]`(비움) 또는 `[키 코드 문자열, 수정키 비트 정수]`
+fn is_shortcut_shape(combo: &[serde_json::Value]) -> bool {
+    match combo {
+        [] => true,
+        [code, mods] => code.as_str().is_some_and(|c| !c.is_empty()) && mods.is_u64(),
+        _ => false,
+    }
+}
+
+/// 설정 화면을 열거나 닫으라고 프론트에 보내는 이벤트(트레이 "설정…", 계정 칩 메뉴) — 내용은 `SettingsEvent`
+pub const SETTINGS_EVENT: &str = "board://settings";
+
+/// `open` 이 참이면 `section`(없으면 지금 묶음)을 열고, 거짓이면 닫는다. `section` 은 프론트 `SettingsSectionId`
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SettingsEvent {
+    pub open: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub section: Option<String>,
+}
+
+/// 프론트에 설정 화면 열기·닫기를 알린다.
+pub fn emit_settings(app: &tauri::AppHandle, open: bool, section: Option<&str>) {
+    use tauri::Emitter;
+    let event = SettingsEvent { open, section: section.map(str::to_string) };
+    if let Err(e) = app.emit(SETTINGS_EVENT, event) {
+        crate::util::board_log(&format!("설정 화면 이벤트를 보내지 못했습니다: {e}"));
     }
 }
 
@@ -242,6 +328,12 @@ mod tests {
         s.mini_from_expanded = true;
         s.terminal_tabs = vec![serde_json::json!({"workspace": "/w", "name": null, "selected": true, "root": {"leaf": {"cwd": "/w", "command": null, "sessionId": "s1", "mdRenderOff": false}}})];
         s.md_render_off = vec!["s1".into(), "s2".into()];
+        s.shortcuts.insert("newSession".into(), vec![serde_json::json!("KeyN"), serde_json::json!(3)]);
+        s.shortcuts.insert("rename".into(), vec![]);
+        s.settings_transition = "fade".into();
+        s.new_session_command = "claude --model opus".into();
+        s.new_session_md_render = false;
+        s.auto_update_check = false;
         s.save(&path).unwrap();
         let back = Settings::load(&path);
         assert_eq!(back, s);
@@ -249,6 +341,8 @@ mod tests {
         assert_eq!(back.terminal_tabs.len(), 1);
         assert_eq!(back.terminal_tabs[0]["root"]["leaf"]["sessionId"], "s1");
         assert_eq!(back.md_render_off, ["s1", "s2"]);
+        assert_eq!(back.shortcuts["newSession"], [serde_json::json!("KeyN"), serde_json::json!(3)]);
+        assert!(back.shortcuts["rename"].is_empty());
 
         // 프론트에 보내는 키 이름
         let v = serde_json::to_value(back.view("top-left".into())).unwrap();
@@ -259,6 +353,10 @@ mod tests {
         assert_eq!(v["boardSide"], "left");
         assert_eq!(v["boardPaneWidth"], 520.5);
         assert_eq!(v["mdRenderOff"], serde_json::json!(["s1", "s2"]));
+        assert_eq!(v["shortcuts"]["newSession"], serde_json::json!(["KeyN", 3]));
+        assert_eq!(v["settingsTransition"], "fade");
+        assert_eq!(v["newSessionCommand"], "claude --model opus");
+        assert_eq!((v["newSessionMdRender"].as_bool(), v["autoUpdateCheck"].as_bool()), (Some(false), Some(false)));
         assert!(v.get("terminalTabs").is_none(), "탭 목록은 상태 묶음에 싣지 않고 load_tabs 로 읽는다");
         assert!(v.get("hiddenGroups").is_none());
         assert!(v.get("miniFromExpanded").is_none());
@@ -278,6 +376,11 @@ mod tests {
             "miniFromExpanded",
             "terminalTabs",
             "mdRenderOff",
+            "shortcuts",
+            "settingsTransition",
+            "newSessionCommand",
+            "newSessionMdRender",
+            "autoUpdateCheck",
         ];
         for k in stored {
             assert!(raw.get(k).is_some(), "{k}");
@@ -299,6 +402,74 @@ mod tests {
         assert!(odd.terminal_tabs.is_empty() && odd.md_render_off.is_empty());
         fs::write(&path, b"{broken").unwrap();
         assert_eq!(Settings::load(&path), Settings::default());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 2단계 전에 저장된 파일(새 필드 없음)은 기본값을 채워 읽고, 다시 저장해도 예전 키가 그대로 남는다
+    #[test]
+    fn old_file_without_phase_two_fields_loads_with_defaults() {
+        let dir = std::env::temp_dir().join(format!("cb-settings-old-{}", crate::util::short_id()));
+        let path = dir.join("board-settings.json");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(&path, br#"{"pinned": false, "mascot": "foreman", "opacity": 0.6, "mdRenderOff": ["s1"], "terminalTabs": []}"#).unwrap();
+        let old = Settings::load(&path);
+        assert_eq!((old.pinned, old.mascot.as_str(), old.opacity), (false, "foreman", 0.6));
+        assert!(old.shortcuts.is_empty());
+        assert_eq!(old.settings_transition, "slide");
+        assert_eq!(old.new_session_command, "");
+        assert!(old.new_session_md_render && old.auto_update_check);
+        old.save(&path).unwrap();
+        let raw: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!((raw["pinned"].as_bool(), raw["mascot"].as_str(), raw["mdRenderOff"][0].as_str()), (Some(false), Some("foreman"), Some("s1")));
+        assert_eq!(raw["settingsTransition"], "slide");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn shortcut_overrides_keep_only_known_shapes() {
+        let mut s = Settings::default();
+        let key = |code: &str, mods: u64| vec![serde_json::json!(code), serde_json::json!(mods)];
+        assert!(s.set_shortcut("newSession", Some(key("KeyN", 3))));
+        assert!(s.set_shortcut("rename", Some(vec![])), "비움은 빈 배열");
+        assert!(!s.set_shortcut("bad", Some(vec![serde_json::json!(12), serde_json::json!(3)])), "코드는 문자열");
+        assert!(!s.set_shortcut("bad", Some(vec![serde_json::json!("KeyN")])), "수정키가 없다");
+        assert!(!s.set_shortcut("", Some(key("KeyN", 1))), "id 가 비었다");
+        assert_eq!(s.shortcuts.len(), 2);
+        assert!(s.set_shortcut("newSession", None), "기본값으로 돌아가면 항목을 지운다");
+        assert!(!s.shortcuts.contains_key("newSession"));
+
+        // 파일에 모양이 틀린 항목이 있으면 그 항목만 버리고, 모르는 전환은 기본값으로
+        let dir = std::env::temp_dir().join(format!("cb-settings-sc-{}", crate::util::short_id()));
+        let path = dir.join("board-settings.json");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(&path, br#"{"shortcuts": {"ok": ["KeyA", 1], "cleared": [], "bad": [7]}, "settingsTransition": "spin"}"#).unwrap();
+        let loaded = Settings::load(&path);
+        assert_eq!(loaded.shortcuts.keys().map(String::as_str).collect::<Vec<_>>(), ["cleared", "ok"]);
+        assert_eq!(loaded.settings_transition, "slide");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// `shortcuts` 항목 하나가 배열이 아니어도 파일 전체를 버리지 않는다 — 나머지 설정과 모양이 맞는 항목은 남는다
+    #[test]
+    fn non_array_shortcut_entries_do_not_reset_the_whole_file() {
+        let dir = std::env::temp_dir().join(format!("cb-settings-sc2-{}", crate::util::short_id()));
+        let path = dir.join("board-settings.json");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            &path,
+            br#"{"pinned": false, "mascot": "foreman", "shortcuts": {"snap": "KeyB", "a": null, "b": 5, "ok": ["KeyA", 1], "cleared": []}}"#,
+        )
+        .unwrap();
+        let loaded = Settings::load(&path);
+        assert_eq!((loaded.pinned, loaded.mascot.as_str()), (false, "foreman"));
+        assert_eq!(loaded.shortcuts.keys().map(String::as_str).collect::<Vec<_>>(), ["cleared", "ok"]);
+        // shortcuts 자체가 객체가 아니어도 나머지는 남는다
+        for bad in ["\"KeyB\"", "null", "7", "[1]"] {
+            fs::write(&path, format!(r#"{{"pinned": false, "mascot": "foreman", "shortcuts": {bad}}}"#)).unwrap();
+            let loaded = Settings::load(&path);
+            assert_eq!((loaded.pinned, loaded.mascot.as_str()), (false, "foreman"), "{bad}");
+            assert!(loaded.shortcuts.is_empty(), "{bad}");
+        }
         fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -4,7 +4,7 @@
 //! 보드가 낡은 PATH 로 떴거나 부모 Claude 세션의 `CLAUDECODE`·`CLAUDE_CODE_CHILD_SESSION` 을 물려받아도 셸에는 가지 않는다.
 
 /// `이름=값\0…\0\0` 블록을 (이름, 값) 목록으로. `=C:` 처럼 이름이 `=` 로 시작하는 항목은 그 이름 그대로 둔다.
-#[cfg(test)]
+#[cfg_attr(not(windows), allow(dead_code))]
 pub fn parse(block: &[u16]) -> Vec<(String, String)> {
     block
         .split(|&c| c == 0)
@@ -16,6 +16,27 @@ pub fn parse(block: &[u16]) -> Vec<(String, String)> {
             Some((s[..eq].to_string(), s[eq + 1..].to_string()))
         })
         .collect()
+}
+
+/// 블록에 변수를 더하거나 같은 이름(대소문자 무시)이 있으면 값을 바꾼다 — 계정 추가 로그인처럼 한 프로세스에만 다른 환경을 줄 때 쓴다.
+/// 결과는 이름을 대소문자 무시로 정렬한 블록(끝의 이중 NUL 포함).
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn with_vars(block: &[u16], vars: &[(String, String)]) -> Vec<u16> {
+    let mut entries = parse(block);
+    for (name, value) in vars {
+        match entries.iter_mut().find(|(existing, _)| existing.eq_ignore_ascii_case(name)) {
+            Some(entry) => *entry = (name.clone(), value.clone()),
+            None => entries.push((name.clone(), value.clone())),
+        }
+    }
+    entries.sort_by_key(|(name, _)| name.to_uppercase());
+    let mut out: Vec<u16> = Vec::new();
+    for (name, value) in &entries {
+        out.extend(format!("{name}={value}").encode_utf16());
+        out.push(0);
+    }
+    out.push(0);
+    out
 }
 
 /// 이 사용자 계정의 환경 블록(끝의 이중 NUL 포함). 실패는 호출한 쪽이 터미널을 못 여는 오류로 올린다.
@@ -71,6 +92,20 @@ mod tests {
         let got = parse(&block(&["=C:=C:\\", "Path=C:\\bin;D:\\x", "A=b=c", "빈=", "한글=값"]));
         let got: Vec<(&str, &str)> = got.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
         assert_eq!(got, [("=C:", "C:\\"), ("Path", "C:\\bin;D:\\x"), ("A", "b=c"), ("빈", ""), ("한글", "값")]);
+    }
+
+    #[test]
+    fn with_vars_adds_replaces_case_insensitively_and_keeps_the_block_shape() {
+        let base = block(&["=C:=C:\\", "Path=C:\\bin", "claude_config_dir=C:\\old", "Z=1"]);
+        let got = with_vars(&base, &[("CLAUDE_CONFIG_DIR".into(), "C:\\새 폴더\\login-1".into()), ("BROWSER".into(), "C:\\x\\open.cmd".into())]);
+        assert_eq!(got.iter().rev().take(2).collect::<Vec<_>>(), [&0, &0], "끝은 이중 NUL");
+        let vars = parse(&got);
+        let names: Vec<&str> = vars.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(names, ["=C:", "BROWSER", "CLAUDE_CONFIG_DIR", "Path", "Z"]);
+        assert_eq!(vars.iter().find(|(k, _)| k == "CLAUDE_CONFIG_DIR").unwrap().1, "C:\\새 폴더\\login-1");
+        assert_eq!(vars.iter().find(|(k, _)| k == "Path").unwrap().1, "C:\\bin");
+        // 더할 것이 없으면 그대로 읽힌다
+        assert_eq!(parse(&with_vars(&base, &[])).len(), 4);
     }
 
     #[test]

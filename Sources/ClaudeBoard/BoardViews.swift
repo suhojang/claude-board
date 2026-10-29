@@ -877,10 +877,11 @@ struct MenuAnchorView: NSViewRepresentable {
         case "paused":
             return [Item(id: 0, icon: "play.fill", title: "세션 재개", detail: "멈춘 지점부터 이어서 진행하게 합니다") { resumePaused(s) }, stop]
         default:
-            let canPause = s.state != "idle" && canDriveSession(s)
+            // 멈출 응답이 있는가는 --action pause 와 같은 판정(BoardRules.isPausable — 이 갈래에서는 대기만 아니다)
+            let canPause = isPausable(s) && canDriveSession(s)
             var list = [Item(id: 0, icon: "pause.fill", title: "일시중지",
                              detail: canPause ? "지금 응답을 멈춥니다. 재개하면 이어 갑니다"
-                                 : s.state == "idle" ? "대기 중이라 멈출 응답이 없습니다" : "이 터미널에는 키를 넣을 수 없습니다",
+                                 : !isPausable(s) ? "대기 중이라 멈출 응답이 없습니다" : "이 터미널에는 키를 넣을 수 없습니다",
                              enabled: canPause, tint: Palette.color("paused")) { pauseSession(s) }]
             // 다른 터미널(Ghostty)의 세션을 보드 탭으로 — 그쪽을 /exit 로 끝내고 보드에서 이어 연다
             if place == .terminal, canDrive(s) {

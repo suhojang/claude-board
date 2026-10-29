@@ -446,7 +446,7 @@ claude.exe ──ConPTY── OpenConsole.exe ──출력 파이프──> [읽
 1. **세션 id 를 미리 안다.** 이어 열기는 `--resume <id>`(Claude Code 문서: `--fork-session` 을 줄 때만 새 id — 즉 기본은 같은 id), 새 세션은 보드가 UUID 를 만들어 `--session-id <uuid>` 로 띄운다. 터미널 기록에 그 id 를 처음부터 붙인다.
 2. **pid 로 확인한다.** 그 id 의 세션 파일이 생기거나 바뀌면, 세션 pid 가 보드 자식 pid 와 같거나 `ProcessTable::ancestors(session.pid, 8)` 에 보드 자식 pid 가 있는지(자식의 생성 시각도 일치) 본다. 맞으면 "보드가 쥔 세션". 안 맞으면(같은 id 를 다른 터미널에서 이어 연 경우) 짝짓지 않고 그 터미널은 "다른 곳에서 이 세션이 열림"으로 표시.
 3. **세션 파일이 아직 없을 때**(Claude Code 가 막 뜨는 중): 터미널은 왼쪽에 보이되 목록 줄은 SessionStart hook 이 파일을 쓴 다음부터 나온다.
-4. **마지막 수단(필요할 때만)**: ConPTY 자식 환경에 `CLAUDE_BOARD_TERMINAL=<터미널 id>` 를 넣어 두는 것은 처음부터 한다(해가 없다, 진단용). hook 이 이 값을 세션 파일에 남기는 것은 **파일 약속 변경**이라(macOS `state.py`·`ClaudeBoard.swift`·`board-tui.py`, Windows SPEC §2.1·core 역직렬화·store 모두 고침) 위 1·2 가 실기에서 실패할 때만 한다.
+4. **마지막 수단(필요할 때만)**: ConPTY 자식 환경에 `CLAUDE_BOARD_TERMINAL=<터미널 id>` 를 넣어 두는 것은 처음부터 한다(해가 없다, 진단용). hook 이 이 값을 세션 파일에 남기는 것은 **파일 약속 변경**이라(macOS `state.py`·보드 `Sources/ClaudeBoard/`·`board-tui.py`, Windows SPEC §2.1·core 역직렬화·store 모두 고침) 위 1·2 가 실기에서 실패할 때만 한다.
 
 ### 5.3 짝지은 세션의 보정 (보드 쪽)
 

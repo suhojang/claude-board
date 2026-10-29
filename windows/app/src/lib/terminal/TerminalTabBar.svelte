@@ -4,6 +4,7 @@
   import { tick } from "svelte";
   import Icon from "$lib/board/Icon.svelte";
   import { hint } from "$lib/board/hint.svelte";
+  import { keyLabel } from "$lib/shortcuts/store.svelte";
   import TerminalTabButton from "./TerminalTabButton.svelte";
   import { TerminalHub, newSessionSheet, tabsIn } from "./hub.svelte";
   import { badgeNumber } from "./tabLogic";
@@ -19,6 +20,8 @@
   // 탭이 모두 들어가면 탭마다 가장 넓게, 아니면 남는 폭 전부. 가장 좁게 해도 넘치면 안쪽 폭이 더 커서 가로로 밀린다
   const shown = $derived(tabStripWidth(barWidth, newWidth, count));
   const least = $derived(tabStripLeast(count));
+  // 새 세션 키 안내 — 설정 > 단축키에서 바꾼 키를 따른다(비웠으면 안 보인다)
+  const newKey = $derived(keyLabel("newSession"));
 
   // 고른 탭이 칸 밖이면 보이게 민다(가장 가까운 만큼만)
   function scrollToSelected(animated: boolean) {
@@ -66,7 +69,7 @@
     <span class="box">
       <svg class="dash" aria-hidden="true"><rect x="0.5" y="0.5" rx="7.5" ry="7.5" /></svg>
       <Icon name="plus" size={10} />
-      <span class="key">Ctrl+T</span>
+      {#if newKey}<span class="key">{newKey}</span>{/if}
     </span>
   </button>
 </div>

@@ -9,6 +9,7 @@ export type MenuItem =
       header?: boolean; // 누를 수 없는 머리말
       destructive?: boolean;
       title?: string; // 마우스를 올리면 뜨는 설명
+      keys?: string; // 오른쪽에 보이는 단축키 글자 — shortcuts/store.svelte.ts 의 keyLabel(id) 로 채워 바꾼 키를 따른다
       submenu?: MenuItem[];
     };
 

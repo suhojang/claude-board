@@ -108,6 +108,37 @@ export interface BoardSettings {
   boardSide: BoardSide;      // 접었을 때 보드가 붙는 화면 쪽, 펼쳤을 때 터미널 반대쪽
   boardPaneWidth: number;    // 보드 칸 폭(논리 px)
   mdRenderOff: string[];     // 답변 꾸미기(md-render)를 끄고 띄운 세션 id
+  shortcuts: ShortcutOverrides;        // 사용자가 바꾼 단축키(기본값이면 항목 없음)
+  settingsTransition: SettingsTransition; // 설정 화면이 열리고 닫히는 움직임
+  newSessionCommand: string;           // 새 세션 기본 명령, 비면 claude
+  newSessionMdRender: boolean;         // 새 세션의 답변 꾸미기 기본값
+  autoUpdateCheck: boolean;            // 시작할 때와 하루마다 새 버전 확인
+}
+
+// ── 설정 화면·단축키·계정 로그인(2단계) — 규칙은 settings/·shortcuts/ ────────────────
+
+// 설정 화면의 묶음(mac SettingsSection) — 백엔드 이벤트 board://settings 의 section 값이기도 하다
+export type SettingsSectionId = "general" | "window" | "notify" | "terminal" | "board" | "account" | "shortcuts" | "update";
+
+// 설정 화면이 열리고 닫히는 움직임(mac SettingsTransition)
+export type SettingsTransition = "slide" | "fade" | "none";
+
+// 저장한 단축키 하나 — [] 는 비움, [KeyboardEvent.code, 수정키 비트] 는 그 키(비트는 shortcuts/keyCombo.ts 가 정한다). 기본값이면 항목이 없다
+export type ShortcutOverride = [] | [string, number];
+export type ShortcutOverrides = Record<string, ShortcutOverride>;
+
+// 이벤트 board://settings — 백엔드(트레이 "설정…")가 설정 화면을 열거나 닫으라고 한다. section 이 없으면 지금 묶음
+export interface SettingsEventPayload {
+  open: boolean;
+  section?: SettingsSectionId;
+}
+
+// 이벤트 board://account-login — 계정 추가 로그인의 진행. url 은 열 주소, note 는 안내 한 줄, done 은 끝남, error 는 사유
+export interface AccountLoginPayload {
+  url?: string;
+  note?: string;
+  done?: boolean;
+  error?: string;
 }
 
 export interface TerminalApp {

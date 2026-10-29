@@ -121,6 +121,11 @@ impl ConPty {
         Self::spawn_with(&SYSTEM_API, program, args, cwd, cols, rows)
     }
 
+    /// `spawn` 에 환경변수를 더한다(같은 이름이 있으면 바꾼다) — 계정 추가 로그인이 `CLAUDE_CONFIG_DIR` 를 이 프로세스에만 주려고 쓴다.
+    pub fn spawn_env(program: &Path, args: &[String], cwd: &Path, cols: u16, rows: u16, vars: &[(String, String)]) -> io::Result<ConPty> {
+        Self::spawn_with_env(&SYSTEM_API, program, args, cwd, cols, rows, vars)
+    }
+
     pub fn spawn_with(
         api: &'static ConptyApi,
         program: &Path,
@@ -129,7 +134,22 @@ impl ConPty {
         cols: u16,
         rows: u16,
     ) -> io::Result<ConPty> {
-        let env = super::env::new_block()?;
+        Self::spawn_with_env(api, program, args, cwd, cols, rows, &[])
+    }
+
+    pub fn spawn_with_env(
+        api: &'static ConptyApi,
+        program: &Path,
+        args: &[String],
+        cwd: &Path,
+        cols: u16,
+        rows: u16,
+        vars: &[(String, String)],
+    ) -> io::Result<ConPty> {
+        let mut env = super::env::new_block()?;
+        if !vars.is_empty() {
+            env = super::env::with_vars(&env, vars);
+        }
         let (in_read, in_write) = pipe()?;
         let (out_read, out_write) = pipe()?;
         let mut hpc: HPCON = 0;

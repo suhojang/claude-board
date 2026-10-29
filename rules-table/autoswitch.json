@@ -1,0 +1,526 @@
+{
+  "family": "autoswitch",
+  "schema": 1,
+  "cases": [
+    {
+      "id": "autoswitch.decide.nothing-stays",
+      "rule": "decide",
+      "why": "세션도 한도도 멀쩡하면 바꿀 까닭이 없어 그대로 둔다",
+      "source": "AutoSwitchTests.swift:92",
+      "input": {"sessions": [{"id": "s1"}], "limits": [{"id": "5h", "pct": 50, "resets": 1800}]},
+      "expect": {"move": "stay"}
+    },
+    {
+      "id": "autoswitch.decide.new-hit-switches-marks-1h",
+      "rule": "decide",
+      "why": "settle 뒤에 새로 한도에 걸린 세션이 있으면 다음 계정으로 전환하고, 풀리는 시각을 모르는 지금 계정의 표시는 1시간 뒤로 적는다",
+      "source": "AutoSwitchTests.swift:93",
+      "input": {"sessions": [{"id": "s1", "limit_at": -5}]},
+      "expect": {"move": "switch A→B [s1 세션이 한도에 걸림(한도 메시지)] stopped", "marks": {"A": 3600}}
+    },
+    {
+      "id": "autoswitch.decide.within-settle-ignores-new-hit",
+      "rule": "decide",
+      "why": "전환 뒤 settle 안에 새로 걸린 세션이 있어도 전환하지 않고, 이어 가기도 하지 않는다",
+      "source": "AutoSwitchTests.swift:95",
+      "input": {"sessions": [{"id": "s1", "limit_at": -5}], "limits": [{"id": "5h", "pct": 100, "resets": 1800}], "last_switch": -10},
+      "expect": {"move": "stay"}
+    },
+    {
+      "id": "autoswitch.decide.settle-boundary-still-inside",
+      "rule": "decide",
+      "why": "지금이 전환 뒤 40초에 딱 걸리면 아직 settle 안으로 본다(지나야 전환한다)",
+      "source": "AutoSwitchTests.swift:97",
+      "input": {"sessions": [{"id": "s1", "limit_at": -1}], "last_switch": -40},
+      "expect": {"move": "stay"}
+    },
+    {
+      "id": "autoswitch.decide.5h-full-marks-till-reset",
+      "rule": "decide",
+      "why": "5시간 한도가 100%로 차고 풀림이 미래면 전환하고, 지금 계정의 표시는 풀림 시각까지 적는다",
+      "source": "AutoSwitchTests.swift:99",
+      "input": {"limits": [{"id": "5h", "pct": 100, "resets": 1800}]},
+      "expect": {"move": "switch A→B [5시간 한도 100%]", "marks": {"A": 1800}}
+    },
+    {
+      "id": "autoswitch.decide.5h-full-resets-past-stays",
+      "rule": "decide",
+      "why": "5시간 한도가 100%여도 풀림이 이미 지났으면 바꿀 까닭이 없다",
+      "source": "AutoSwitchTests.swift:101",
+      "input": {"limits": [{"id": "5h", "pct": 100, "resets": -1}]},
+      "expect": {"move": "stay"}
+    },
+    {
+      "id": "autoswitch.decide.5h-full-resets-now-stays",
+      "rule": "decide",
+      "why": "5시간 한도의 풀림이 꼭 지금이면 아직 안 풀린 것으로 본다(미래여야 전환한다)",
+      "source": "AutoSwitchTests.swift:102",
+      "input": {"limits": [{"id": "5h", "pct": 100, "resets": 0}]},
+      "expect": {"move": "stay"}
+    },
+    {
+      "id": "autoswitch.decide.5h-full-unknown-resets-marks-1h",
+      "rule": "decide",
+      "why": "5시간 한도가 100%로 찼는데 풀림을 모르면 미래에 풀린다고 보고 전환하고, 표시는 1시간 뒤로 적는다",
+      "source": "AutoSwitchTests.swift:103",
+      "input": {"limits": [{"id": "5h", "pct": 100}]},
+      "expect": {"move": "switch A→B [5시간 한도 100%]", "marks": {"A": 3600}}
+    },
+    {
+      "id": "autoswitch.decide.5h-under-100-stays",
+      "rule": "decide",
+      "why": "5시간 한도가 100% 미만이면 전환하지 않는다",
+      "source": "AutoSwitchTests.swift:105",
+      "input": {"limits": [{"id": "5h", "pct": 99.9, "resets": 1800}]},
+      "expect": {"move": "stay"}
+    },
+    {
+      "id": "autoswitch.decide.7d-120-integer-percent",
+      "rule": "decide",
+      "why": "주간(전체) 한도가 100%를 넘으면 전환하고, 까닭의 퍼센트는 정수로 보인다",
+      "source": "AutoSwitchTests.swift:106",
+      "input": {"limits": [{"id": "5h", "pct": 10, "resets": 1800}, {"id": "7d", "pct": 120.7, "resets": 7200}]},
+      "expect": {"move": "switch A→B [주간 · 전체 한도 120%]", "marks": {"A": 7200}}
+    },
+    {
+      "id": "autoswitch.decide.model-scoped-only-stays",
+      "rule": "decide",
+      "why": "모델별 주간 한도만 100%여도 전환하지 않는다. 떠날 까닭은 5시간과 주간(전체)만 본다",
+      "source": "AutoSwitchTests.swift:108",
+      "input": {"limits": [{"id": "7d-Fable", "pct": 100, "resets": 7200}]},
+      "expect": {"move": "stay"}
+    },
+    {
+      "id": "autoswitch.decide.mark-ignores-model-scoped-latest",
+      "rule": "decide",
+      "why": "지금 계정 표시의 풀림 시각은 5시간과 주간(전체) 가운데 100% 이상인 것의 가장 늦은 미래 것으로 적는다. 모델별 주간은 떠날 까닭처럼 봐서는 안 된다",
+      "source": "AutoSwitchTests.swift:109",
+      "input": {"sessions": [{"id": "s1", "limit_at": -5}], "limits": [{"id": "5h", "pct": 100, "resets": 1800}, {"id": "7d-Fable", "pct": 100, "resets": 7200}, {"id": "7d", "pct": 100, "resets": -10}, {"id": "7d", "pct": 50, "resets": 99999}]},
+      "expect": {"move": "switch A→B [s1 세션이 한도에 걸림(한도 메시지)] stopped", "marks": {"A": 1800}}
+    },
+    {
+      "id": "autoswitch.decide.mark-both-full-latest",
+      "rule": "decide",
+      "why": "5시간과 주간(전체)이 둘 다 100%여도 표시의 풀림은 그 둘만 보아, 더 늦게 풀리는 쪽까지 적는다",
+      "source": "AutoSwitchTests.swift:112",
+      "input": {"limits": [{"id": "5h", "pct": 100, "resets": 1800}, {"id": "7d", "pct": 100, "resets": 50000}, {"id": "7d-Fable", "pct": 100, "resets": 90000}]},
+      "expect": {"move": "switch A→B [5시간 한도 100%]", "marks": {"A": 50000}}
+    },
+    {
+      "id": "autoswitch.decide.mark-model-only-one-hour",
+      "rule": "decide",
+      "why": "세션이 걸려 떠날 때 찬 한도가 모델별 주간뿐이면 풀림을 모르는 것과 같이 표시를 1시간 뒤로 적는다",
+      "source": "AutoSwitchTests.swift:115",
+      "input": {"sessions": [{"id": "s1", "limit_at": -5}], "limits": [{"id": "5h", "pct": 40, "resets": 1800}, {"id": "7d-Fable", "pct": 100, "resets": 7200}]},
+      "expect": {"move": "switch A→B [s1 세션이 한도에 걸림(한도 메시지)] stopped", "marks": {"A": 3600}}
+    },
+    {
+      "id": "autoswitch.decide.mark-unknown-resets-ignores-model",
+      "rule": "decide",
+      "why": "5시간과 주간(전체)의 풀림을 모르면 모델별 주간의 풀림이 있어도 표시를 1시간 뒤로 적는다",
+      "source": "AutoSwitchTests.swift:118",
+      "input": {"limits": [{"id": "5h", "pct": 100}, {"id": "7d-Fable", "pct": 100, "resets": 7200}]},
+      "expect": {"move": "switch A→B [5시간 한도 100%]", "marks": {"A": 3600}}
+    },
+    {
+      "id": "autoswitch.decide.session-reason-first-session",
+      "rule": "decide",
+      "why": "세션과 한도가 함께 걸리면 세션 까닭을 쓰고, 세션이 여럿이면 가장 앞의 것으로 본다",
+      "source": "AutoSwitchTests.swift:121",
+      "input": {"sessions": [{"id": "s1", "limit_at": -5}, {"id": "s2", "limit_at": -3}], "limits": [{"id": "5h", "pct": 100, "resets": 1800}]},
+      "expect": {"move": "switch A→B [s1 세션이 한도에 걸림(한도 메시지)] stopped", "marks": {"A": 1800}}
+    },
+    {
+      "id": "autoswitch.decide.reason-uses-cwd-last-part",
+      "rule": "decide",
+      "why": "세션 까닭의 폴더 이름은 작업 폴더 경로의 마지막 조각으로 보인다",
+      "source": "AutoSwitchTests.swift:124",
+      "input": {"sessions": [{"id": "s1", "limit_at": -5, "cwd": "/Users/me/일/claude-board/", "message": "rate limit"}]},
+      "expect": {"move": "switch A→B [claude-board 세션이 한도에 걸림(rate limit)] stopped", "marks": {"A": 3600}}
+    },
+    {
+      "id": "autoswitch.decide.pending-stays",
+      "rule": "decide",
+      "why": "전환 요청을 기다리는 중에는 새로 걸린 세션이 있어도 전환하지 않고, 표시도 새로 적지 않는다",
+      "source": "AutoSwitchTests.swift:127",
+      "input": {"sessions": [{"id": "s1", "limit_at": -5}], "pending": true},
+      "expect": {"move": "stay"}
+    },
+    {
+      "id": "autoswitch.decide.switching-stays",
+      "rule": "decide",
+      "why": "전환이 진행 중이면 다시 판단하지 않고, 표시도 새로 적지 않는다",
+      "source": "AutoSwitchTests.swift:128",
+      "input": {"limits": [{"id": "5h", "pct": 100, "resets": 1800}], "switching": true},
+      "expect": {"move": "stay"}
+    },
+    {
+      "id": "autoswitch.decide.unknown-current-session-hit",
+      "rule": "decide",
+      "why": "지금 계정을 모르는데 세션이 새로 걸리면 전환 대신 지금 계정을 모른다고 알린다. 표시는 그대로 둔다",
+      "source": "AutoSwitchTests.swift:130",
+      "input": {"sessions": [{"id": "s1", "limit_at": -5}], "current": null},
+      "expect": {"move": "unknown [s1 세션이 한도에 걸림(한도 메시지)]"}
+    },
+    {
+      "id": "autoswitch.decide.unknown-current-5h-full",
+      "rule": "decide",
+      "why": "지금 계정을 모르는데 5시간 한도가 차면 전환 대신 지금 계정을 모른다고 알린다",
+      "source": "AutoSwitchTests.swift:132",
+      "input": {"limits": [{"id": "5h", "pct": 100, "resets": 1800}], "current": null},
+      "expect": {"move": "unknown [5시간 한도 100%]"}
+    },
+    {
+      "id": "autoswitch.decide.unknown-current-no-reason-stays",
+      "rule": "decide",
+      "why": "지금 계정을 몰라도 떠날 까닭이 없으면 조용히 그대로 둔다",
+      "source": "AutoSwitchTests.swift:133",
+      "input": {"sessions": [{"id": "s1"}], "limits": [{"id": "5h", "pct": 50, "resets": 1800}], "current": null},
+      "expect": {"move": "stay"}
+    },
+    {
+      "id": "autoswitch.decide.unknown-current-pending-stays",
+      "rule": "decide",
+      "why": "지금 계정을 모를 때 전환 대기 중이면 알리지 않고 그대로 둔다",
+      "source": "AutoSwitchTests.swift:135",
+      "input": {"limits": [{"id": "5h", "pct": 100, "resets": 1800}], "current": null, "pending": true},
+      "expect": {"move": "stay"}
+    },
+    {
+      "id": "autoswitch.decide.unknown-current-switching-stays",
+      "rule": "decide",
+      "why": "지금 계정을 모를 때 전환 중이면 알리지 않고 그대로 둔다",
+      "source": "AutoSwitchTests.swift:136",
+      "input": {"limits": [{"id": "5h", "pct": 100, "resets": 1800}], "current": null, "switching": true},
+      "expect": {"move": "stay"}
+    },
+    {
+      "id": "autoswitch.decide.unknown-current-within-settle-stays",
+      "rule": "decide",
+      "why": "지금 계정을 모를 때 settle 안이면 알리지 않고 그대로 둔다",
+      "source": "AutoSwitchTests.swift:137",
+      "input": {"sessions": [{"id": "s1", "limit_at": -5}], "current": null, "last_switch": -10},
+      "expect": {"move": "stay"}
+    },
+    {
+      "id": "autoswitch.decide.unknown-current-pausing-stays",
+      "rule": "decide",
+      "why": "지금 계정을 모를 때 쉬는 중이면 알리지 않고 그대로 둔다. 쉬기 시작한 계정을 알 수 없어 끝 시각만 본다",
+      "source": "AutoSwitchTests.swift:138",
+      "input": {"limits": [{"id": "5h", "pct": 100, "resets": 1800}], "current": null, "pause": {"account": "A", "until": 600}},
+      "expect": {"move": "stay"}
+    },
+    {
+      "id": "autoswitch.decide.unknown-current-pause-ended",
+      "rule": "decide",
+      "why": "지금 계정을 모를 때 쉬는 기간이 끝났으면 다시 떠날 까닭을 보고 알린다",
+      "source": "AutoSwitchTests.swift:140",
+      "input": {"limits": [{"id": "5h", "pct": 100, "resets": 1800}], "current": null, "pause": {"account": "A", "until": 0}},
+      "expect": {"move": "unknown [5시간 한도 100%]"}
+    },
+    {
+      "id": "autoswitch.decide.unknown-current-with-resume",
+      "rule": "decide",
+      "why": "지금 계정을 몰라도 이어 가기는 그대로 내놓고, 떠날 까닭이 있으면 알림과 함께 나온다",
+      "source": "AutoSwitchTests.swift:142",
+      "input": {"sessions": [{"id": "old", "limit_at": -980}, {"id": "s1", "limit_at": -5}], "current": null},
+      "expect": {"move": "unknown [s1 세션이 한도에 걸림(한도 메시지)]", "resume": ["old"]}
+    },
+    {
+      "id": "autoswitch.decide.ignored-states-stay",
+      "rule": "decide",
+      "why": "끝남·일시중지·승인 대기 세션의 한도는 떠날 까닭으로 보지 않는다",
+      "source": "AutoSwitchTests.swift:145",
+      "input": {"sessions": [{"id": "s1", "state": "ended", "limit_at": -5}, {"id": "s2", "state": "paused", "limit_at": -5}, {"id": "s3", "state": "waiting", "limit_at": -5}]},
+      "expect": {"move": "stay"}
+    },
+    {
+      "id": "autoswitch.decide.working-counts",
+      "rule": "decide",
+      "why": "작업 중 세션의 한도는 떠날 까닭으로 본다",
+      "source": "AutoSwitchTests.swift:148",
+      "input": {"sessions": [{"id": "s1", "state": "working", "limit_at": -5}]},
+      "expect": {"move": "switch A→B [s1 세션이 한도에 걸림(한도 메시지)] stopped", "marks": {"A": 3600}}
+    },
+    {
+      "id": "autoswitch.decide.over-6h-ignored",
+      "rule": "decide",
+      "why": "6시간 넘게 걸려 있던 세션은 떠날 까닭으로 보지 않는다. 정확히 6시간짜리도 이미 넘은 것으로 친다",
+      "source": "AutoSwitchTests.swift:150",
+      "input": {"sessions": [{"id": "s1", "limit_at": -21600}, {"id": "s2", "limit_at": -25200}], "last_switch": -28800},
+      "expect": {"move": "stay"}
+    },
+    {
+      "id": "autoswitch.decide.within-6h-counts",
+      "rule": "decide",
+      "why": "6시간 안에 걸린 세션은 떠날 까닭으로 본다",
+      "source": "AutoSwitchTests.swift:152",
+      "input": {"sessions": [{"id": "s1", "limit_at": -21599}], "last_switch": -28800},
+      "expect": {"move": "switch A→B [s1 세션이 한도에 걸림(한도 메시지)] stopped", "marks": {"A": 3600}}
+    },
+    {
+      "id": "autoswitch.decide.stopped-waiting-counts",
+      "rule": "decide",
+      "why": "멈춤 표시는 끝나지 않은 한도 세션 모두를 본다. 승인 대기 세션만 있어도 붙인다",
+      "source": "AutoSwitchTests.swift:154",
+      "input": {"sessions": [{"id": "s1", "state": "waiting", "limit_at": -5}], "limits": [{"id": "5h", "pct": 100, "resets": 1800}]},
+      "expect": {"move": "switch A→B [5시간 한도 100%] stopped", "marks": {"A": 1800}}
+    },
+    {
+      "id": "autoswitch.decide.stopped-ended-only-not",
+      "rule": "decide",
+      "why": "한도 세션이 끝난 것뿐이면 멈춤 표시를 붙이지 않는다",
+      "source": "AutoSwitchTests.swift:157",
+      "input": {"sessions": [{"id": "s1", "state": "ended", "limit_at": -5}], "limits": [{"id": "5h", "pct": 100, "resets": 1800}]},
+      "expect": {"move": "switch A→B [5시간 한도 100%]", "marks": {"A": 1800}}
+    },
+    {
+      "id": "autoswitch.decide.stopped-over-6h-counts",
+      "rule": "decide",
+      "why": "6시간 넘은 한도 세션도 끝나지 않았으면 멈춤 표시를 붙인다",
+      "source": "AutoSwitchTests.swift:160",
+      "input": {"sessions": [{"id": "s1", "limit_at": -25200}], "limits": [{"id": "5h", "pct": 100, "resets": 1800}], "last_switch": -28800},
+      "expect": {"move": "switch A→B [5시간 한도 100%] stopped", "marks": {"A": 1800}}
+    },
+    {
+      "id": "autoswitch.decide.next-after-current",
+      "rule": "decide",
+      "why": "다음 계정은 저장 목록에서 지금 계정 다음부터 고른다",
+      "source": "AutoSwitchTests.swift:165",
+      "input": {"limits": [{"id": "5h", "pct": 100, "resets": 1800}], "current": "B"},
+      "expect": {"move": "switch B→C [5시간 한도 100%]", "marks": {"B": 1800}}
+    },
+    {
+      "id": "autoswitch.decide.next-wraps-around",
+      "rule": "decide",
+      "why": "저장 목록 끝에 이르면 처음 계정으로 돌아간다",
+      "source": "AutoSwitchTests.swift:166",
+      "input": {"limits": [{"id": "5h", "pct": 100, "resets": 1800}], "current": "C"},
+      "expect": {"move": "switch C→A [5시간 한도 100%]", "marks": {"C": 1800}}
+    },
+    {
+      "id": "autoswitch.decide.next-unknown-current-starts-first",
+      "rule": "decide",
+      "why": "지금 계정이 저장 목록에 없으면 처음부터 고른다",
+      "source": "AutoSwitchTests.swift:167",
+      "input": {"limits": [{"id": "5h", "pct": 100, "resets": 1800}], "current": "Z"},
+      "expect": {"move": "switch Z→A [5시간 한도 100%]", "marks": {"Z": 1800}}
+    },
+    {
+      "id": "autoswitch.decide.next-skips-expired",
+      "rule": "decide",
+      "why": "다시 로그인해야 하는 저장 계정은 후보에서 뺀다",
+      "source": "AutoSwitchTests.swift:169",
+      "input": {"limits": [{"id": "5h", "pct": 100, "resets": 1800}], "expired": ["B"]},
+      "expect": {"move": "switch A→C [5시간 한도 100%]", "marks": {"A": 1800}}
+    },
+    {
+      "id": "autoswitch.decide.next-skips-currently-marked",
+      "rule": "decide",
+      "why": "떠나는 중 표시가 남아 있는 저장 계정은 후보에서 뺀다",
+      "source": "AutoSwitchTests.swift:171",
+      "input": {"limits": [{"id": "5h", "pct": 100, "resets": 1800}], "full": {"B": 600}},
+      "expect": {"move": "switch A→C [5시간 한도 100%]", "marks": {"A": 1800, "B": 600}}
+    },
+    {
+      "id": "autoswitch.decide.next-drops-stale-marks",
+      "rule": "decide",
+      "why": "지난 표시는 치우고 그 계정을 다시 후보로 쓴다",
+      "source": "AutoSwitchTests.swift:173",
+      "input": {"limits": [{"id": "5h", "pct": 100, "resets": 1800}], "full": {"B": -1, "C": 0}},
+      "expect": {"move": "switch A→B [5시간 한도 100%]", "marks": {"A": 1800}}
+    },
+    {
+      "id": "autoswitch.decide.next-replaces-current-mark",
+      "rule": "decide",
+      "why": "지금 계정의 남은 표시는 새 값으로 바꾼다",
+      "source": "AutoSwitchTests.swift:175",
+      "input": {"limits": [{"id": "5h", "pct": 100, "resets": 1800}], "full": {"A": 99999}},
+      "expect": {"move": "switch A→B [5시간 한도 100%]", "marks": {"A": 1800}}
+    },
+    {
+      "id": "autoswitch.decide.no-candidate-all-blocked",
+      "rule": "decide",
+      "why": "저장 계정이 모두 만료이거나 표시가 남으면 바꿀 계정이 없다고 보고, 표시는 새로 바꾼다",
+      "source": "AutoSwitchTests.swift:177",
+      "input": {"sessions": [{"id": "s1", "limit_at": -5}], "expired": ["B"], "full": {"C": 600, "Q": -5}},
+      "expect": {"move": "none [s1 세션이 한도에 걸림(한도 메시지)]", "marks": {"A": 3600, "C": 600}}
+    },
+    {
+      "id": "autoswitch.decide.no-candidate-only-current",
+      "rule": "decide",
+      "why": "저장 계정이 지금 계정뿐이면 바꿀 계정이 없다",
+      "source": "AutoSwitchTests.swift:180",
+      "input": {"limits": [{"id": "5h", "pct": 100, "resets": 1800}], "saved": ["A"]},
+      "expect": {"move": "none [5시간 한도 100%]", "marks": {"A": 1800}}
+    },
+    {
+      "id": "autoswitch.decide.no-candidate-empty-saved",
+      "rule": "decide",
+      "why": "저장 계정이 없으면 바꿀 계정이 없다",
+      "source": "AutoSwitchTests.swift:182",
+      "input": {"limits": [{"id": "5h", "pct": 100, "resets": 1800}], "saved": []},
+      "expect": {"move": "none [5시간 한도 100%]", "marks": {"A": 1800}}
+    },
+    {
+      "id": "autoswitch.decide.current-expired-still-leaves",
+      "rule": "decide",
+      "why": "지금 계정이 만료여도 떠난다. 만료는 후보에서만 본다",
+      "source": "AutoSwitchTests.swift:184",
+      "input": {"limits": [{"id": "5h", "pct": 100, "resets": 1800}], "expired": ["A"]},
+      "expect": {"move": "switch A→B [5시간 한도 100%]", "marks": {"A": 1800}}
+    },
+    {
+      "id": "autoswitch.decide.resume-pre-settle-hits",
+      "rule": "decide",
+      "why": "이전 계정에서 한도로 멈춘 세션은(전환 뒤 40초가 지나면) 이어 가기 목록으로 내놓는다",
+      "source": "AutoSwitchTests.swift:188",
+      "input": {"sessions": [{"id": "s1", "limit_at": -980}]},
+      "expect": {"move": "stay", "resume": ["s1"]}
+    },
+    {
+      "id": "autoswitch.decide.resume-settle-boundary-counts-pre",
+      "rule": "decide",
+      "why": "전환 뒤 40초에 딱 걸려 멈춘 세션도 이전 계정에서 멈춘 것으로 쳐서 이어 가기에 넣는다",
+      "source": "AutoSwitchTests.swift:190",
+      "input": {"sessions": [{"id": "s1", "limit_at": -960}]},
+      "expect": {"move": "stay", "resume": ["s1"]}
+    },
+    {
+      "id": "autoswitch.decide.resume-skips-resumed-keeps-order",
+      "rule": "decide",
+      "why": "이미 이어 가기 요청을 넣은 세션은 빼고, 남은 것은 세션 목록의 차례 그대로 내놓는다",
+      "source": "AutoSwitchTests.swift:192",
+      "input": {"sessions": [{"id": "s3", "limit_at": -990}, {"id": "s1", "limit_at": -980}, {"id": "s2", "limit_at": -985}], "resumed": ["s1"]},
+      "expect": {"move": "stay", "resume": ["s3", "s2"]}
+    },
+    {
+      "id": "autoswitch.decide.resume-filters-states",
+      "rule": "decide",
+      "why": "끝남·일시중지·승인 대기 세션은 이어 가기 목록에서 빼고, 작업 중·일반 세션은 넣는다",
+      "source": "AutoSwitchTests.swift:195",
+      "input": {"sessions": [{"id": "s1", "state": "ended", "limit_at": -980}, {"id": "s2", "state": "paused", "limit_at": -980}, {"id": "s3", "state": "waiting", "limit_at": -980}, {"id": "s4", "state": "working", "limit_at": -980}, {"id": "s5", "limit_at": -980}]},
+      "expect": {"move": "stay", "resume": ["s4", "s5"]}
+    },
+    {
+      "id": "autoswitch.decide.resume-skips-over-6h",
+      "rule": "decide",
+      "why": "6시간 넘게 걸려 있던 세션은 이어 가기 목록에서 뺀다",
+      "source": "AutoSwitchTests.swift:199",
+      "input": {"sessions": [{"id": "s1", "limit_at": -25200}, {"id": "s2", "limit_at": -21595}], "last_switch": -100},
+      "expect": {"move": "stay", "resume": ["s2"]}
+    },
+    {
+      "id": "autoswitch.decide.resume-within-settle-none",
+      "rule": "decide",
+      "why": "settle 안이면 이어 가기 요청을 아직 넣지 않는다",
+      "source": "AutoSwitchTests.swift:201",
+      "input": {"sessions": [{"id": "s1", "limit_at": -100}], "last_switch": -30},
+      "expect": {"move": "stay", "resume": []}
+    },
+    {
+      "id": "autoswitch.decide.resume-ignores-pending-switching-current",
+      "rule": "decide",
+      "why": "이어 가기는 전환 대기·전환 중·지금 계정을 모르는 것과 관계없이 내놓는다",
+      "source": "AutoSwitchTests.swift:202",
+      "input": {"sessions": [{"id": "s1", "limit_at": -980}], "current": null, "pending": true, "switching": true},
+      "expect": {"move": "stay", "resume": ["s1"]}
+    },
+    {
+      "id": "autoswitch.decide.resume-with-switch-excludes-new-hit",
+      "rule": "decide",
+      "why": "이어 가기는 전환 결정과 같은 판단에 나오되, 새로 걸린 세션은 이어 가기 목록에 넣지 않는다",
+      "source": "AutoSwitchTests.swift:204",
+      "input": {"sessions": [{"id": "old", "limit_at": -980}, {"id": "s1", "limit_at": -5}]},
+      "expect": {"move": "switch A→B [s1 세션이 한도에 걸림(한도 메시지)] stopped", "marks": {"A": 3600}, "resume": ["old"]}
+    },
+    {
+      "id": "autoswitch.decide.resume-never-switched-all-new",
+      "rule": "decide",
+      "why": "한 번도 전환한 적이 없으면(마지막 전환이 1970년) settle 이 아주 오래 지나 모든 한도 세션이 새로 걸린 것으로 본다",
+      "source": "AutoSwitchTests.swift:207",
+      "input": {"sessions": [{"id": "s1", "limit_at": -500}], "last_switch": -3000000},
+      "expect": {"move": "switch A→B [s1 세션이 한도에 걸림(한도 메시지)] stopped", "marks": {"A": 3600}}
+    },
+    {
+      "id": "autoswitch.decide.pause-blocks-full",
+      "rule": "decide",
+      "why": "지금 계정이 쉬는 중이고 쉬기 시작한 계정이 그대로면 한도가 차도 전환하지 않고, 표시도 그대로 둔다",
+      "source": "AutoSwitchTests.swift:211",
+      "input": {"limits": [{"id": "5h", "pct": 100, "resets": 1800}], "pause": {"account": "A", "until": 600}},
+      "expect": {"move": "stay"}
+    },
+    {
+      "id": "autoswitch.decide.pause-blocks-new-hit",
+      "rule": "decide",
+      "why": "지금 계정이 쉬는 중이면 세션이 새로 걸려도 전환하지 않는다",
+      "source": "AutoSwitchTests.swift:213",
+      "input": {"sessions": [{"id": "s1", "limit_at": -5}], "pause": {"account": "A", "until": 600}},
+      "expect": {"move": "stay"}
+    },
+    {
+      "id": "autoswitch.decide.pause-no-candidate-silent",
+      "rule": "decide",
+      "why": "지금 계정이 쉬는 중이면 바꿀 계정이 없어도 알리지 않는다",
+      "source": "AutoSwitchTests.swift:214",
+      "input": {"limits": [{"id": "5h", "pct": 100, "resets": 1800}], "saved": ["A"], "pause": {"account": "A", "until": 600}},
+      "expect": {"move": "stay"}
+    },
+    {
+      "id": "autoswitch.decide.pause-other-account-redecides",
+      "rule": "decide",
+      "why": "쉬기 시작한 계정이 바뀌었으면 쉬지 않고 다시 판단한다",
+      "source": "AutoSwitchTests.swift:216",
+      "input": {"limits": [{"id": "5h", "pct": 100, "resets": 1800}], "current": "B", "pause": {"account": "A", "until": 600}},
+      "expect": {"move": "switch B→C [5시간 한도 100%]", "marks": {"B": 1800}}
+    },
+    {
+      "id": "autoswitch.decide.pause-until-now-redecides",
+      "rule": "decide",
+      "why": "쉬는 기간의 끝이 꼭 지금이면 끝난 것으로 보고 다시 판단한다",
+      "source": "AutoSwitchTests.swift:218",
+      "input": {"limits": [{"id": "5h", "pct": 100, "resets": 1800}], "pause": {"account": "A", "until": 0}},
+      "expect": {"move": "switch A→B [5시간 한도 100%]", "marks": {"A": 1800}}
+    },
+    {
+      "id": "autoswitch.decide.pause-past-until-redecides",
+      "rule": "decide",
+      "why": "쉬는 기간이 지났으면 다시 판단한다",
+      "source": "AutoSwitchTests.swift:220",
+      "input": {"limits": [{"id": "5h", "pct": 100, "resets": 1800}], "pause": {"account": "A", "until": -1}},
+      "expect": {"move": "switch A→B [5시간 한도 100%]", "marks": {"A": 1800}}
+    },
+    {
+      "id": "autoswitch.decide.pause-keeps-resume",
+      "rule": "decide",
+      "why": "지금 계정이 쉬는 중에도 이어 가기는 그대로 내놓는다",
+      "source": "AutoSwitchTests.swift:222",
+      "input": {"sessions": [{"id": "old", "limit_at": -980}, {"id": "s1", "limit_at": -5}], "pause": {"account": "A", "until": 600}},
+      "expect": {"move": "stay", "resume": ["old"]}
+    },
+    {
+      "id": "autoswitch.failed.target-marks-hour",
+      "rule": "failed",
+      "why": "대상 계정 쪽 실패는 그 계정만 1시간 고르지 않게 표시하고 쉬지 않는다. 다른 표시는 그대로다",
+      "source": "AutoSwitchTests.swift:267",
+      "input": {"side": "target", "target": "B", "current": "A", "full": {"A": 1800, "C": 600}},
+      "expect": {"marks": {"A": 1800, "B": 3600, "C": 600}}
+    },
+    {
+      "id": "autoswitch.failed.other-pauses-hour",
+      "rule": "failed",
+      "why": "그 밖(지금 계정·시스템 쪽) 실패는 표시를 그대로 두고, 지금 계정이 그대로인 동안 1시간 쉰다",
+      "source": "AutoSwitchTests.swift:273",
+      "input": {"side": "other", "target": "B", "current": "A", "full": {"A": 1800}},
+      "expect": {"marks": {"A": 1800}, "pause": {"account": "A", "until": 3600}}
+    },
+    {
+      "id": "autoswitch.failed.busy-pauses-30s",
+      "rule": "failed",
+      "why": "쓰기 잠금을 잡지 못한 실패는 표시를 그대로 두고 30초만 쉰 뒤 같은 후보부터 다시 판단한다",
+      "source": "AutoSwitchTests.swift:279",
+      "input": {"side": "busy", "target": "B", "current": "A", "full": {"A": 7200}},
+      "expect": {"marks": {"A": 7200}, "pause": {"account": "A", "until": 30}}
+    }
+  ]
+}

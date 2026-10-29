@@ -59,10 +59,13 @@ fi
 
 # 6) 로그인할 때 자동 실행 (LaunchAgent) — 등록하면서 지금 바로 한 번 띄운다. open -a 는 로그인 직후 LaunchServices 준비 전에 실패할 수 있어 실행 파일을 직접 띄운다.
 #    보드 설정(설정 > 일반 > 로그인할 때 열기)에서 끈 사람(표지 파일 login-launch-off)은 등록하지 않고 지금 한 번만 띄운다
+#    CLAUDE_BOARD_KEEP_RUNNING(install.sh 를 보드 안 터미널에서 돌림)이면 떠 있는 보드를 끄지도 새로 띄우지도 않는다 — 로그인 자동 실행으로 뜬 보드는
+#    launchctl bootout 이 끄고(탭의 세션이 끊기고 그 안에서 돌던 설치도 함께 끊긴다), plist 만 맞춰 두면 다음 로그인·⌘Q 뒤 다시 열 때 새 앱이 뜬다
+KEEP="${CLAUDE_BOARD_KEEP_RUNNING:-}"
 if [ -e "$N/login-launch-off" ]; then
-  launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
+  [ -n "$KEEP" ] || launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
   rm -f "$AGENT"
-  open -a "$APP"
+  [ -n "$KEEP" ] || open -a "$APP"
   exit 0
 fi
 mkdir -p "$(dirname "$AGENT")"
@@ -78,5 +81,6 @@ cat > "$AGENT" <<PLIST
 </dict>
 </plist>
 PLIST
+[ -z "$KEEP" ] || exit 0
 launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
 launchctl bootstrap "gui/$(id -u)" "$AGENT" 2>/dev/null || open -a "$APP"

@@ -1,6 +1,6 @@
 //! 대화 기록에서 모델·effort(SPEC §5.2)와 컨텍스트 사용량(§5.3), Esc 중단 표시(§3.9)와 Claude Code 세션 파일(§2.3)을 읽는다 — `ClaudeBoard.swift ModelReader`·`InterruptReader`·`ClaudeNames`·`ContextReader`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -107,12 +107,17 @@ impl InterruptReader {
 pub struct ClaudeNames {
     dir: PathBuf,
     cache: HashMap<u32, ((SystemTime, u64), Option<ClaudeSession>)>,
+    /// sessionId 색인(파일별 stamp) — `pid_for_session` 전용으로, 위 pid 캐시(cache)와 따로 둔다.
+    /// prune 이 세션의 pid 만 남기므로 같이 두면 목록을 고칠 때마다 색인이 지워져 모두 다시 읽게 된다.
+    /// store reload 가 이 색인을 쓰는 자리는 아래 짝 단계에서 잇는다 — 그때 이 허용 표시도 지운다.
+    #[cfg_attr(not(test), allow(dead_code))]
+    ids: HashMap<u32, ((SystemTime, u64), Option<String>)>,
 }
 
 impl ClaudeNames {
     /// `dir` = `~/.claude`
     pub fn new(dir: PathBuf) -> Self {
-        ClaudeNames { dir, cache: HashMap::new() }
+        ClaudeNames { dir, cache: HashMap::new(), ids: HashMap::new() }
     }
 
     pub fn get(&mut self, pid: u32) -> Option<ClaudeSession> {
@@ -134,6 +139,56 @@ impl ClaudeNames {
     /// 목록에서 사라진 pid 는 잊는다.
     pub fn prune(&mut self, keep: &std::collections::HashSet<u32>) {
         self.cache.retain(|k, _| keep.contains(k));
+    }
+
+    /// sessionId → pid 색인 — 세션 기록에 pid 가 없는 세션(SPEC §5.1)의 생사를 `~/.claude/sessions`
+    /// 폴더에서 찾는다. Claude Code 는 이 파일을 제자리에 고쳐 쓰므로 폴더 수정 시각은 바뀌지 않는다 —
+    /// 파일(`<pid>.json`)마다 stamp(수정 시각과 크기)를 들고 바뀐 파일만 다시 푼다(SPEC §2.3).
+    /// 같은 sessionId 를 둘이 쓰면(강제로 죽은 claude 의 파일이 남은 채 같은 세션을 다시 연 경우)
+    /// 가장 최근에 고쳐 쓴 파일을 택해, 남은 옛 파일 때문에 살아 있는 세션을 끝났다고 보지 않게 한다.
+    /// store reload 가 이를 쓰는 자리는 아래 짝 단계에서 잇는다 — 그때 이 허용 표시도 지운다.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn pid_for_session(&mut self, sid: &str) -> Option<u32> {
+        let sessions = self.dir.join("sessions");
+        let entries: Vec<std::fs::DirEntry> =
+            fs::read_dir(&sessions).map(|rd| rd.flatten().collect()).unwrap_or_default();
+        let mut seen = HashSet::new();
+        for entry in entries {
+            let file_name = entry.file_name();
+            let Some(stem) = file_name.to_str().and_then(|name| name.strip_suffix(".json")) else { continue };
+            let Ok(pid) = stem.parse::<u32>() else { continue };
+            if pid == 0 {
+                continue;
+            }
+            let path = entry.path();
+            let Some(file_stamp) = stamp(&path) else { continue };
+            seen.insert(pid);
+            if self.ids.get(&pid).is_some_and(|(cached_stamp, _)| *cached_stamp == file_stamp) {
+                continue;
+            }
+            let session_id = fs::read(&path)
+                .ok()
+                .and_then(|bytes| claude_live::parse_claude_session(&bytes))
+                .and_then(|parsed| parsed.session_id);
+            self.ids.insert(pid, (file_stamp, session_id));
+        }
+        // 훑은 폴더에 없는 pid 는 파일이 사라진 것 — 색인에서도 뺀다
+        self.ids.retain(|pid, _| seen.contains(pid));
+        // sessionId → pid 표를 다시 만든다
+        let ids = &self.ids;
+        let mut by_session: HashMap<&str, u32> = HashMap::new();
+        for (pid, (file_mtime, session_id)) in ids {
+            let Some(session_id) = session_id.as_deref().filter(|s| !s.is_empty()) else { continue };
+            if let Some(other) = by_session.get(session_id) {
+                if let Some((other_mtime, _)) = ids.get(other) {
+                    if other_mtime >= file_mtime {
+                        continue;
+                    }
+                }
+            }
+            by_session.insert(session_id, *pid);
+        }
+        by_session.get(sid).copied()
     }
 
     #[cfg(test)]
@@ -285,6 +340,28 @@ impl ContextReader {
         self.parsed.insert(path.to_path_buf(), (key, now, ctx));
         ctx
     }
+
+    /// 목록에 남은 세션 몫만 캐시에 남긴다 — 상태줄 기록(lines)은 세션 id, 대화 기록에서 센 컨텍스트(parsed)는
+    /// 대화 기록 자리가 키다(`ClaudeBoard.swift ContextReader.prune`). 배운 모델별 크기(windows)는
+    /// 세션 몫이 아니라 그대로 둔다.
+    /// store reload 가 이를 쓰는 자리는 아래 짝 단계에서 잇는다 — 그때 이 허용 표시도 지운다.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn prune(&mut self, keep_sids: &HashSet<String>, keep_transcripts: &HashSet<PathBuf>) {
+        self.lines.retain(|sid, _| keep_sids.contains(sid));
+        self.parsed.retain(|transcript, _| keep_transcripts.contains(transcript));
+    }
+
+    /// (상태줄 기록 수, 대화 기록에서 센 컨텍스트 수) — 시험용.
+    #[cfg(test)]
+    pub fn cache_counts(&self) -> (usize, usize) {
+        (self.lines.len(), self.parsed.len())
+    }
+
+    /// 상태줄에서 배운 모델별 컨텍스트 크기 — 시험용.
+    #[cfg(test)]
+    pub fn learned_windows(&self) -> &HashMap<String, i64> {
+        &self.windows
+    }
 }
 
 #[cfg(test)]
@@ -388,6 +465,126 @@ mod tests {
             .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(2))
             .unwrap();
         assert_eq!(r4.read("s", &t, "", 301.0).unwrap(), Ctx::new(200_000, 400_000));
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// `~/.claude/sessions/<pid>.json` 의 Claude Code 세션 파일 본문.
+    fn session_body(session_id: &str) -> String {
+        format!(r#"{{"sessionId":"{session_id}","name":"이름-{session_id}","status":"busy","statusUpdatedAt":1000}}"#)
+    }
+
+    /// 파일 수정 시각을 지금에서 `secs` 초 전으로 — 수정 시각 순서를 확정하려고(Windows 는 수정 시각이 타이머 틱 단위).
+    fn set_mtime_ago(path: &Path, secs: u64) {
+        fs::File::options()
+            .append(true)
+            .open(path)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(secs))
+            .unwrap();
+    }
+
+    #[test]
+    fn pid_for_session_finds_and_misses() {
+        let d = dir();
+        let sessions = d.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        fs::write(sessions.join("42.json"), session_body("sid-a")).unwrap();
+        // 같은 폴더의 다른 파일은 색인하지 않는다: 세션 파일 아님(.key), 숫자가 아닌 이름, pid 0, JSON 이 깨진 것
+        fs::write(sessions.join("42.abc123.key"), "비밀").unwrap();
+        fs::write(sessions.join("notes.json"), session_body("sid-note")).unwrap();
+        fs::write(sessions.join("0.json"), session_body("sid-zero")).unwrap();
+        fs::write(sessions.join("99.json"), "[").unwrap();
+        let mut n = ClaudeNames::new(d.clone());
+        assert_eq!(n.pid_for_session("sid-a"), Some(42));
+        assert_eq!(n.pid_for_session("sid-note"), None);
+        assert_eq!(n.pid_for_session("sid-zero"), None);
+        assert_eq!(n.pid_for_session("sid-b"), None);
+        // sessions 폴더가 없으면
+        assert_eq!(ClaudeNames::new(d.join("없음")).pid_for_session("sid-a"), None);
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn pid_for_session_prefers_newest_file() {
+        let d = dir();
+        let sessions = d.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        // 강제로 죽은 claude 의 파일이 남은 채 같은 세션을 다시 연 꼴 — 두 파일이 같은 sessionId 를 쓴다
+        fs::write(sessions.join("10.json"), session_body("sid-a")).unwrap();
+        fs::write(sessions.join("20.json"), session_body("sid-a")).unwrap();
+        set_mtime_ago(&sessions.join("10.json"), 600);
+        set_mtime_ago(&sessions.join("20.json"), 60);
+        let mut n = ClaudeNames::new(d.clone());
+        assert_eq!(n.pid_for_session("sid-a"), Some(20));
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn pid_for_session_rereads_changed_files() {
+        let d = dir();
+        let sessions = d.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        fs::write(sessions.join("42.json"), session_body("sid-a")).unwrap();
+        let mut n = ClaudeNames::new(d.clone());
+        assert_eq!(n.pid_for_session("sid-a"), Some(42));
+        // 같은 pid 파일이 다른 sessionId 로 고쳐 쓰였다(/clear) — 다시 읽어야 새 값을 본다
+        fs::write(sessions.join("42.json"), session_body("sid-b")).unwrap();
+        set_mtime_ago(&sessions.join("42.json"), 1);
+        assert_eq!(n.pid_for_session("sid-a"), None);
+        assert_eq!(n.pid_for_session("sid-b"), Some(42));
+        // 파일이 사라지면 색인에서도 뺀다
+        fs::remove_file(sessions.join("42.json")).unwrap();
+        assert_eq!(n.pid_for_session("sid-b"), None);
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn context_prune_keeps_only_given_keys() {
+        let d = dir();
+        let ctx_dir = d.join("context");
+        fs::create_dir_all(&ctx_dir).unwrap();
+        let windows = d.join("context-windows.json");
+        let t1 = d.join("a.jsonl");
+        let t2 = d.join("b.jsonl");
+        fs::write(&t1, JSONL).unwrap();
+        fs::write(&t2, JSONL).unwrap();
+        let at = mtime(&t1).unwrap();
+        // s0: 상태줄에서 크기를 배운다. s1·s2: 상태줄 기록과 대화 기록 캐시를 채운다
+        fs::write(
+            ctx_dir.join("s0.json"),
+            format!(r#"{{"context_window":{{"context_window_size":400000,"current_usage":{{"input_tokens":1}}}},"model":"claude-opus-5-5","at":{at}}}"#),
+        )
+        .unwrap();
+        fs::write(ctx_dir.join("s1.json"), format!(r#"{{"at":{at}}}"#)).unwrap();
+        fs::write(ctx_dir.join("s2.json"), format!(r#"{{"at":{at}}}"#)).unwrap();
+        let mut r = ContextReader::new(ctx_dir, windows);
+        r.read("s0", &t1, "", 100.0);
+        r.read("s1", &t1, "", 100.0);
+        r.read("s2", &t2, "", 100.0);
+        assert_eq!(r.cache_counts(), (3, 2));
+        let keep_sids: HashSet<String> = ["s0".to_string(), "s2".to_string()].into_iter().collect();
+        let keep_transcripts: HashSet<PathBuf> = [t2].into_iter().collect();
+        r.prune(&keep_sids, &keep_transcripts);
+        assert_eq!(r.cache_counts(), (2, 1));
+        // 배운 모델별 크기는 세션 몫이 아니라 그대로 둔다
+        assert_eq!(r.learned_windows().get("claude-opus-5-5"), Some(&400_000));
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn claude_names_prune_keeps_only_given_pids() {
+        let d = dir();
+        let sessions = d.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        fs::write(sessions.join("10.json"), session_body("sid-a")).unwrap();
+        fs::write(sessions.join("20.json"), session_body("sid-b")).unwrap();
+        let mut n = ClaudeNames::new(d.clone());
+        assert!(n.get(10).is_some());
+        assert!(n.get(20).is_some());
+        n.prune(&HashSet::from([10]));
+        assert_eq!(n.len(), 1);
+        // sessionId 색인(pid_for_session)은 pid 캐시와 따로 — prune 뒤에도 그대로 찾는다
+        assert_eq!(n.pid_for_session("sid-b"), Some(20));
         fs::remove_dir_all(&d).unwrap();
     }
 }

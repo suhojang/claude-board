@@ -28,6 +28,7 @@ import { pairSessions, placeOf, type SessionPlace, type SurfaceChange } from "./
 import { startLifecycle } from "./lifecycle.svelte";
 import { loadPluginDir } from "./mdRenderLoad";
 import { loadTestClaudePrefix } from "./testClaude";
+import { closeSettings } from "$lib/settings/screen.svelte";
 import { hasLeaf, leaves } from "./split";
 import { startTabRenames } from "./renameFlow.svelte";
 import { startSessionFlow } from "./sessionFlow.svelte";
@@ -94,6 +95,13 @@ export function controllerOf(leafId: string): TermController {
     controllers.set(leafId, ctl);
   }
   return ctl;
+}
+
+// ── 설정 화면 ─────────────────────────────────────────────────
+
+/** 탭을 다루는 사용자 동작(탭 고르기·열기·닫기·이름 바꾸기)은 설정 화면을 닫고 한다 — 잠깐 펼친 보드도 펼친 채로 둔다(mac `close(keep: true)`) */
+export function leaveSettings() {
+  closeSettings({ keep: true });
 }
 
 // ── 경로 ──────────────────────────────────────────────────────
@@ -317,12 +325,14 @@ function shownTab(ws: string): string | undefined {
 
 /** 경로 줄 항목을 눌렀을 때 — 그 경로의 마지막에 고른 탭으로 */
 export function showWorkspace(path: string) {
+  leaveSettings();
   const id = shownTab(path);
   if (id) select(id);
 }
 
 /** 지금 경로 안에서 왼쪽(-1)·오른쪽(+1) 탭으로(끝에서는 반대쪽 끝으로) */
 export function stepTab(step: number) {
+  leaveSettings();
   const list = tabsIn(TerminalHub.workspace);
   if (!list.length) return;
   select(list[wrapStep(list.length, list.findIndex((t) => t.id === TerminalHub.selected), step)].id);
@@ -330,12 +340,14 @@ export function stepTab(step: number) {
 
 /** 탭 줄 순서의 n 번째(1부터) 탭으로 */
 export function selectNumber(n: number) {
+  leaveSettings();
   const tab = nthTab(tabsIn(TerminalHub.workspace), n);
   if (tab) select(tab.id);
 }
 
 /** 경로 줄에서 앞(-1)·뒤(+1) 경로로(끝에서는 반대쪽 끝으로) */
 export function stepWorkspace(step: number) {
+  leaveSettings();
   const list = workspaces();
   if (!list.length) return;
   const key = workspaceKey(TerminalHub.workspace);
@@ -347,6 +359,7 @@ export function stepWorkspace(step: number) {
 
 /** 그 폴더(없으면 홈)의 셸 탭을 같은 경로 탭들의 끝에(새 경로면 맨 끝에) 연다. command 는 셸이 뜬 뒤 한 번 칠 명령 */
 export function openShell(dir: string | null = null, opts: { command?: string; sessionId?: string; mdRenderOff?: boolean } = {}): BoardTab | undefined {
+  leaveSettings();
   const tab = newTab(null, dir ?? "~");
   const surface = focusedSurface(tab);
   if (surface) {
@@ -363,6 +376,7 @@ export function openShell(dir: string | null = null, opts: { command?: string; s
 
 /** 새 세션 창 — 터미널이 접혀 있으면 펼치고 연다. 이미 떠 있으면 겹쳐 띄우지 않는다(Ctrl+T 를 또 누름) */
 export function newSessionSheet() {
+  leaveSettings();
   if (TerminalHub.sheet) return;
   if (!expanded()) setTerminalExpanded(true);
   TerminalHub.sheet = true;
@@ -450,6 +464,7 @@ export function showConfirm(next: Confirm) {
 
 /** 탭의 ×. 그 탭의 짝 세션이 아직 끝나지 않았을 때만 묻고, 아니면 바로 닫는다 */
 export function requestClose(tab: BoardTab) {
+  leaveSettings();
   if (!isBusy(tab)) return remove(tab);
   showConfirm({
     title: "탭을 닫을까요?",
@@ -500,6 +515,7 @@ function terminalDidClose(leafId: string, code: number | null) {
 
 /** 고른 탭의 이름 자리를 입력 칸으로 바꾼다 */
 export function beginRename() {
+  leaveSettings();
   const tab = selectedTab();
   if (tab) tab.renaming = true;
 }

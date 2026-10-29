@@ -87,6 +87,20 @@ private func pause(_ p: PauseSpec) -> AutoSwitchPause { AutoSwitchPause(account:
 
 private let hitReason = "s1 세션이 한도에 걸림(한도 메시지)"
 
+// 판단 표 한 줄을 돌린다 — 이 파일의 표와 공유 규칙 표(evaluateDecideRow)가 같은 길로 돈다
+private func decideRun(_ row: DecideRow) -> AutoSwitchDecision {
+    let sessions = row.sessions.map(session)
+    let resumed = Set(row.sessions.filter { row.resumed.contains($0.id) }.compactMap { s in
+        s.limitAt.map { resumeKey(id: s.id, limitAt: n0 + $0) }
+    })
+    return decideAutoSwitch(sessions: sessions, limits: row.limits.map(limit),
+                            current: row.current.map { account($0, expired: row.expired.contains($0)) },
+                            saved: row.saved.map { account($0, expired: row.expired.contains($0)) },
+                            full: Dictionary(uniqueKeysWithValues: row.full.map { (id($0.key), epoch($0.value)) }),
+                            resumed: resumed, lastSwitch: n0 + row.lastSwitch,
+                            pending: row.pending, switching: row.switching, pause: row.pause.map(pause), now: n0)
+}
+
 private let decideRows: [DecideRow] = [
     // 전환할지
     .init(note: "아무 일 없음 → 그대로", sessions: [SessionSpec(id: "s1")], limits: [LimitSpec("5h", 50, 1800)], move: "stay"),
@@ -227,16 +241,7 @@ private let decideRows: [DecideRow] = [
 @Suite("자동 전환: 판단") struct AutoSwitchDecideTests {
     @Test("전환할지·다음 계정과 한도 표시·이어 갈 세션", arguments: decideRows)
     func 표(_ row: DecideRow) {
-        let sessions = row.sessions.map(session)
-        let resumed = Set(row.sessions.filter { row.resumed.contains($0.id) }.compactMap { s in
-            s.limitAt.map { resumeKey(id: s.id, limitAt: n0 + $0) }
-        })
-        let d = decideAutoSwitch(sessions: sessions, limits: row.limits.map(limit),
-                                 current: row.current.map { account($0, expired: row.expired.contains($0)) },
-                                 saved: row.saved.map { account($0, expired: row.expired.contains($0)) },
-                                 full: Dictionary(uniqueKeysWithValues: row.full.map { (id($0.key), epoch($0.value)) }),
-                                 resumed: resumed, lastSwitch: n0 + row.lastSwitch,
-                                 pending: row.pending, switching: row.switching, pause: row.pause.map(pause), now: n0)
+        let d = decideRun(row)
         #expect(describe(d.move) == row.move)
         #expect(d.full == row.marks.map { Dictionary(uniqueKeysWithValues: $0.map { (id($0.key), epoch($0.value)) }) })
         #expect(d.resume.map(\.session.id) == row.resume)
@@ -314,4 +319,28 @@ private func decide(current: String = "A", limits: [LimitSpec], full: [String: D
         #expect(describe(decide(limits: limits, full: after.full, pause: after.pause, at: 3600).move) == "switch A→B [5시간 한도 100%]")
         #expect(describe(decide(current: "C", limits: limits, full: after.full, pause: after.pause, at: 3).move) == "switch C→B [5시간 한도 100%]")
     }
+}
+
+// MARK: - 공유 규칙 표(rules-table/autoswitch.json) — RulesTableTests 가 이 파일의 길(decideRun·account·pause·describe)로 돌린다.
+// 이 파일의 도우미(id·account·epoch·session·describe)는 다른 시험 파일의 private 도우미와 이름이 겹쳐 internal 로 넓히면
+// 다시 선언 오류가 나므로, 넘겨 주는 함수만 둔다. 결과는 표의 꼴(계정 이름 → 지금에서 초)로 돌려준다 — 계정 id "A|org" 에서 "|org" 를 뗀다
+
+private func accountName(_ id: String) -> String { id.hasSuffix("|org") ? String(id.dropLast(4)) : id }
+private func marksByName(_ full: [String: Double]) -> [String: Double] {
+    Dictionary(uniqueKeysWithValues: full.map { (accountName($0.key), $0.value - n0.timeIntervalSince1970) })
+}
+
+/// 판단 한 번 — describe 글자, 새 한도 표시(nil 이면 그대로), 이어 갈 세션 id(차례대로), 이어 가기 표지가 "세션 id@한도 시각" 인지
+func evaluateDecideRow(_ row: DecideRow) -> (move: String, marks: [String: Double]?, resume: [String], keysOK: Bool) {
+    let d = decideRun(row)
+    return (describe(d.move), d.full.map(marksByName), d.resume.map(\.session.id),
+            d.resume.allSatisfy { r in r.key == resumeKey(id: r.session.id, limitAt: r.session.limitAt!) })
+}
+
+/// 전환 실패 뒤 — 대상·지금 계정은 이름, 표시는 이름 → 지금에서 초. 쉼은 (쉬기 시작한 계정 이름, 끝 시각 — 지금에서 초)
+func evaluateFailedRow(_ side: SwitchFailureSide, target: String, current: String,
+                       full: [String: Double]) -> (marks: [String: Double], pause: (account: String, until: Double)?) {
+    let r = autoSwitchFailed(side, target: account(target), from: account(current),
+                             full: Dictionary(uniqueKeysWithValues: full.map { (id($0.key), epoch($0.value)) }), now: n0)
+    return (marksByName(r.full), r.pause.map { (accountName($0.account), $0.until.timeIntervalSince(n0)) })
 }

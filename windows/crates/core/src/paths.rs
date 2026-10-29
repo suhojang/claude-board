@@ -82,6 +82,11 @@ pub fn notify_position_file() -> PathBuf {
     notifier_dir().join("notify-position")
 }
 
+/// `notifier/login-launch-off` — 로그인할 때 열기를 끈 표지(mac `login-launch-off`). 있으면 설치·업데이트(`setup`)가 시작 프로그램에 다시 등록하지 않고, 제거가 지운다
+pub fn login_launch_off_file() -> PathBuf {
+    notifier_dir().join("login-launch-off")
+}
+
 /// `notifier/board-theme` — TUI 색 테마 이름
 pub fn board_theme_file() -> PathBuf {
     notifier_dir().join("board-theme")
@@ -143,6 +148,13 @@ mod tests {
         std::fs::create_dir_all(a.join(CLAUDE_EXE)).unwrap();
         assert_eq!(find_claude_exe(Some(&path), &local), Some(b.join(CLAUDE_EXE)));
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn login_launch_off_mark_sits_in_notifier_dir() {
+        let mark = login_launch_off_file();
+        assert_eq!(mark.file_name().and_then(|n| n.to_str()), Some("login-launch-off"));
+        assert_eq!(mark.parent(), Some(notifier_dir().as_path()));
     }
 
     #[test]

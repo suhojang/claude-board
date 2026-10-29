@@ -1568,6 +1568,9 @@ func transcriptPath(_ given: String?, _ cwd: String, _ id: String) -> String {
 // 일시중지했던 세션(carryOn)은 첫 요청으로 이어서 진행하라는 문구를 넘겨 바로 다음 작업을 시작하게 한다. 순서는 SessionControl.reopen
 @MainActor func resumeSession(_ s: Session, carryOn: Bool = false) { sessionControl.reopen(s, carryOn: carryOn) }
 
+// 명령줄 다시 열기(--action reopen) — 메뉴처럼 끝난 세션만 이어 열고 이어서 진행 요청은 일시중지했던 세션에만. 끝나지 않은 세션은 알리기만(SessionControl.reopenEnded)
+@MainActor func reopenEnded(_ s: Session) { sessionControl.reopenEnded(s) }
+
 // 세션을 한 번 눌렀을 때(목록·미니·알림 패널 "세션으로 이동") — 보드 탭이면 펼치고 그 탭의 그 화면으로, 끝난 세션은 보드 새 탭에서 이어 열기,
 // 백그라운드 세션은 안내만, 다른 터미널 세션은 지금처럼 그 터미널로(두 번 누르면 그 세션의 터미널 창까지). 갈래는 SessionControl.open
 @MainActor func openSession(_ s: Session, double: Bool = false) { sessionControl.open(s, double: double) }
@@ -1962,8 +1965,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
-    // 끄기 전 확인 — 보드 탭 세션 가운데 일하는 중인 것이 있으면 묻는다(⌘Q·메뉴·Dock). pkill(업데이트 스크립트 등)은 여기를 거치지 않는다
+    // 끄기 전 확인 — 보드 탭 세션 가운데 일하는 중인 것이 있으면 묻는다(⌘Q·메뉴·Dock·install.sh 가 청한 종료). pkill(업데이트 단추 뒤 등)은 여기를 거치지 않는다
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        MainActor.assumeIsolated { confirmShutdown(update: false) } == nil ? .terminateCancel : .terminateNow
+        let update = quitRequested
+        quitRequested = false
+        let ok = MainActor.assumeIsolated { confirmShutdown(update: update) } != nil
+        if !ok, update { writeQuitAck("cancel") }
+        return ok ? .terminateNow : .terminateCancel
+    }
+
+    // 보드 밖에서 업데이트하는 install.sh 가 청한 종료(--action quit) — 받았다는 표지(asking)를 남기고 ⌘Q 와 같은 길로 끈다(확인 창 문구는 업데이트).
+    // 확인 창에서 취소하면 cancel 을 써서 기다리던 install.sh 가 아무것도 바꾸지 않고 멈추게 한다. 표지는 사용자 임시 폴더의 <instanceName>.quit(시험 빌드와 따로)
+    private var quitRequested = false
+    func requestQuit() {
+        writeQuitAck("asking")
+        quitRequested = true
+        NSApp.terminate(nil)
+    }
+    private func writeQuitAck(_ state: String) {
+        try? state.write(toFile: NSTemporaryDirectory() + "\(instanceName).quit", atomically: true, encoding: .utf8)
     }
 }

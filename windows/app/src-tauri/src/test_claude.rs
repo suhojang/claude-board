@@ -32,23 +32,23 @@ fn non_empty(env: &dyn Fn(&str) -> Option<OsString>, key: &str) -> Option<OsStri
 pub fn decide(env: &dyn Fn(&str) -> Option<OsString>, exists: &dyn Fn(&Path) -> bool) -> Decision {
     let Some(raw) = non_empty(env, CLAUDE_ENV) else { return Decision::Off };
     if non_empty(env, HOME_ENV).is_none() {
-        return Decision::Rejected(format!("{CLAUDE_ENV} 는 {HOME_ENV} 도 있을 때만 쓴다 — 무시한다"));
+        return Decision::Rejected(format!("{CLAUDE_ENV} 는 {HOME_ENV} 도 있을 때만 쓴다. 무시한다"));
     }
-    let Some(raw) = raw.to_str() else { return Decision::Rejected(format!("{CLAUDE_ENV} 가 유니코드가 아니다 — 무시한다")) };
+    let Some(raw) = raw.to_str() else { return Decision::Rejected(format!("{CLAUDE_ENV} 가 유니코드가 아니다. 무시한다")) };
     let mut parts = Vec::new();
     for piece in raw.split('|') {
         if piece.is_empty() {
-            return Decision::Rejected(format!("{CLAUDE_ENV} 에 빈 조각이 있다 — 무시한다"));
+            return Decision::Rejected(format!("{CLAUDE_ENV} 에 빈 조각이 있다. 무시한다"));
         }
         if piece.contains('"') {
-            return Decision::Rejected(format!("{CLAUDE_ENV} 조각에 큰따옴표가 있다({piece}) — 무시한다"));
+            return Decision::Rejected(format!("{CLAUDE_ENV} 조각에 큰따옴표가 있다({piece}). 무시한다"));
         }
         let path = PathBuf::from(piece);
         if !path.is_absolute() {
-            return Decision::Rejected(format!("{CLAUDE_ENV} 조각이 절대 경로가 아니다({piece}) — 무시한다"));
+            return Decision::Rejected(format!("{CLAUDE_ENV} 조각이 절대 경로가 아니다({piece}). 무시한다"));
         }
         if !exists(&path) {
-            return Decision::Rejected(format!("{CLAUDE_ENV} 조각이 없는 파일이다({piece}) — 무시한다"));
+            return Decision::Rejected(format!("{CLAUDE_ENV} 조각이 없는 파일이다({piece}). 무시한다"));
         }
         parts.push(path);
     }
@@ -80,15 +80,20 @@ pub fn decision_from_process() -> Decision {
 
 /// 보드가 claude 를 직접 띄우는 곳(계정 추가 로그인)이 쓸 프로그램과 앞쪽 인자.
 /// 꺼짐이면 `find` 로 진짜 claude 를 찾고, 켜짐이면 가짜(프로그램 + 앞쪽 인자), 어긋남이면 진짜를 찾지 않고 거절한다.
-pub fn login_program(decided: Decision, find: impl FnOnce() -> Option<PathBuf>) -> Result<(PathBuf, Vec<String>), String> {
+/// `redirected` = 홈이나 notifier 폴더를 환경변수로 바꿔 띄웠다(개발·시험 실행). 그 실행에서 가짜 없이 꺼짐이면 진짜 `claude auth login` 이
+/// 바뀐 폴더에서라도 돌게 되므로 찾지도 띄우지도 않고 거절한다.
+pub fn login_program(decided: Decision, redirected: bool, find: impl FnOnce() -> Option<PathBuf>) -> Result<(PathBuf, Vec<String>), String> {
     match decided {
+        Decision::Off if redirected => {
+            Err(format!("{HOME_ENV}·CLAUDE_BOARD_NOTIFIER_DIR 로 폴더를 바꾼 실행에서는 시험 claude({CLAUDE_ENV}) 없이 계정 추가를 하지 않습니다"))
+        }
         Decision::Off => find().map(|exe| (exe, Vec::new())).ok_or_else(|| "claude 명령을 찾지 못했습니다".to_string()),
         Decision::On(parts) => {
             let mut parts = parts.into_iter();
             let program = parts.next().ok_or_else(|| format!("{CLAUDE_ENV} 가 비었습니다"))?;
             Ok((program, parts.map(|p| p.to_string_lossy().into_owned()).collect()))
         }
-        Decision::Rejected(why) => Err(format!("시험 claude 설정이 어긋나 계정 추가를 하지 않습니다 — {why}")),
+        Decision::Rejected(why) => Err(format!("시험 claude 설정이 어긋나 계정 추가를 하지 않습니다: {why}")),
     }
 }
 
@@ -243,11 +248,21 @@ mod tests {
     fn login_program_never_falls_back_to_real_claude_when_invalid() {
         let real = || Some(PathBuf::from("C:\\real\\claude.exe"));
         let never = || -> Option<PathBuf> { panic!("어긋남인데 진짜 claude 를 찾았다") };
-        assert_eq!(login_program(Decision::Off, real), Ok((PathBuf::from("C:\\real\\claude.exe"), vec![])));
-        assert!(login_program(Decision::Off, || None).is_err());
+        assert_eq!(login_program(Decision::Off, false, real), Ok((PathBuf::from("C:\\real\\claude.exe"), vec![])));
+        assert!(login_program(Decision::Off, false, || None).is_err());
         let fake = Decision::On(vec![PathBuf::from("C:\\f\\node.exe"), PathBuf::from("C:\\f\\fake.cjs")]);
-        assert_eq!(login_program(fake, never), Ok((PathBuf::from("C:\\f\\node.exe"), vec!["C:\\f\\fake.cjs".to_string()])));
-        let err = login_program(Decision::Rejected("상대 경로".into()), never).unwrap_err();
+        assert_eq!(login_program(fake, false, never), Ok((PathBuf::from("C:\\f\\node.exe"), vec!["C:\\f\\fake.cjs".to_string()])));
+        let err = login_program(Decision::Rejected("상대 경로".into()), false, never).unwrap_err();
         assert!(err.contains("상대 경로"), "{err}");
+    }
+
+    /// 홈을 바꿔 띄웠는데 시험 claude 가 꺼져 있으면 진짜 claude 를 찾지도 않고 거절한다 — 가짜가 켜졌으면 그대로 쓴다
+    #[test]
+    fn login_program_refuses_real_claude_in_a_redirected_run_without_a_test_device() {
+        let never = || -> Option<PathBuf> { panic!("홈을 바꾼 실행인데 진짜 claude 를 찾았다") };
+        let err = login_program(Decision::Off, true, never).unwrap_err();
+        assert!(err.contains(CLAUDE_ENV) && !err.contains('—'), "{err}");
+        let fake = Decision::On(vec![PathBuf::from("C:\\f\\node.exe")]);
+        assert_eq!(login_program(fake, true, never), Ok((PathBuf::from("C:\\f\\node.exe"), vec![])));
     }
 }

@@ -1,0 +1,170 @@
+{
+  "family": "sessions-group",
+  "schema": 1,
+  "cases": [
+    {
+      "id": "sessions-group.group.by-project-dir",
+      "rule": "group",
+      "why": "세션은 claude 를 띄운 폴더(project_dir)별로 묶인다. 카드 안 세션은 급한 순(waiting, working, paused와 idle, ended)이고 같은 급이면 상태가 바뀐 시각(since)이 최근인 것 먼저다",
+      "source": "SessionsTests.swift:163-180 (묶기)",
+      "input": {
+        "records": [
+          {"file": "wait.json", "record": {"state": "waiting", "cwd": "/p/a", "project_dir": "/p/a", "since": -10, "updated": -10}},
+          {"file": "work-old.json", "record": {"state": "working", "cwd": "/p/a", "project_dir": "/p/a", "since": -50, "updated": -10}},
+          {"file": "work-new.json", "record": {"state": "working", "cwd": "/p/a", "project_dir": "/p/a", "since": -30, "updated": -10}},
+          {"file": "ended.json", "record": {"state": "ended", "cwd": "/p/a", "project_dir": "/p/a", "since": -99, "updated": -10}},
+          {"file": "paused.json", "record": {"state": "paused", "cwd": "/p/a", "project_dir": "/p/a", "since": -40, "updated": -10}},
+          {"file": "idle.json", "record": {"state": "idle", "cwd": "/p/a", "project_dir": "/p/a", "since": -60, "updated": -10}},
+          {"file": "other.json", "record": {"state": "working", "cwd": "/p/b", "project_dir": "/p/b", "since": -10, "updated": -10}}
+        ]
+      },
+      "expect": {
+        "groups": [
+          {"id": "/p/a", "sessions": ["wait", "work-new", "work-old", "paused", "idle", "ended"]},
+          {"id": "/p/b", "sessions": ["other"]}
+        ]
+      }
+    },
+    {
+      "id": "sessions-group.group.cwd-differs-same-card",
+      "rule": "group",
+      "why": "cwd 가 달라도 project_dir 이 같으면 한 카드로 묶인다. 워크트리에 cd 한 세션도 원래 프로젝트의 카드에 남는다",
+      "source": "SessionsTests.swift:182-189 (같은_프로젝트)",
+      "input": {
+        "records": [
+          {"file": "1.json", "record": {"state": "idle", "cwd": "/p/a/sub", "project_dir": "/p/a", "since": -5, "updated": -5}},
+          {"file": "2.json", "record": {"state": "idle", "cwd": "/p/a", "since": -10, "updated": -10}}
+        ]
+      },
+      "expect": {
+        "groups": [
+          {"id": "/p/a", "sessions": ["1", "2"]}
+        ]
+      }
+    },
+    {
+      "id": "sessions-group.group.inner-rank-then-since",
+      "rule": "group",
+      "why": "카드 안 세션 순서에서 최근 활동(updated)은 겨루지 않는다. 급한 순이 같으면 상태가 바뀐 시각(since)이 최근인 것으로 온다. 여기서는 updated 를 since 와 반대로 놓아 그 차이를 못박는다",
+      "source": "SessionsTests.swift:163-175 (묶기의 안 순서)",
+      "input": {
+        "records": [
+          {"file": "wait.json", "record": {"state": "waiting", "cwd": "/p/a", "project_dir": "/p/a", "since": -10, "updated": -10}},
+          {"file": "work-old.json", "record": {"state": "working", "cwd": "/p/a", "project_dir": "/p/a", "since": -50, "updated": -1}},
+          {"file": "work-new.json", "record": {"state": "working", "cwd": "/p/a", "project_dir": "/p/a", "since": -30, "updated": -999}},
+          {"file": "paused.json", "record": {"state": "paused", "cwd": "/p/a", "project_dir": "/p/a", "since": -40, "updated": -999}},
+          {"file": "idle.json", "record": {"state": "idle", "cwd": "/p/a", "project_dir": "/p/a", "since": -60, "updated": -1}},
+          {"file": "ended.json", "record": {"state": "ended", "cwd": "/p/a", "project_dir": "/p/a", "since": -99, "updated": -999}}
+        ]
+      },
+      "expect": {
+        "groups": [
+          {"id": "/p/a", "sessions": ["wait", "work-new", "work-old", "paused", "idle", "ended"]}
+        ]
+      }
+    },
+    {
+      "id": "sessions-group.group.pinned-first-in-pin-order",
+      "rule": "group",
+      "why": "고정한 카드는 사람이 고정한 순서 그대로 맨 앞에 온다. 목록에 없는 경로가 고정 목록에 섞여 있어도 해가 없다",
+      "source": "SessionsTests.swift:192-204 (순서)",
+      "input": {
+        "records": [
+          {"file": "aw.json", "record": {"state": "waiting", "cwd": "/a", "since": -10, "updated": -30}},
+          {"file": "bid.json", "record": {"state": "idle", "cwd": "/b", "since": -20, "updated": -20}},
+          {"file": "cen.json", "record": {"state": "ended", "cwd": "/c", "since": -40, "updated": -40}}
+        ],
+        "pinned": ["/c", "/b", "/없는 카드"]
+      },
+      "expect": {
+        "groups": [
+          {"id": "/c", "sessions": ["cen"]},
+          {"id": "/b", "sessions": ["bid"]},
+          {"id": "/a", "sessions": ["aw"]}
+        ]
+      }
+    },
+    {
+      "id": "sessions-group.group.rank-then-latest-updated",
+      "rule": "group",
+      "why": "카드 순서는 카드 안 가장 급한 상태가 먼저이고, 같은 급이면 카드의 가장 최근 활동(updated)이 최근인 카드가 먼저다. paused와 idle은 같은 급이므로 활동으로 견준다. 승인 대기 카드는 활동이 오래돼도 작업 중 카드보다 앞선다",
+      "source": "SessionsTests.swift:192-213 (순서, 여러_세션_카드)",
+      "input": {
+        "records": [
+          {"file": "w1.json", "record": {"state": "waiting", "cwd": "/t-wait", "since": -100, "updated": -100}},
+          {"file": "a1.json", "record": {"state": "idle", "cwd": "/t-a", "since": -100, "updated": -100}},
+          {"file": "a2.json", "record": {"state": "working", "cwd": "/t-a", "since": -1, "updated": -1}},
+          {"file": "k1.json", "record": {"state": "working", "cwd": "/t-work", "since": -5, "updated": -5}},
+          {"file": "b1.json", "record": {"state": "working", "cwd": "/t-b", "since": -50, "updated": -50}},
+          {"file": "i1.json", "record": {"state": "idle", "cwd": "/t-idle", "since": -1, "updated": -1}},
+          {"file": "p1.json", "record": {"state": "paused", "cwd": "/t-paz", "since": -2, "updated": -2}},
+          {"file": "c1.json", "record": {"state": "ended", "cwd": "/t-c", "since": -999, "updated": -999}}
+        ]
+      },
+      "expect": {
+        "groups": [
+          {"id": "/t-wait", "sessions": ["w1"]},
+          {"id": "/t-a", "sessions": ["a2", "a1"]},
+          {"id": "/t-work", "sessions": ["k1"]},
+          {"id": "/t-b", "sessions": ["b1"]},
+          {"id": "/t-idle", "sessions": ["i1"]},
+          {"id": "/t-paz", "sessions": ["p1"]},
+          {"id": "/t-c", "sessions": ["c1"]}
+        ]
+      }
+    },
+    {
+      "id": "sessions-group.group.missing-project-dir-uses-cwd",
+      "rule": "group",
+      "why": "project_dir 이 없는 기록은 cwd 의 카드로 묶인다. worktrees 밑으로 cd 한 cwd 도 그대로다(project_dir 이 빈 글자일 때의 차이는 Q2 로 남겨 표에 넣지 않았다)",
+      "source": "SessionScan.swift:109 + store.rs:242",
+      "input": {
+        "records": [
+          {"file": "wt.json", "record": {"state": "idle", "cwd": "/w/repo/.claude/worktrees/t1", "since": -5, "updated": -5}},
+          {"file": "rec.json", "record": {"state": "idle", "cwd": "/w/repo", "since": -10, "updated": -10}}
+        ]
+      },
+      "expect": {
+        "groups": [
+          {"id": "/w/repo/.claude/worktrees/t1", "sessions": ["wt"]},
+          {"id": "/w/repo", "sessions": ["rec"]}
+        ]
+      }
+    },
+    {
+      "id": "sessions-group.group.missing-cwd-is-question-mark",
+      "rule": "group",
+      "why": "cwd 도 project_dir 도 없는 기록은 '?' 한 카드로 묶인다",
+      "source": "SessionScan.swift:108 + store.rs:241",
+      "input": {
+        "records": [
+          {"file": "q2.json", "record": {"state": "idle", "since": -5, "updated": -5}},
+          {"file": "q1.json", "record": {"state": "idle", "since": -10, "updated": -10}}
+        ]
+      },
+      "expect": {
+        "groups": [
+          {"id": "?", "sessions": ["q2", "q1"]}
+        ]
+      }
+    },
+    {
+      "id": "sessions-group.group.sid-from-file-name",
+      "rule": "group",
+      "why": "session_id 가 문자열이 아니면(없든 숫자든) 없는 것으로 보고 파일 이름에서 .json 을 뗀 것을 세션 id 로 쓴다. 기록에 문자열로 있으면 기록이 먼저다",
+      "source": "SessionIDTests.swift:54-64 + store.rs:240",
+      "input": {
+        "records": [
+          {"file": "x.json", "record": {"session_id": 7, "state": "idle", "cwd": "/p", "since": -1, "updated": -1}},
+          {"file": "other.json", "record": {"session_id": "real", "state": "idle", "cwd": "/p", "since": -5, "updated": -5}},
+          {"file": "6f1c2a-77.json", "record": {"state": "idle", "cwd": "/p", "since": -10, "updated": -10}}
+        ]
+      },
+      "expect": {
+        "groups": [
+          {"id": "/p", "sessions": ["x", "real", "6f1c2a-77"]}
+        ]
+      }
+    }
+  ]
+}

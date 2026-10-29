@@ -4,11 +4,13 @@
   import Icon from "$lib/board/Icon.svelte";
   import { hint } from "$lib/board/hint.svelte";
   import { stateRgb } from "$lib/board/format";
+  import { keyLabel } from "$lib/shortcuts/store.svelte";
   import type { BoardTab } from "$lib/types";
   import TabNameField from "./TabNameField.svelte";
-  import { doing, TerminalHub, requestClose, select, shownName, tabState } from "./hub.svelte";
+  import { doing, leaveSettings, TerminalHub, requestClose, select, shownName, tabState } from "./hub.svelte";
 
   let { tab, selected, number }: { tab: BoardTab; selected: boolean; number: number | null } = $props();
+  const renameKey = $derived(keyLabel("rename"));
 </script>
 
 <!-- 탭은 포커스를 터미널에 두므로 키보드는 단축키(Ctrl+Alt+1~9·좌우)가 맡는다 -->
@@ -24,7 +26,11 @@
     // 이름 칸을 누를 때는 입력 칸이 포커스를 가져야 하고, 그 밖은 포커스를 터미널에 둔 채 고른다
     if (!tab.renaming && e.button === 0) e.preventDefault();
   }}
-  onclick={() => !tab.renaming && select(tab.id)}
+  onclick={() => {
+    if (tab.renaming) return;
+    leaveSettings();
+    select(tab.id);
+  }}
 >
   <span class="dot" style:background="rgb({stateRgb(tabState(tab))})"></span>
   {#if tab.renaming}
@@ -33,7 +39,7 @@
     <span class="name">{shownName(tab)}</span>
   {/if}
   {#if TerminalHub.commandHeld && selected}
-    <span class="doing">Ctrl+Shift+R 이름 바꾸기</span>
+    <span class="doing">{renameKey ? `${renameKey} ` : ""}이름 바꾸기</span>
   {:else}
     <span class="doing">{doing(tab)}</span>
   {/if}

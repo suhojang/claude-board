@@ -167,10 +167,10 @@ export function needsCloseConfirm(sessionState: string | null | undefined): bool
   return !!sessionState && sessionState !== "ended";
 }
 
-/** 급한 순위 — 낮을수록 급하다 */
-export const STATE_RANK: Readonly<Record<string, number>> = { waiting: 0, working: 1, paused: 2, idle: 2, ended: 3 };
+/** 경로 상태 점의 순위 — 낮을수록 급하다. 점은 일시중지를 대기보다 앞에 친다(카드 순위 board/format.ts 의 rank 와 다르다) */
+export const DOT_RANK: Readonly<Record<string, number>> = { waiting: 0, working: 1, paused: 2, idle: 3, ended: 4 };
 
-/** 상태들 가운데 가장 급한 것. 비면 idle, 같은 순위면 앞의 것 */
+/** 상태들 가운데 가장 급한 것(경로 상태 점 순위). 비면 idle */
 export function mostUrgent<S extends string>(states: ReadonlyArray<S>): S | "idle" {
-  return states.length ? states.reduce((a, b) => (STATE_RANK[b] < STATE_RANK[a] ? b : a)) : "idle";
+  return states.length ? states.reduce((a, b) => (DOT_RANK[b] < DOT_RANK[a] ? b : a)) : "idle";
 }

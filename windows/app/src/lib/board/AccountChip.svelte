@@ -1,8 +1,10 @@
 <script lang="ts">
   // 지금 로그인 계정 — 누르면 저장해 둔 계정으로 전환하거나 계정을 추가하는 메뉴(ClaudeBoard.swift AccountChip).
-  // 작업 중인 세션이 있을 때의 전환 확인 대화상자는 백엔드가 띄운다
+  // 계정 추가는 설정 > 계정에서 로그인 창·코드 칸을 보며 한다(열고 바로 시작). 작업 중인 세션이 있을 때의 전환 확인과 계정 지우기 확인은 백엔드가 띄운다
   import type { Snapshot } from "$lib/types";
-  import { addAccount, cancelAddAccount, removeAccount, setAutoSwitch, switchAccount } from "$lib/backend";
+  import { beginAddAccount, cancelAddAccount, deleteAccount, setAutoSwitch, switchAccount } from "$lib/backend";
+  import { accountLogin, watchAccountLogin } from "$lib/settings/groups/accountLogin.svelte";
+  import { openSettings } from "$lib/settings/screen.svelte";
   import Icon from "./Icon.svelte";
   import { hint } from "./hint.svelte";
   import { openMenu, type MenuItem } from "./menu.svelte";
@@ -10,6 +12,16 @@
   let { accounts, compact = false }: { accounts: Snapshot["accounts"]; compact?: boolean } = $props();
 
   const c = $derived(accounts.current);
+
+  // 로그인 주소·안내는 이벤트로만 오므로 설정 화면이 닫혀 있어도 받아 둔다
+  $effect(() => watchAccountLogin());
+
+  // 설정 > 계정을 열고 바로 로그인을 시작한다(email 이 있으면 그 계정으로 다시 로그인)
+  function addInSettings(email?: string) {
+    openSettings("account");
+    accountLogin.reset();
+    beginAddAccount(email);
+  }
 
   function showMenu(e: MouseEvent) {
     const items: MenuItem[] = [{ label: "Claude 계정 — 고르면 모든 세션이 그 계정으로 이어 갑니다", header: true }];
@@ -24,19 +36,23 @@
         title: a.org || undefined,
         action: () => {
           if (isCurrent) return;
-          if (a.expired) addAccount(a.email);
+          if (a.expired) addInSettings(a.email);
           else switchAccount(a.id);
         },
       });
     }
     items.push({ separator: true });
-    if (accounts.adding) items.push({ label: "로그인 기다리는 중 — 계정 추가 취소", action: cancelAddAccount });
-    else items.push({ label: "계정 추가… (터미널·브라우저에서 로그인)", action: () => addAccount() });
+    if (accounts.adding) {
+      items.push({ label: "계정 추가 계속 (설정 > 계정)", action: () => openSettings("account") });
+      items.push({ label: "계정 추가 취소", action: cancelAddAccount });
+    } else {
+      items.push({ label: "계정 추가… (설정 > 계정에서 로그인)", action: () => addInSettings() });
+    }
     const removable = accounts.saved.filter((a) => a.id !== c?.id);
     if (removable.length) {
       items.push({
         label: "저장한 계정 지우기",
-        submenu: removable.map((a) => ({ label: a.email, action: () => removeAccount(a.id) })),
+        submenu: removable.map((a) => ({ label: a.email, action: () => deleteAccount(a.id) })),
       });
     }
     items.push({ separator: true });

@@ -17,6 +17,11 @@ use crate::readers::{ClaudeNames, ContextReader, InterruptReader, ModelReader};
 use crate::settings::{set_in, Settings};
 use crate::util::{ms, num, obj};
 
+#[cfg(test)]
+mod scan_table;
+
+mod group_table;
+
 /// 조용한 카드를 자동으로 접기까지의 시간
 const QUIET_FOLD_AFTER: f64 = 30.0 * 60.0;
 /// 종료된 세션 기록을 지우는 나이
@@ -155,6 +160,9 @@ impl Store {
         let mut sessions: Vec<Session> = Vec::new();
         let mut brain_paths = HashSet::new();
         let mut pids = HashSet::new();
+        // 컨텍스트 캐시 정리(A1) — 목록에 남은 세션 몫(끝난 것 포함)만 남기기 위한 목록
+        let mut ctx_sids = HashSet::new();
+        let mut ctx_transcripts = HashSet::new();
         let mut seen = HashSet::new();
         let mut names: Vec<String> = fs::read_dir(&self.dir)
             .map(|rd| rd.flatten().filter_map(|e| e.file_name().into_string().ok()).filter(|n| n.ends_with(".json")).collect())
@@ -172,7 +180,7 @@ impl Store {
                     parsed
                 }
             };
-            if let Some(s) = self.session(&j, &name, &path, probe, alive, now, &mut brain_paths) {
+            if let Some(s) = self.session(&j, &name, &path, probe, alive, now, &mut brain_paths, &mut pids, &mut ctx_sids, &mut ctx_transcripts) {
                 pids.insert(s.pid);
                 sessions.push(s);
             }
@@ -180,6 +188,8 @@ impl Store {
         self.models.prune(&brain_paths);
         self.interrupts.prune(&brain_paths);
         self.names.prune(&pids);
+        // 컨텍스트 캐시도 목록에 남은 세션(끝난 것 포함) 몫만 남긴다
+        self.contexts.prune(&ctx_sids, &ctx_transcripts);
         self.records.retain(|k, _| seen.contains(k));
 
         let mut changed = self.expand_newly_waiting(&sessions, settings);
@@ -226,13 +236,37 @@ impl Store {
         alive: &dyn Fn(&Record) -> bool,
         now: f64,
         brain_paths: &mut HashSet<PathBuf>,
+        pids: &mut HashSet<u32>,
+        ctx_sids: &mut HashSet<String>,
+        ctx_transcripts: &mut HashSet<PathBuf>,
     ) -> Option<Session> {
         let mut state = j.get("state").and_then(Value::as_str).unwrap_or("idle").to_string();
         let updated = num(j.get("updated")).unwrap_or(0.0);
-        if state != "ended" && !alive(j) {
-            state = "ended".into();
-        }
+        // pid 없는 기록의 생사 판정에 sessionId 가 필요하므로 상태 판정보다 먼저 꺼낸다
         let sid = j.get("session_id").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| name.trim_end_matches(".json").to_string());
+        // Session.pid 는 기록 값을 그대로 두고, 생사·status·이름 판정에 쓰는 pid 를 따로 둔다(SPEC §5.1)
+        let pid = j.get("pid").and_then(Value::as_u64).filter(|&p| p <= u64::from(u32::MAX)).unwrap_or(0) as u32;
+        let mut lookup_pid = pid;
+        if state != "ended" {
+            if pid == 0 {
+                // pid 없는 기록은 Claude Code 세션 파일에서 sessionId 로 pid 를 찾아 생사를 본다.
+                // 찾지 못하면 pid 0 으로 판정하므로 record_alive 의 pid 없음=산 것 규칙이 그대로 이어진다
+                let found = self.names.pid_for_session(&sid).unwrap_or(0);
+                let mut judged = Record::new();
+                judged.insert("pid".to_owned(), Value::from(found));
+                if found > 0 {
+                    // 찾은 pid 로 status·이름도 읽으므로 이름 캐시 정리에서 남긴다
+                    pids.insert(found);
+                }
+                if !alive(&judged) {
+                    state = "ended".into();
+                } else {
+                    lookup_pid = found;
+                }
+            } else if !alive(j) {
+                state = "ended".into();
+            }
+        }
         let cwd = j.get("cwd").and_then(Value::as_str).unwrap_or("?").to_string();
         let project_dir = j.get("project_dir").and_then(Value::as_str).filter(|d| !d.is_empty()).map_or_else(|| cwd.clone(), str::to_string);
         let transcript = transcript_path(j.get("transcript_path").and_then(Value::as_str), &cwd, &sid, &self.claude_dir);
@@ -241,7 +275,6 @@ impl Store {
             let _ = fs::remove_file(path);
             return None;
         }
-        let pid = j.get("pid").and_then(Value::as_u64).filter(|&p| p <= u64::from(u32::MAX)).unwrap_or(0) as u32;
         // Esc 로 끊은 세션은 입력을 기다리는 중이고, 승인한 도구가 도는 세션은 작업 중이다(SPEC §3.9).
         // 끊은 뒤에도 서브에이전트·셸이 돌면 아래에서 다시 작업 중이 된다
         let mut since = num(j.get("since")).unwrap_or(0.0);
@@ -249,7 +282,7 @@ impl Store {
         let live = live_state(
             &state,
             || interrupts.read(&transcript),
-            || status_change(&names.get(pid)?, &sid, since),
+            || status_change(&names.get(lookup_pid)?, &sid, since),
         );
         if let Some((s, at)) = live {
             state = s.to_string();
@@ -306,8 +339,11 @@ impl Store {
             .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect::<Vec<_>>())
             .filter(|a| !a.is_empty())
             .unwrap_or_else(|| vec!["--resume".to_string(), sid.clone()]);
-        let name = if state == "ended" { None } else { self.names.get(pid).as_ref().and_then(session_name).map(str::to_string) };
+        let name = if state == "ended" { None } else { self.names.get(lookup_pid).as_ref().and_then(session_name).map(str::to_string) };
         let can_drive = can_drive(&state, pid, headless, &place, &probe.runs_claude, probe.drivable.contains(&pid));
+        // 컨텍스트 캐시 정리(A1)에 쓸 목록 — 목록에 남은 세션(끝난 것 포함) 몫만 남기기 위해서다
+        ctx_sids.insert(sid.clone());
+        ctx_transcripts.insert(transcript.clone());
         Some(Session {
             id: sid,
             cwd,
@@ -602,6 +638,12 @@ mod tests {
         rec.get("pid").and_then(Value::as_u64) != Some(666)
     }
 
+    /// 771·772·773·888 은 죽은 것으로 본다(나머지와 pid 없음은 산 것).
+    /// pid 없는 기록은 Claude Code 세션 파일에서 찾은 pid 로 판정되므로 이 pid 들이 판정에 걸린다.
+    fn dead_lookup_pids(rec: &Record) -> bool {
+        !matches!(rec.get("pid").and_then(Value::as_u64), Some(771) | Some(772) | Some(773) | Some(888))
+    }
+
     fn all(groups: &[Group]) -> Vec<(&str, &str)> {
         groups.iter().flat_map(|g| g.sessions.iter().map(|s| (s.id.as_str(), s.state.as_str()))).collect()
     }
@@ -804,5 +846,112 @@ mod tests {
         assert_eq!(display_path("/Users/me", "/Users/me"), "~");
         assert_eq!(display_path("/Users/meow/x", "/Users/me"), "/Users/meow/x");
         assert_eq!(display_path(r"C:\Users\demo\work", r"C:\Users\demo"), r"~\work");
+    }
+
+    #[test]
+    fn pidless_judged_by_claude_session_file() {
+        let f = Fake::new();
+        // pid 없는 기록(상태 세 가지)은 Claude Code 세션 파일의 sessionId 로 pid 를 찾아 생사를 본다
+        for (sid, state, pid) in [("w", "working", 771u32), ("q", "waiting", 772), ("i", "idle", 773)] {
+            f.session(sid, json!({"state": state, "cwd": "/w", "updated": STAMP_S, "since": STAMP_S}), true);
+            f.claude_session(pid, json!({"sessionId": sid}));
+        }
+        // 찾은 pid 가 죽었고 대화 기록이 없는 기록은 종료 세션이라 기록 파일도 지운다
+        let gone = f.session("nt", json!({"state": "working", "cwd": "/w", "updated": STAMP_S, "since": STAMP_S}), false);
+        f.claude_session(888, json!({"sessionId": "nt"}));
+        let mut st = f.store();
+        let mut s = Settings::default();
+        let r = st.reload(&mut s, &Probe::default(), &dead_lookup_pids, false, LIVE_NOW);
+        for sid in ["w", "q", "i"] {
+            assert_eq!(session_of(&r.groups, sid).state, "ended", "{sid}");
+        }
+        // 지운 종료 세션은 목록에도 기록 파일도 없다
+        assert!(r.groups.iter().flat_map(|g| g.sessions.iter()).all(|x| x.id != "nt"));
+        assert!(!gone.exists());
+    }
+
+    #[test]
+    fn pidless_alive_or_missing_file_unchanged() {
+        let f = Fake::new();
+        // 찾은 pid 가 살아 있으면 기록 그대로, Claude Code 세션 파일이 없으면 이전처럼 산 것으로 본다
+        f.session("a", json!({"state": "waiting", "cwd": "/w", "updated": NOW, "since": NOW}), true);
+        f.claude_session(55, json!({"sessionId": "a"}));
+        f.session("b", json!({"state": "idle", "cwd": "/w", "updated": NOW, "since": NOW}), true);
+        f.session("c", json!({"state": "working", "cwd": "/w", "updated": NOW, "since": NOW}), true);
+        f.claude_session(56, json!({"sessionId": "c"}));
+        let mut st = f.store();
+        let mut s = Settings::default();
+        let r = st.reload(&mut s, &Probe::default(), &dead_lookup_pids, false, NOW);
+        for (sid, state) in [("a", "waiting"), ("b", "idle"), ("c", "working")] {
+            assert_eq!(session_of(&r.groups, sid).state, state, "{sid}");
+        }
+    }
+
+    #[test]
+    fn pidless_status_and_name_use_found_pid() {
+        let f = Fake::new();
+        let at = |v: f64| json!((v * 1000.0) as i64);
+        f.session("s", json!({"state": "waiting", "cwd": "/w", "updated": LIVE_NOW, "since": LIVE_NOW - 50.0}), true);
+        f.claude_session(55, json!({"sessionId": "s", "name": "발견-세션", "status": "busy", "statusUpdatedAt": at(LIVE_NOW - 1.0)}));
+        let mut st = f.store();
+        let mut s = Settings::default();
+        let r = st.reload(&mut s, &Probe::default(), &dead_lookup_pids, false, LIVE_NOW);
+        let x = session_of(&r.groups, "s");
+        // waiting 기록에 찾은 pid 의 busy status 가 겹쳐 작업 중이 되고, since 는 status 가 바뀐 시각
+        assert_eq!((x.state.as_str(), x.since), ("working", ms(LIVE_NOW - 1.0)));
+        // 이름도 찾은 pid 의 Claude Code 세션 파일에서 읽는다
+        assert_eq!(x.name.as_deref(), Some("발견-세션"));
+        // 찾은 pid 는 이름 캐시 정리(정리할 pid 목록)에서 남는다 — 기록 pid 0 말고 찾은 pid 55
+        assert_eq!(st.names.len(), 1);
+    }
+
+    #[test]
+    fn ended_record_does_not_look_up_pid() {
+        let f = Fake::new();
+        // 끝난 기록은 pid 를 찾지 않는다 — Claude Code 세션 파일이 있어도 이름·status 를 겹치지 않는다
+        f.session("e", json!({"state": "ended", "cwd": "/w", "updated": NOW, "since": NOW}), true);
+        f.claude_session(99, json!({"sessionId": "e", "name": "끝남-이름", "status": "busy", "statusUpdatedAt": 1000}));
+        let mut st = f.store();
+        let mut s = Settings::default();
+        let r = st.reload(&mut s, &Probe::default(), &|_| false, false, NOW);
+        assert_eq!(all(&r.groups), [("e", "ended")]);
+        assert_eq!(session_of(&r.groups, "e").name, None);
+    }
+
+    #[test]
+    fn record_with_pid_does_not_look_up_pid() {
+        let f = Fake::new();
+        // pid 가 있는 기록은 찾지 않는다 — Claude Code 파일이 다른 pid 에 있어도 기록의 pid 로 생사와 이름을 본다
+        f.session("r", json!({"state": "working", "pid": 42, "cwd": "/w", "updated": NOW, "since": NOW}), true);
+        f.claude_session(43, json!({"sessionId": "r", "name": "잘못-이름", "status": "busy", "statusUpdatedAt": 1000}));
+        let mut st = f.store();
+        let mut s = Settings::default();
+        // 기록 pid 42 는 산 것, 찾으면 나올 43 은 죽은 것으로 본다
+        let r = st.reload(&mut s, &Probe::default(), &|rec| rec.get("pid").and_then(Value::as_u64) != Some(43), false, NOW);
+        let x = session_of(&r.groups, "r");
+        assert_eq!(x.state, "working");
+        assert_eq!(x.name, None);
+    }
+
+    #[test]
+    fn context_cache_pruned_to_listed_sessions() {
+        let f = Fake::new();
+        // 끝난 세션도 목록에 남아 있는 동안에는 컨텍스트 캐시를 남긴다
+        f.session("a", json!({"state": "ended", "cwd": "/w", "updated": NOW}), true);
+        f.session("b", json!({"state": "idle", "pid": 20, "cwd": "/w", "updated": NOW, "since": NOW}), true);
+        f.session("c", json!({"state": "idle", "pid": 30, "cwd": "/w", "updated": NOW, "since": NOW}), true);
+        let ctx_dir = f.root.join("notifier").join("context");
+        fs::create_dir_all(&ctx_dir).unwrap();
+        for sid in ["a", "b", "c"] {
+            fs::write(ctx_dir.join(format!("{sid}.json")), format!(r#"{{"at":{NOW}}}"#)).unwrap();
+        }
+        let mut st = f.store();
+        let mut s = Settings::default();
+        st.reload(&mut s, &Probe::default(), &|_| true, false, NOW);
+        assert_eq!(st.contexts.cache_counts(), (3, 3));
+        // 목록에서 사라진 세션의 컨텍스트 캐시는 버린다 — 끝난 세션 몫이 쌓이지 않게
+        fs::remove_file(f.sessions.join("c.json")).unwrap();
+        st.reload(&mut s, &Probe::default(), &|_| true, false, NOW + 1.0);
+        assert_eq!(st.contexts.cache_counts(), (2, 2));
     }
 }

@@ -11,7 +11,7 @@ Claude Code hook 이 Python 스크립트를 실행해 세션 상태를 파일로
 
 ## 명령
 
-Xcode 프로젝트는 없다. 보드(`ClaudeBoard.swift`)는 내장 터미널 엔진(libghostty-spm) 때문에 저장소 맨 위 `Package.swift` 의 SwiftPM 실행 타깃으로 빌드하고(소스는 그 파일과 순수 규칙 라이브러리 `Sources/BoardRules/`, Command Line Tools 만으로 된다),
+Xcode 프로젝트는 없다. 보드(`Sources/ClaudeBoard/`)는 내장 터미널 엔진(libghostty-spm) 때문에 저장소 맨 위 `Package.swift` 의 SwiftPM 실행 타깃으로 빌드하고(소스는 그 폴더와 순수 규칙 라이브러리 `Sources/BoardRules/`, Command Line Tools 만으로 된다),
 나머지 Swift 파일은 하나가 실행 파일 하나이고 `swiftc` 로 바로 빌드한다. 시험은 `BoardRules` 의 Swift Testing 시험(`Tests/BoardRulesTests/`, `swift test`)과 md-render 플러그인의 `claude plugin test` 가 있고, 린트 설정은 없다.
 모든 `swift build`/`swift test`/`swift package` 에 `--disable-keychain`(빼면 엔진 내려받기에서 키체인 조회로 10분 넘게 멈춘다)과 `--triple`(배포 빌드와 같은 `.build` 를 쓰므로 생략한 빌드와 섞으면 오류)을 붙인다.
 
@@ -19,9 +19,11 @@ Xcode 프로젝트는 없다. 보드(`ClaudeBoard.swift`)는 내장 터미널 �
 # 빠른 확인 — 보드는 import GhosttyTerminal 때문에 swiftc -typecheck 를 못 쓰고 빌드로 확인한다(첫 빌드는 엔진 약 77 MB 를 내려받아 1분 남짓, 그 뒤 약 20초)
 swift build -c release --disable-keychain --triple "$(uname -m)-apple-macosx14.0"
 swift test --disable-keychain --triple "$(uname -m)-apple-macosx14.0" --toolset clt-testing.json   # BoardRules 시험. 끝 줄 "Test run with N tests" 의 N 이 0 보다 큰지 본다
+#  → Windows 판과 함께 쓰는 보드 규칙 표 rules-table/*.json 도 읽는다(RulesTableTests.swift, 꼴은 rules-table/README.md — 사람이 쓴 의도라 Swift 출력으로 만들지 않는다)
 #  → --toolset 은 Command Line Tools 만 있는 Mac 용(SwiftPM 이 CLT 의 Testing.framework 를 못 찾아 빼면 no such module 'Testing'). Xcode 가 있는 Mac 에서는 뺀다.
 #    같은 -F·-rpath 를 Package.swift 의 unsafeFlags 로 넣으면 시험이 0개 돌고 성공으로 끝나므로 toolset 파일로만 넣는다. 처음에는 앱·엔진까지 debug 로 빌드해 1분 남짓
 swiftc -typecheck ClaudeNotifier.swift
+swiftc -typecheck ClaudeAutopilot.swift   # 자율주행 엔진 — 아직 SwiftPM 밖 swiftc 단독 빌드(build-board.sh·make-dmg.sh 가 앱 Contents/MacOS/claude-autopilot 로)
 python3 -m py_compile state.py notify.py hooks.py board-tui.py   # 만들어진 __pycache__ 는 지운다
 python3 -I hook-table/gen.py && git diff --exit-code hook-table/   # hook 공유 시험 표 다시 만들기·차이 확인(Rust 쪽: cd windows && cargo test -p claude-board-core --test hook_table)
 claude plugin validate plugins/md-render --strict && claude plugin test plugins/md-render   # Claude Code 가 저장소 사본에 만드는 tsconfig.json 은 올리지 않는다
@@ -68,7 +70,7 @@ Claude Code hook ──> state.py  ──> ~/.claude/notifier/sessions/<session_
 
 | 파일 | 쓰는 쪽 | 읽는 쪽 |
 |---|---|---|
-| `sessions/<sid>.json` (`state`·`pid`·`tty`·`headless`·`cwd`·`project_dir`(claude 를 띄운 폴더 = hook 의 `CLAUDE_PROJECT_DIR`, cd·워크트리에도 그대로 — 보드·TUI 카드 묶음)·`topic`·`last_message`·`subagents`·`limit_hit`·`resume_cmd`·`transcript_path`·`model` …) | state.py | ClaudeBoard.swift, board-tui.py, notify.py(상태별 개수) |
+| `sessions/<sid>.json` (`state`·`pid`·`tty`·`headless`·`cwd`·`project_dir`(claude 를 띄운 폴더 = hook 의 `CLAUDE_PROJECT_DIR`, cd·워크트리에도 그대로 — 보드·TUI 카드 묶음)·`topic`·`last_message`·`subagents`·`limit_hit`·`resume_cmd`·`transcript_path`·`model` …) | state.py | 보드, board-tui.py, notify.py(상태별 개수) |
 | `sessions/<sid>.mute`, `mute-all`, `notify-position` | 보드 | notify.py |
 | `login-launch-off` | 보드 (설정 > 일반 > 로그인할 때 열기를 끌 때, LaunchAgent plist 도 지움) | `user-setup.sh` (있으면 LaunchAgent 를 등록하지 않음), `Uninstall.command` 가 지움 |
 | `sessions/<sid>.paused` | 보드 (일시중지 때, 업데이트·종료로 끊기는 보드 탭 세션에도) | state.py (새 요청이 오면 지움), 보드 (일시중지 카드·재개) |
@@ -82,14 +84,39 @@ Claude Code hook ──> state.py  ──> ~/.claude/notifier/sessions/<session_
 
 ### 실행 파일
 
-- `ClaudeBoard.swift` (약 10,100줄) — 보드 앱 전체. AppKit 창 위에 SwiftUI 화면을 얹었고 `// MARK:` 로 나뉜다.
+- `Sources/ClaudeBoard/` (17개 파일, 약 15,500줄 — 그 가운데 자율주행 `Autopilot.swift` 약 5,200줄) — 보드 앱 전체. AppKit 창 위에 SwiftUI 화면을 얹었다. 한 파일 `ClaudeBoard.swift` 이던 것을 2026-10-29 에
+  `tools/split-board.py` 로 맨 위 `// MARK: - ` 절마다 한 파일로 나눴다(코드는 옮기기만 했고 머리의 import 는 파일마다 같다. 자율주행 절은 가지 `autopilot-stage2` 에 main 을 합칠 때 같은 스크립트로 떨어졌다). 절 이름과 내용이 어긋난 곳이 있으니
+  (`BoardView` 는 `BrainrotMascots.swift`, `Store` 는 `LimitSwitching.swift`, `AppDelegate` 는 `SettingsScreen.swift`) 파일 이름보다 아래 표나 grep 으로 찾는다.
+
+  | 파일 | 절 | 들어 있는 것 |
+  |---|---|---|
+  | `BoardData.swift` | 데이터 | `Group` 별칭, 대화 기록·Claude Code 상태 읽기(`ModelReader`·`InterruptReader`·`ClaudeNames`·`ContextReader`), 세션 판정·사용량 진짜 어댑터, `UsageStore` |
+  | `AccountSwitching.swift` | 계정 전환 | 키체인·설정·저장 계정 진짜 어댑터, 로그인 창 `LoginWebWindow`, `AccountStore` |
+  | `LimitSwitching.swift` | 사용 한도 자동 전환 | `AutoSwitcher`, `appIcon`, `Palette`, `Store`, 시각 글자 `clock` |
+  | `StatusAnimation.swift` | 상태 표시 (애니메이션) | `AmbientTicker`, `StateIcon` |
+  | `BoardViews.swift` | 화면 | 사용량 줄(`UsagePanel`·`AccountChip`), 세션 줄(`SessionRow`·`SessionMenu`·`SubagentRow`), 카드 `GroupCard` |
+  | `Folding.swift` | 접기·펼치기 | 머리 단추, `ClickableIf` |
+  | `BoardFontScale.swift` | 보드 글자 크기 | `BoardFontScale` |
+  | `Hints.swift` | 힌트 | `HintPanel`, 바탕 `Backdrop`, 현장 감독 `Foreman`·말풍선 |
+  | `BrainrotMascots.swift` | 브레인롯 캐릭터 | `Mascot`·`BrainrotFigure`, 터미널 앱 `TerminalAppStore`, 터미널 독 `EdgeDock`, 창 투명도, 보드 화면 `BoardView` |
+  | `AppUpdate.swift` | 업데이트 | `Updater`(`releaseRepo`), `UpdateBanner` |
+  | `EmbeddedTerminal.swift` | 내장 터미널 | `TerminalHub`·`BoardTab`·`BoardSurface`·`BoardTerminalView`·`BoardRootView`·`PaneDivider`, `confirmShutdown`, `mdRenderDir`, `boardLog` |
+  | `Autopilot.swift` | 자율주행 | 뿌리 `autopilotRoot`, 실행·단위 모델(`APRun`·`APUnit`), `AutopilotStore`, 기록 저장소 읽기 `APRecords`, 보드 본체 줄(`APRunLine`·`APRunCard`·`APEndedLine`·`APBar`), 자율주행 중 `APRunningScreen`·지난 실행 `APHistoryScreen`, 출발 `APStart`·`APStartSheet`, 합치기·승격 `APMerge`·`APMergeSheet`, 엔진·git 부르기(`apEngine`·`apGit`) |
+  | `BoardWindow.swift` | 창 | `window`, `SizeGuard` |
+  | `BoardTiers.swift` | 창 크기 단계 | `BoardTier`·`BoardFit`, 미니 화면 `MiniBoard` |
+  | `KeyboardShortcuts.swift` | 단축키 | `Shortcuts`·`ShortcutSettings` |
+  | `SettingsScreen.swift` | 설정 화면 | `SettingsScreen`·`SettingsView`·`SettingsItem`·`LoginItem`, 다른 터미널·세션 조작 어댑터와 앱 함수(`driveSession` 등), `AppDelegate`(메뉴·메뉴 막대) |
+  | `main.swift` | (시작 코드) | 부작용 있는 전역 먼저 읽기, `--action` 넘기기, 한 번만 뜨는 잠금, `resolveResourceBundleInApp`, 앱 시작 |
+
+  한 모듈이라 다른 파일의 선언을 그대로 쓰지만 파일 범위 `private`·`fileprivate` 은 그 파일 안에서만 보인다. 최상위 실행문은 `main.swift` 에만 둘 수 있고,
+  다른 파일의 전역 `let`/`var` 는 처음 쓸 때 초기화된다 — 시작할 때 바로 초기화해야 하는 부작용 있는 전역(파일 읽기·쓰기 등)은 `main.swift` 맨 앞에서 먼저 읽는다(지금 `unfocusedSplitOpacity`·`mdRenderDir`).
   주요 부분: `Store`(1초마다 `scanSessions` 로 세션 상태를 정해 경로별 `Group` 으로 묶음), `UsageStore`(30초마다 사용량 조회·계정 전환 세대 확인·화면 갱신, 사용량 규칙은 BoardRules),
   `AccountStore`(계정 전환의 @Published 상태·큐·3초 감시·안내와 계정 추가 로그인 흐름, 전환 규칙은 BoardRules — 키체인 `Claude Code-credentials` 와 `~/.claude.json` 의 `oauthAccount` 를 `/usr/bin/security` 로 바꿔 끼우고, 저장 계정은 키체인 서비스 `Claude Board-account`)·`AutoSwitcher`(3초 타이머·UserDefaults·로그·이어 가기 터미널 조작, 판단은 BoardRules),
-  `Updater`(1시간 타이머·설정 읽기·알림 줄·`install.sh` 실행, 새 버전 판단은 BoardRules), 다른 터미널 포커스·조작과 세션 조작(`focusSession`·`activateOwner`·`driveSession`·`waitExit`·`pauseSession`·`stopSession`·`moveToBoard`·`resumeSession`·`openSession` —
+  `Updater`(1시간 타이머·설정 읽기·알림 줄·`install.sh` 실행, 새 버전 판단은 BoardRules), 다른 터미널 포커스·조작과 세션 조작(`focusSession`·`activateOwner`·`driveSession`·`waitExit`·`pauseSession`·`stopSession`·`moveToBoard`·`resumeSession`·`reopenEnded`·`openSession` —
   확인 창·`ghosttyQueue`·백그라운드·메인 큐·0.2초 타이머만 쥐고 판단은 BoardRules 의 `terminalControl`·`sessionControl`).
   창 크기에 따라 `BoardTier`(full·medium·mini)로 그린다. `$TMPDIR/claude-board.lock` 을 `flock` 해 한 번만 뜨고, 두 번째 실행은 `claude-board.show` 분산 알림만 보내고 끝난다.
-  `--action pause|resume|stop|reopen|focus <세션 id>` 는 떠 있는 보드에 `claude-board.action` 분산 알림으로 넘긴다(메뉴와 같은 함수).
-  `// MARK: - 내장 터미널` — 창 내용은 `BoardRootView`([터미널 영역 │ `PaneDivider` │ 보드]). `TerminalHub` 가 탭(`BoardTab`)을 쥐고,
+  `--action pause|resume|stop|reopen|focus <세션 id>`·`--action quit -`(install.sh 가 청하는 정상 종료 — ⌘Q 와 같은 확인 흐름, 받으면 `$TMPDIR/<instanceName>.quit` 에 `asking`, 확인 창에서 취소하면 `cancel`) 는 떠 있는 보드에 `claude-board.action` 분산 알림으로 넘긴다(메뉴와 같은 함수 — reopen 은 `reopenEnded`: 끝난 세션만, 이어서 진행 요청은 일시중지했던 세션에만. pause 는 메뉴 단추와 같은 `isPausable`: 작업 중·승인 대기만).
+  `EmbeddedTerminal.swift`(내장 터미널) — 창 내용은 `BoardRootView`([터미널 영역 │ `PaneDivider` │ 보드]). `TerminalHub` 가 탭(`BoardTab`)을 쥐고,
   탭(화면)마다 그 폴더의 로그인 셸을 띄우고, claude 명령은 셸의 줄 편집이 시작되면 그 셸에 붙여넣기 + Return 으로 넣는다(`BoardSurface.type`, claude 가 끝나면 셸 프롬프트로 남고 셸을 exit 하면 탭을 닫음.
   새 세션은 `--session-id`, 모든 길에 탭 이름을 `--name` 으로 붙이고 ⇧⌘R 은 `/rename` — `named`·`applyRenames`). `pair` 가 세션 파일의 `tty` = 탭 tty(headless 는 pid 조상이 탭)로 짝짓고
   `place` 가 보드 탭·다른 터미널·백그라운드·끝남을 가른다(규칙은 BoardRules 의 `pairTabs`·`sessionPlace`, 여기서는 화면 값을 떠 넘기고 결과를 화면·@Published 에 씀) — 세션 파일 약속은 그대로. 쥔 탭 목록은 UserDefaults `terminalTabs` 에 바뀔 때마다 남기고 다시 뜰 때 `restoreTabs` 가 resume_cmd 로 이어 연다.
@@ -97,22 +124,22 @@ Claude Code hook ──> state.py  ──> ~/.claude/notifier/sessions/<session_
   `confirmShutdown`(업데이트·종료 전 확인, 끊기는 탭의 주 세션에 `.paused`), `driveSession`(보드 탭은 탭에 직접, Ghostty 는 AppleScript — 길은 `TerminalControl.driveRoute`),
   `mdRenderDir`·`mdRenderCommand`(md-render 를 `~/.claude/notifier/plugins/` 로 옮기고 `--plugin-dir` 을 한 번만 붙임, 끈 세션은 `mdRenderOff`). 보드 쪽 문제는 `~/.claude/notifier/board.log`.
   설계·결정·실측은 `docs/내장 터미널/설계.md`(11장 단계별 메모) — 이 기능을 바꿀 때 먼저 본다.
-  `// MARK: - 설정 화면` — 앱 메뉴 > 설정…(⌘,)이 터미널 영역을 덮는 `SettingsView`(`SettingsHostingView` 에 얹음, 열고 닫기는 `SettingsScreen`). 항목은 `SettingsItem` 표 하나에서 그리고 검색도 이 표로 한다.
-  `// MARK: - 단축키` — `Shortcuts`(사용자가 바꾼 키를 얹은 표를 @Published 로 쥐고 UserDefaults `shortcuts`·메뉴 키 달기·Carbon 전역 단축키·키 감시의 NSEvent 분기)·`ShortcutSettings`(키 받기),
+  `SettingsScreen.swift`(설정 화면) — 앱 메뉴 > 설정…(⌘,)이 터미널 영역을 덮는 `SettingsView`(`SettingsHostingView` 에 얹음, 열고 닫기는 `SettingsScreen`). 항목은 `SettingsItem` 표 하나에서 그리고 검색도 이 표로 한다.
+  `KeyboardShortcuts.swift`(단축키) — `Shortcuts`(사용자가 바꾼 키를 얹은 표를 @Published 로 쥐고 UserDefaults `shortcuts`·메뉴 키 달기·Carbon 전역 단축키·키 감시의 NSEvent 분기)·`ShortcutSettings`(키 받기),
   표와 판정은 BoardRules 의 `ShortcutTable`(메뉴·안내 글자도 여기서 읽음). 로그인할 때 열기는 `LoginItem`(LaunchAgent plist 를 쓰고 지우고, 끄면 `login-launch-off` 표지).
-  `// MARK: - 자율주행` — `AutopilotStore` 가 자율주행 뿌리(시험 빌드는 `Claude Board Dev`)의 `runs/` 와 `private/records.sqlite`(읽기 전용)를 읽어 실행 줄·자율주행 중·지난 실행 화면을 그리고, 일시정지·재개·중단은 `control.json` 으로 남긴다. 출발 준비 시트(`APStart`, 지금은 지난 실행 이어 가기만)가 출발 전 실행 폴더를 쓰고 앱 안 엔진의 `status --json`·`prerun`·`start` 를 부른다. 합치기·승격 시트(`APMerge`)는 끝난 실행의 승격 차례 단계를 git 읽기로 미리 보이고(바뀐 줄·충돌) 사람이 누를 때만 엔진 `finish` 를 부른다. 원래 작업 트리로 도는 경로에 보드 탭 새 세션을 열면 `startSession` 이 경고한다. 설계는 `docs/자율주행/설계.md`.
+  `Autopilot.swift`(자율주행) — `AutopilotStore` 가 자율주행 뿌리(시험 빌드는 `Claude Board Dev`)의 `runs/` 와 `private/records.sqlite`(읽기 전용)를 읽어 실행 줄·자율주행 중·지난 실행 화면을 그리고, 일시정지·재개·중단은 `control.json` 으로 남긴다. 출발 준비 시트(`APStart`, 지금은 지난 실행 이어 가기만)가 출발 전 실행 폴더를 쓰고 앱 안 엔진의 `status --json`·`prerun`·`start` 를 부른다. 합치기·승격 시트(`APMerge`)는 끝난 실행의 승격 차례 단계를 git 읽기로 미리 보이고(바뀐 줄·충돌) 사람이 누를 때만 엔진 `finish` 를 부른다. 원래 작업 트리로 도는 경로에 보드 탭 새 세션을 열면 `startSession` 이 경고한다. 설계는 `docs/자율주행/설계.md`.
 - `Sources/BoardRules/` — 보드의 순수 규칙 라이브러리(Foundation 만): 세션·서브에이전트·카드 모델(`Session`·`Sub`·`Group`·`Ctx`·`Brain`), 세션 기록 해석(`Sub.parse`·`sessionID`), 카드에 보일 세션·묶음·정렬(`visibleSessions`·`groupSessions`·`sortGroups`), 화면 경로의 홈 줄이기(`displayPath`), 요금제 사용량(`Usage.swift`: `Limit`·응답 해석 `parseUsage`·토큰 상태 `loginToken`·캐시를 믿을지·받을지 `checkUsageCache`·받기 `fetchUsage`·받은 결과 처리 `settleUsage`, 앱도 쓰는 `isoDate`),
   계정 전환(`Accounts.swift`: `Account`(만료는 `isExpired(at:)`)·저장 계정 목록 해석과 고치기·전환 JSON 변환 `replacingAccountToken`·`switchConfig`·저장 `storeAccount`·`saveCurrentAccount`·전환 `switchAccount`·지우기 `removeAccount`),
   자동 전환 판단(`AutoSwitch.swift`: `decideAutoSwitch` — 한도 세션·전환 까닭·다음 계정과 한도 표시·이어 갈 세션을 값으로 돌려준다),
   다른 터미널 조작(`Terminals.swift`: 세션이 도는 곳 `SessionPlace`, 조상 앱 번들 id → `terminalKind`, AppleScript 글자 `ghosttySendScript`·`ghosttyFindScript`·`ghosttyFocusScript`·`ttyFocusScript`·`ttyCountScript`(바이트까지 시험이 고정),
   `TerminalControl` — 세션을 띄운 앱 `owner`(세션마다 기억)·`canDrive`·조작 길 `driveRoute`(보드 탭 먼저, 다음 Ghostty)·`focusRoute`·Ghostty 표지 제목 찾기 `ghosttyTerminalId`·`focusGhostty`·`focusByTty`),
   보드 탭 짝짓기·자리(`TabPairing.swift`: 화면 값 `TabScreen` → `pairTabs`(tty 짝·headless 조상·셸만 남은 화면·넘긴 작업 따라가기·경로 상태 점, 결과 `TabPairing`)·자리 `sessionPlace`·`parkedScreen`·`shownSessionPlace`),
-  세션 조작 순서(`SessionControl.swift`: 단계 `SessionSteps`·`carryOnPrompt`·일시중지 표지 `pausedMarkData`·끝나기 기다리기 한 번의 판단 `exitWait`, `SessionControl` 의 `pause`·`resumePaused`·`stop`·`moveToBoard`·`reopen`·`open`),
+  세션 조작 순서(`SessionControl.swift`: 단계 `SessionSteps`(살아 있는 세션 재개 `resume` 은 줄바꿈 + `resumePrompt` — 첫 출력 전에 멈춰 입력 칸에 되돌아온 요청 아래 줄에 붙는다)·꺼진 세션 이어 열기의 첫 요청 `carryOnPrompt`·일시중지할 응답이 있는가 `isPausable`·일시중지 표지 `pausedMarkData`·끝나기 기다리기 한 번의 판단 `exitWait`, `SessionControl` 의 `pause`·`resumePaused`·`stop`·`moveToBoard`·`reopen`·`reopenEnded`·`open`),
   업데이트 판단(`Updates.swift`: VERSION 본문 검증 `releaseVersion`·새 버전인지 `isNewerVersion`·확인하는 빌드 `updateEligible`·결과 `UpdateCheckResult`(손으로 확인한 안내 `notice`)·유스케이스 `checkForUpdate`),
   단축키 판정(`Shortcuts.swift`: 수정키 `KeyModifiers`(raw 값이 `NSEvent.ModifierFlags` 와 같고 보드 설정 `shortcuts` 에 그대로 남으므로 동작 id 처럼 바꾸지 않는다)·키 `KeyCombo`(`label`·`menuKey`)·
   동작 표와 사용자가 바꾼 키 `ShortcutTable`(`combo`·`set`·`conflicts`·`actionID`)·키 받기 판정 `recordShortcut`·시스템 단축키와 겹침 `systemShortcutTaken`).
-  보드가 `import BoardRules` 로 쓰고, SwiftUI 와 겹치는 `Group` 은 `ClaudeBoard.swift` 의 별칭이 이것을 가리킨다. 규칙을 바꾸면 `Tests/BoardRulesTests/` 의 입력·기대값 표도 함께 고친다(이슈 #9).
-  포트·어댑터: 세션 상태 판정 `scanSessions`(`SessionScan.swift`)는 바깥을 포트(`Ports.swift`: `SessionRecords`·`ProcessProbe`·`ClaudeLive`·`Transcripts`·`ContextUsage`·`Clock`)로만 부른다 — 포트는 BoardRules, 진짜 어댑터는 `ClaudeBoard.swift`(`SessionFiles`·`SystemProcesses`·`TranscriptFiles`·`ClaudeNames`·`ContextReader`·`SystemClock`, mtime 캐시도 어댑터에), 가짜 어댑터는 `Tests/` 에만 둔다.
+  보드가 `import BoardRules` 로 쓰고, SwiftUI 와 겹치는 `Group` 은 보드 `BoardData.swift` 의 별칭이 이것을 가리킨다. 규칙을 바꾸면 `Tests/BoardRulesTests/` 의 입력·기대값 표와, 그 규칙이 맨 위 `rules-table/`(Windows 판과 함께 쓰는 표)에 있으면 그 줄도 함께 고친다(이슈 #9 — 한 판만의 차이는 줄에 `only` 와 까닭).
+  포트·어댑터: 세션 상태 판정 `scanSessions`(`SessionScan.swift`)는 바깥을 포트(`Ports.swift`: `SessionRecords`·`ProcessProbe`·`ClaudeLive`·`Transcripts`·`ContextUsage`·`Clock`)로만 부른다 — 포트는 BoardRules, 진짜 어댑터는 보드 `BoardData.swift`(`SessionFiles`·`SystemProcesses`·`TranscriptFiles`·`ClaudeNames`·`ContextReader`·`SystemClock`, mtime 캐시도 어댑터에), 가짜 어댑터는 `Tests/` 에만 둔다.
   사용량 규칙도 같은 방식으로 `UsageCache`(`/tmp/.claude-usage-cache.json`, 상태줄과 함께 쓰는 약속)·`LoginCredentials`(키체인 로그인 정보)·`UsageAPI`·`Clock` 포트로만 부른다 — 진짜 어댑터는 `UsageCacheFile`·`KeychainCredentials`·`OAuthUsageAPI`(상태 없는 struct).
   계정 전환 규칙은 `KeychainItems`(키체인 일반 암호 항목, 자리는 `KeychainItem`)·`ClaudeConfig`(`~/.claude.json`)·`SavedAccountList`(`~/.claude/notifier/accounts.json`)·`CredentialsWriteLock`(`~/.claude/.storage-write`)·`Clock` 포트로만 부른다(묶음 `AccountPorts`) —
   진짜 어댑터는 `SystemKeychain`(`Keychain` enum 의 security 명령·16진수·ASCII JSON 그대로)·`ClaudeConfigFile`·`SavedAccountsFile`·`StorageWriteLock`, 로그인 정보 항목 자리는 앱의 `claudeLoginItem()`(서비스 해시·`$USER`).
@@ -140,7 +167,8 @@ Claude Code hook ──> state.py  ──> ~/.claude/notifier/sessions/<session_
   다섯 파일만 build-board.sh·make-dmg.sh 가 이름으로 골라 싣는다(두 곳을 함께 고친다). `tests/` 는 `claude plugin test` 용이라 싣지 않는다.
 - `packaging/THIRD_PARTY_NOTICES.txt` — 앱에 정적으로 들어간 구성 요소(엔진과 그 안의 MIT 아닌 것까지)의 고지. 두 스크립트가 `Contents/Resources/` 에 복사한다. 엔진 버전을 올리면 다시 만든다.
 - 설치 경로는 두 가지다: `packaging/install.sh`(curl 설치·업데이트, 보드의 업데이트 단추도 이것을 실행)와 dmg 안의 pkg(`pkg/scripts/postinstall` → `user-setup.sh`). 둘 다 사용자 설정은 앱 안의 `user-setup.sh` 가 맡는다.
-- 저장소 `suhojang/claude-board` 와 릴리스 파일 이름 `ClaudeBoard.zip`·`install.sh`·`VERSION` 은 `release.sh`·`install.sh`·`ClaudeBoard.swift`(`releaseRepo`) 가 함께 쓴다 — 이름을 바꾸면 이미 설치된 앱의 업데이트가 깨진다.
+  `install.sh` 차례: 받기·서명 확인 → 보드와의 관계 `board_relation`(조상의 설치된 보드 바로 아래가 탭의 `login` 이면 `tab`, 아니면 `updater`(보드 → `bash -c`), 조상에 없으면 `outside`) → `outside` 이고 보드가 떠 있으면 바꿔 끼우기 전에 지금 깔린 앱으로 `--action quit -` 을 보내 정상 종료를 청한다(`ask_board_quit`: 5초 안에 `asking` 이 없으면 요청을 모르는 옛 보드라 3단계에서 `pkill`, 있으면 꺼질 때까지 10분까지 기다리고 `cancel` 이면 아무것도 바꾸지 않고 멈춤) → 바꿔 끼우기 → `updater` 는 `pkill -a`(보드가 이미 확인 창을 거침), `outside` 는 남은 것 `pkill -x` → `user-setup.sh` 가 LaunchAgent 를 `bootout`·`bootstrap` 해 새 앱을 띄운다. `tab` 이면 보드를 끄지 않고 `CLAUDE_BOARD_KEEP_RUNNING` 으로 `user-setup.sh` 의 `launchctl`·`open` 도 건너뛴다(LaunchAgent 로 뜬 보드는 `bootout` 이 확인 없이 끄고, 그 안에서 돌던 설치도 함께 끊긴다).
+- 저장소 `suhojang/claude-board` 와 릴리스 파일 이름 `ClaudeBoard.zip`·`install.sh`·`VERSION` 은 `release.sh`·`install.sh`·`Sources/ClaudeBoard/AppUpdate.swift`(`releaseRepo`) 가 함께 쓴다 — 이름을 바꾸면 이미 설치된 앱의 업데이트가 깨진다.
 - `install.sh` 는 서명 인증서의 SHA1(`CERT_SHA1`)을 고정해 확인한다. 인증서를 바꾸면 기존 사용자의 업데이트가 거부되고 Ghostty 제어 권한을 다시 묻는다.
 
 ## 저장소 관례
@@ -148,6 +176,10 @@ Claude Code hook ──> state.py  ──> ~/.claude/notifier/sessions/<session_
 - `.gitignore` 는 `/*` 로 모두 빼고 `!/<이름>` 으로 올릴 파일만 고르는 방식이다. 최상위에 새 파일을 만들면 여기에 추가해야 추적된다. `dist/` 의 빌드 결과는 올리지 않는다.
 - 사용자에게 보이는 기능이 바뀌면 `CHANGELOG.md`(바뀜·추가·고침), `README.md`, `packaging/README.txt`(설치 가이드 — 모든 기능의 자세한 설명)를 함께 고친다.
 - 릴리스 커밋 메시지는 `<버전> 릴리스 — <요약>` 형식이다.
+- 보드가 한 파일(`ClaudeBoard.swift`)이던 때 갈라진 가지(자율주행 `autopilot-stage2` 등 — `autopilot-stage2` 는 2026-10-29 에 이 절차로 합쳤다)에 main 을 합칠 때는 나누기 커밋(`git log --diff-filter=D --format=%h -1 main -- ClaudeBoard.swift`)을 따로 합친다:
+  ① 나누기 직전 커밋(`<나누기 커밋>^`)까지 보통으로 합친다. ② 나누기 커밋을 합친다 — `ClaudeBoard.swift` 수정/삭제 충돌이 나면 작업 트리에 남은 그 가지 쪽(①까지 합친) `ClaudeBoard.swift` 로
+  `python3 -I tools/split-board.py` 를 돌려 `Sources/ClaudeBoard/` 를 다시 만들고 `git rm ClaudeBoard.swift`·`git add Sources/ClaudeBoard` 뒤 합치기를 마친다(`Package.swift` 등은 보통으로).
+  스크립트가 표에 없는 전역·`main.swift` 밖 최상위 실행문을 알리거나 빌드가 `private` 로 막히면 그 가지에서 스크립트 표(`EAGER`·`LAZY`·`ACCESS`)를 넓혀 다시 돌린다. ③ 그 뒤 main 을 마저 합친다.
 - 사용자에게 보이는 글자(앱 화면 문자열·README·CHANGELOG·설치 가이드)에는 긴 줄표(—)를 쓰지 않는다. 문장을 나누거나 쉼표·쌍점·괄호·가운뎃점으로 쓴다. 코드 주석·설계 문서는 그대로 써도 된다.
 
 ## Windows 판 (windows/)

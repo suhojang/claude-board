@@ -3,10 +3,14 @@
 //! 인자 없음 = 보드(트레이·단일 실행·전역 단축키). `--notify …` = 알림 패널 하나만 띄우고 끝나는 별도 프로세스.
 //! 경로는 모두 `claude_board_core::paths` 를 거친다 — `CLAUDE_BOARD_HOME`·`CLAUDE_BOARD_NOTIFIER_DIR` 로 가짜 홈을 쓸 수 있다.
 
+mod account_login;
 mod accounts;
 mod autoswitch;
 mod board;
 mod drive;
+mod hotkeys;
+mod login_item;
+mod login_output;
 mod mdrender;
 mod model;
 mod notify;
@@ -15,6 +19,8 @@ mod proc_wait;
 mod pty;
 mod readers;
 mod ring;
+#[cfg(test)]
+mod rules_table;
 mod session_action;
 mod settings;
 mod shutdown;

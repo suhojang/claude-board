@@ -20,6 +20,7 @@
   import PaneDivider from "$lib/terminal/PaneDivider.svelte";
   import TerminalAreaView from "$lib/terminal/TerminalAreaView.svelte";
   import ShutdownList from "$lib/terminal/ShutdownList.svelte";
+  import SettingsView from "$lib/settings/SettingsView.svelte";
   import TerminalNotice from "$lib/terminal/TerminalNotice.svelte";
   import { setDragging, startHub } from "$lib/terminal/hub.svelte";
   import { clampBoardWidth, boardMinWidth, maxBoardWidth } from "$lib/terminal/paneLayout";
@@ -232,6 +233,8 @@
     <!-- 접어도 언마운트하지 않고 숨긴다 — 셸과 출력이 그대로 남는다 -->
     <div class="termPane" class:hidden={!expanded}>
       <TerminalAreaView {expanded} {side} />
+      <!-- 설정 화면 — 터미널 영역을 덮는다. 떠 있지 않으면 아무것도 그리지 않는다 -->
+      <SettingsView />
     </div>
     {#if expanded}
       <PaneDivider root={rootEl} {side} min={boardMinWidth} max={maxBoard} onresize={resizeBoard} oncommit={commitBoard} />
@@ -353,6 +356,7 @@
     pointer-events: none;
   }
   .termPane {
+    position: relative;
     flex: 1 1 0;
     min-width: 0;
     height: 100%;

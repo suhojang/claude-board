@@ -586,3 +586,58 @@ private let handoffRows: [HandoffRow] = [
         #expect(w.transcripts.called("handoff") == ["/t/noid.jsonl"])
     }
 }
+
+// MARK: - 공유 규칙 표(rules-table/session-scan.json·sessions-group.json) — RulesTableTests 가 이 파일의 가짜(World)로 돌린다.
+// World·FakeProcesses·FakeLive 는 다른 시험 파일의 private 이름과 겹쳐 internal 로 넓히면 다시 선언 오류가 나므로, 넘겨 주는 함수만 둔다.
+// 기록(record)은 세션 파일 JSON 그대로이고 since·updated 만 표의 꼴(지금 = 0 기준 초)에서 1970 기준 초(t0 + 값)로 바꾼다
+
+/// 표의 세션 기록 하나를 World 에 넣는다 — 진짜처럼 JSON 으로 한 번 풀어 넣고, 대화 기록이 있으면 가짜 locate 가 주는 자리를 있는 것으로
+private func addTableRecord(_ w: World, file: String, record: [String: Any], transcript: Bool) {
+    var j = record
+    for k in ["since", "updated"] { if let v = j[k] as? NSNumber { j[k] = epoch(v.doubleValue) } }
+    let json = try! JSONSerialization.jsonObject(with: JSONSerialization.data(withJSONObject: j)) as! [String: Any]
+    w.records.items.append(SessionRecord(name: file, file: "/s/\(file)", json: json))
+    if transcript {
+        w.transcripts.existing.insert(w.transcripts.locate(given: json["transcript_path"] as? String, cwd: json["cwd"] as? String ?? "?",
+                                                           session: sessionID(json, fileName: file)))
+    }
+}
+
+/// scan 한 줄 — 세션 기록 하나를 판정해 목록에 남았는지와 그 상태.
+/// procs 는 pid → .alive·.gone(ESRCH)·.denied(EPERM — 위 표의 Pid.denied 처럼 gone·denied 둘 다 넣어 isGone 이 false), 표에 없는 pid 는 gone.
+/// claudeSessions 는 ~/.claude/sessions/<pid>.json(그 파일의 sessionId, mtime 이 지금보다 age 초 전). 같은 sessionId 가 여럿이면 가장 최근에
+/// 고쳐 쓴 것(age 가 작은 것, 같으면 앞의 것) — 이 고르기는 BoardRules 가 아니라 앱의 진짜 어댑터 ClaudeNames.pid(forSession:)(BoardData.swift)
+/// 몫이라 가짜가 그대로 흉내 낸다(포트 ClaudeLive.pid(forSession:) 는 pid 하나만 준다)
+func runScanRow(file: String, record: [String: Any], transcript: Bool, claudeSessions: [(pid: Int32, sessionId: String, age: Double)],
+                procs: [Int32: Pid], paused: Bool) -> (kept: Bool, state: String?) {
+    let w = World()
+    addTableRecord(w, file: file, record: record, transcript: transcript)
+    var newest: [String: Double] = [:]
+    for c in claudeSessions where !c.sessionId.isEmpty {
+        if let age = newest[c.sessionId], age <= c.age { continue }
+        newest[c.sessionId] = c.age
+        w.live.sessionPids[c.sessionId] = c.pid
+    }
+    var pids = Set(claudeSessions.map(\.pid)).union(procs.keys)
+    if let p = (record["pid"] as? NSNumber)?.int32Value { pids.insert(p) }
+    for pid in pids {
+        switch procs[pid] ?? .gone {
+        case .gone: w.processes.gone.insert(pid)
+        case .denied: w.processes.gone.insert(pid); w.processes.denied.insert(pid)
+        case .alive, .absent: break
+        }
+    }
+    if paused { w.records.paused.insert(sessionID(w.records.items[0].json, fileName: file)) }
+    let s = w.scan().sessions.first { $0.file == "/s/\(file)" }
+    return (s != nil, s?.state)
+}
+
+/// group 한 판 — 앱(Store.reload)과 같은 차례로 scanSessions → visibleSessions(넘긴 세션·탭이 따라가는 세션 없음) → groupSessions → sortGroups.
+/// 앱의 지운 카드 숨기기(hiddenGroups)·조용한 카드 접기(foldQuiet)는 앱 상태라 뺀다. 대화 기록은 모두 있다
+func runGroupRows(records: [(file: String, record: [String: Any])], pinned: [String]) -> [(id: String, sessions: [String])] {
+    let w = World()
+    for r in records { addTableRecord(w, file: r.file, record: r.record, transcript: true) }
+    let scan = w.scan()
+    let groups = sortGroups(groupSessions(visibleSessions(scan.sessions, handedTo: scan.handedTo, parkedFrom: [])), pinned: pinned)
+    return groups.map { ($0.id, $0.sessions.map(\.id)) }
+}

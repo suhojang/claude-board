@@ -43,13 +43,20 @@ export const TYPED_WINDOW_MS = 3000;
 const typedRecently = (surface: BoardSurface, now: number): boolean =>
   surface.typedAt != null && now - surface.typedAt < TYPED_WINDOW_MS;
 
+/** 같은 tty 로 짝지어 온 끝나지 않은 세션 둘 가운데 a 가 화면의 주 세션인가 — 마지막 hook 기록(updated)이 늦은
+ *  쪽, 같으면 화면에 온 지 더 오래된(since 가 늦은) 쪽, 그것마저 같으면 세션 id 글자 차례의 뒤 쪽. 세션 목록
+ *  차례와 관계없이 정해진다(mac TabPairing.ttyWinner) */
+const ttyWinner = (a: Session, b: Session): boolean =>
+  a.updated > b.updated
+  || (a.updated === b.updated && (a.since > b.since || (a.since === b.since && a.id > b.id)));
+
 /**
  * 세션을 화면들과 짝짓는다 — mac ClaudeBoard.swift TerminalHub.pair 의 순수 판. 끝난 세션은 짝짓지 않는다:
  * /clear 로 id 만 바뀐 세션이 같은 콘솔(pid)을 다시 쓰므로, 끝난 옛 id 를 화면에 묶어 두면 잘못된 자리가 된다.
  *
- * 1.(tty 짝) 사는 세션의 tty 가 화면 termId 와 같으면 그 화면 소속(paired)이고 화면의 주 세션(main)이다.
- *   화면 sessionId 가 다르면 sessionId 고침을 내놓는다(/clear 로 id 가 바뀌었거나 셸에서 사람이 띄운 claude 도
- *   그 화면의 세션 id 가 따라간다).
+ * 1.(tty 짝) 사는 세션의 tty 가 화면 termId 와 같으면 그 화면 소속(paired)이다. 같은 tty 로 짝지어 온 세션이
+ *   여럿이면 주 세션(main)은 (updated, since, id) 사전식 큰 쪽 하나뿐이고, 각 화면의 sessionId 고침은 주인만
+ *   낸다(/clear 로 id 가 바뀌었거나 셸에서 사람이 띄운 claude 도 그 화면의 세션 id 가 따라간다).
  * 2.(탭 자손) 사는 headless 세션의 tabAncestor(조상)가 화면 termId 를 가르키면 그 화면 소속 + owned
  *   (화면이 닫히면 함께 끝난다 — claude 가 Bash 도구로 띄운 claude -p).
  * 3.(화면 고침) 명령이 없는 셸 화면에 주 세션(mode 없는 대화형)이 짝지어 오면 command = "claude" 고침; 주 세션도 없고
@@ -67,15 +74,22 @@ export function pairSessions({ sessions, surfaces, runsClaude, now = Date.now() 
     if (surface.termId !== null) byTermId.set(surface.termId, surface);
   }
 
-  // 규칙 1 — tty 짝과 화면의 주 세션
+  // 규칙 1 — tty 짝과 화면의 주 세션. 같은 tty 로 짝지어 온 끝나지 않은 세션이 여럿이면 ttyWinner 로 주인을
+  // 하나 고른다 — 짝지어 온 세션은 paired 에 모두 남는다. 세션 목록 차례와 관계없이 정해진다
   const main = new Map<string, Session>(); // 화면 id -> 그 화면에서 도는 주 세션
   for (const session of sessions) {
     if (session.state === "ended" || !session.tty) continue;
     const surface = byTermId.get(session.tty);
     if (!surface) continue; // tty 가 모르는 termId 를 가르키면 짝짓지 않는다
     paired[session.id] = surface.id;
+    const held = main.get(surface.id);
+    if (held !== undefined && !ttyWinner(session, held)) continue; // 주인이 아니면 paired 에만 남는다
     main.set(surface.id, session);
-    if (surface.sessionId !== session.id) {
+  }
+  // 화면 sessionId 는 주 세션을 따라간다(/clear 로 id 가 바뀌었거나 셸 프롬프트에서 사람이 띄운 claude 도)
+  for (const surface of surfaces) {
+    const session = main.get(surface.id);
+    if (session !== undefined && surface.sessionId !== session.id) {
       changes.push({ kind: "sessionId", surfaceId: surface.id, sessionId: session.id });
     }
   }
@@ -110,8 +124,9 @@ export function pairSessions({ sessions, surfaces, runsClaude, now = Date.now() 
 
 /**
  * 세션이 어디서 도는지 가른다 — mac ClaudeBoard.swift TerminalHub.place. 자리는 세 가지로 본다:
- * 짝짓기 표(paired) · 화면이 기억하는 세션 id(끝난 세션은 그 화면에서 claude 가 막 뜨는 중(runsClaude)일 때만
- * 탭 소속 — 이어 열기를 넣은 직후의 찰나) · 그 밖은 ended·background·terminal.
+ * 짝짓기 표(paired) · 화면이 기억하는 세션 id(그 화면에서 claude 가 막 뜨는 중(runsClaude)이거나 3초 안에
+ * claude 명령을 쳤을 때만 탭 소속 — 끝난 세션도, 화면에 옛 id 만 남은 살아 있는 세션도 같은 문지기를 지난다)
+ * · 그 밖은 ended·background·terminal.
  *
  * pairing 은 pairSessions 의 결과(또 hub 가 적용하고 남긴 paired·owned 상태다). surfaces 는 hub 가 changes 를
  * 적용한 뒤의 화면들(화면 sessionId 가 따라간 뒤)이어야 옛 id·새 id 를 정확히 가른다.
@@ -124,12 +139,12 @@ export function placeOf(
   now: number = Date.now(),
 ): SessionPlace {
   const runningTerms = new Set<TermId>(runsClaude ?? []);
+  // 화면 기억 세션 id 는 그 화면에서 claude 가 도는 중(runsClaude)이거나 3초 안에 claude 명령을 쳤을 때만
+  // 붙는다 — 끝난 세션(이어 열기 직후의 찰나)도, 화면에 옛 id 만 남은 살아 있는 세션도 같은 문지기를 지난다
   const held = surfaces.find(
     (surface) =>
       surface.sessionId === session.id
-      && (session.state !== "ended"
-        || (surface.termId !== null && runningTerms.has(surface.termId))
-        || typedRecently(surface, now)),
+      && ((surface.termId !== null && runningTerms.has(surface.termId)) || typedRecently(surface, now)),
   );
   const surfaceId: string | undefined = pairing.paired[session.id] ?? held?.id;
   if (surfaceId !== undefined) {

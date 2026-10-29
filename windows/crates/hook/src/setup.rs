@@ -15,6 +15,7 @@ const RUN_VALUE: &str = "ClaudeBoard";
 const BOARD_CMD: &str = "claude-board.cmd";
 const TUI_CMD: &str = "claude-board-tui.cmd";
 const OLD_PREFIX: &str = "claude-board-hook.old-";
+const BROKEN_PREFIX: &str = "accounts.json.broken-";
 
 /// macOS 개발 기기에서는 macOS 판이 쓰는 ~/.claude 를 덮어쓰지 않도록 환경변수로 폴더를 바꿨을 때만 허락한다.
 fn guard() -> Result<(), ExitCode> {
@@ -149,15 +150,53 @@ fn run_setup(app: &Path) -> Result<(), String> {
         println!("  명령: {}", p.display());
     }
 
-    // 5) 로그인할 때 자동 실행
+    // 5) 로그인할 때 자동 실행 — 설정 > 일반에서 끈 사람(표지 파일 login-launch-off)은 등록하지 않는다(mac user-setup.sh 6)
     #[cfg(windows)]
-    {
-        let value = format!("\"{}\" --background", app.display());
-        registry::set_run(RUN_VALUE, &value).map_err(|e| format!("자동 실행을 등록하지 못했습니다: {e}"))?;
-        println!("  자동 실행: HKCU\\{}\\{RUN_VALUE}", registry::RUN_KEY);
-    }
+    println!("  {}", register_login_launch(app, &paths::login_launch_off_file(), paths::overridden(), &registry::Real)?);
     println!("설정을 마쳤습니다.");
     Ok(())
+}
+
+/// 로그인할 때 자동 실행을 등록해야 하는가 — 표지 파일 `login-launch-off` 가 없을 때만(처음 설치는 켠 채로 시작한다).
+#[cfg_attr(not(windows), allow(dead_code))]
+fn login_launch_wanted(off_mark: &Path) -> bool {
+    !off_mark.exists()
+}
+
+/// 시작 프로그램 값(HKCU\…\Run)을 쓰고 지우는 곳 — 시험은 가짜를 넣는다.
+#[cfg_attr(not(windows), allow(dead_code))]
+trait RunSink {
+    fn set(&self, name: &str, value: &str) -> io::Result<()>;
+    /// 값을 지운다. 없으면 성공.
+    fn delete(&self, name: &str) -> io::Result<()>;
+}
+
+/// setup 5단계 — 등록하거나 지우고, 화면에 낼 한 줄을 돌려준다.
+/// `redirected`(CLAUDE_BOARD_HOME·CLAUDE_BOARD_NOTIFIER_DIR 로 폴더를 바꾼 실행)면 표지 파일은 바뀐 폴더에서 읽되
+/// 진짜 Run 값은 쓰지도 지우지도 않는다 — 시험·격리 실행이 설치된 보드의 자동 실행을 건드리지 않게.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn register_login_launch(app: &Path, off_mark: &Path, redirected: bool, run: &dyn RunSink) -> Result<String, String> {
+    if redirected {
+        return Ok("자동 실행: 건너뜀(폴더를 바꿔 띄운 실행은 시작 프로그램을 건드리지 않음)".to_string());
+    }
+    if login_launch_wanted(off_mark) {
+        let value = format!("\"{}\" --background", app.display());
+        run.set(RUN_VALUE, &value).map_err(|e| format!("자동 실행을 등록하지 못했습니다: {e}"))?;
+        Ok(format!("자동 실행: HKCU 시작 프로그램 {RUN_VALUE}"))
+    } else {
+        // 이미 있는 값도 지운다 — 끄기가 값을 못 지웠어도 업데이트 뒤에는 꺼진 채로 남는다
+        run.delete(RUN_VALUE).map_err(|e| format!("자동 실행 값을 지우지 못했습니다: {e}"))?;
+        Ok("자동 실행: 건너뜀(설정에서 로그인할 때 열기를 꺼 둠)".to_string())
+    }
+}
+
+/// uninstall 2단계의 Run 값 지우기 — 폴더를 바꿔 띄운 실행은 진짜 Run 값을 지우지 않는다.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn unregister_login_launch(redirected: bool, run: &dyn RunSink) -> Result<(), String> {
+    if redirected {
+        return Ok(());
+    }
+    run.delete(RUN_VALUE).map_err(|e| format!("자동 실행 값을 지우지 못했습니다: {e}"))
 }
 
 /// 지난 setup 이 비켜 둔 `claude-board-hook.old-*` 를 지운다(아직 도는 것은 지워지지 않으니 다음에 다시).
@@ -211,8 +250,8 @@ pub fn uninstall() -> ExitCode {
     println!("  (Windows 가 아니라 건너뜀)");
     #[cfg(windows)]
     {
-        if let Err(e) = registry::delete_run(RUN_VALUE) {
-            eprintln!("  자동 실행 값을 지우지 못했습니다: {e}");
+        if let Err(e) = unregister_login_launch(paths::overridden(), &registry::Real) {
+            eprintln!("  {e}");
             ok = false;
         }
         let table = claude_board_core::proc::ProcessTable::capture();
@@ -223,15 +262,7 @@ pub fn uninstall() -> ExitCode {
 
     println!("3) hook 사본·세션 기록·저장한 계정·답변 꾸미기 사본 제거");
     let notifier = paths::notifier_dir();
-    let mut files = vec![paths::hook_exe(), paths::app_path_file(), paths::notify_position_file(), notifier.join("accounts.json")];
-    for entry in fs::read_dir(&notifier).into_iter().flatten().flatten() {
-        if entry.file_name().to_string_lossy().starts_with(OLD_PREFIX) {
-            files.push(entry.path());
-        }
-    }
-    for f in &files {
-        ok &= remove(f, fs::remove_file(f));
-    }
+    ok &= remove_notifier_files(&notifier);
     ok &= remove_notifier_dirs(&notifier, notifier_redirected());
     let _ = fs::remove_dir(&notifier);
 
@@ -249,6 +280,36 @@ pub fn uninstall() -> ExitCode {
     } else {
         ExitCode::FAILURE
     }
+}
+
+/// notifier 에서 이름이 정해진 우리 파일들 — hook 사본·앱 경로·알림 위치·로그인할 때 열기를 끈 표지(mac `Uninstall.command` 가 `login-launch-off` 를 지운다)·저장 계정 목록.
+/// 경로는 넘겨받은 notifier 기준이다(시험이 임시 폴더로 부른다).
+fn fixed_files(notifier: &Path) -> Vec<PathBuf> {
+    vec![
+        notifier.join(paths::HOOK_EXE),
+        notifier.join("app-path"),
+        notifier.join("notify-position"),
+        notifier.join("login-launch-off"),
+        notifier.join("accounts.json"),
+    ]
+}
+
+/// notifier 바로 아래의 보드 자기 파일들을 지운다 — 이름이 정해진 파일(`fixed_files`)과
+/// 깨진 목록 백업(`accounts.json.broken-<시각>`, mac `Uninstall.command` 과 같다), 지난 setup 이 비켜 둔 사본.
+/// 그 밖의 파일은 건드리지 않는다.
+fn remove_notifier_files(notifier: &Path) -> bool {
+    let mut files = fixed_files(notifier);
+    for entry in fs::read_dir(notifier).into_iter().flatten().flatten() {
+        let file_name = entry.file_name().to_string_lossy().into_owned();
+        if file_name.starts_with(OLD_PREFIX) || file_name.starts_with(BROKEN_PREFIX) {
+            files.push(entry.path());
+        }
+    }
+    let mut ok = true;
+    for f in &files {
+        ok &= remove(f, fs::remove_file(f));
+    }
+    ok
 }
 
 /// notifier 아래에서 통째로 지우는 폴더들 — 세션 기록, 저장 계정(accounts\ 에는 DPAPI 로 암호화한 토큰(vault)도 있다),
@@ -286,14 +347,26 @@ mod registry {
     use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS};
     use windows_sys::Win32::System::Registry::{RegDeleteKeyValueW, RegSetKeyValueW, HKEY_CURRENT_USER, REG_SZ};
 
-    pub const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+    const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 
     fn wide(s: &str) -> Vec<u16> {
         s.encode_utf16().chain(std::iter::once(0)).collect()
     }
 
+    /// 진짜 HKCU\…\Run
+    pub struct Real;
+
+    impl super::RunSink for Real {
+        fn set(&self, name: &str, value: &str) -> std::io::Result<()> {
+            set_run(name, value)
+        }
+        fn delete(&self, name: &str) -> std::io::Result<()> {
+            delete_run(name)
+        }
+    }
+
     /// HKCU\…\Run 에 문자열 값을 쓴다.
-    pub fn set_run(name: &str, value: &str) -> std::io::Result<()> {
+    fn set_run(name: &str, value: &str) -> std::io::Result<()> {
         let (key, name, data) = (wide(RUN_KEY), wide(name), wide(value));
         // SAFETY: NUL 로 끝나는 문자열과 바이트 길이(NUL 포함)를 넘긴다
         let r = unsafe {
@@ -307,7 +380,7 @@ mod registry {
     }
 
     /// HKCU\…\Run 의 값을 지운다(없으면 성공).
-    pub fn delete_run(name: &str) -> std::io::Result<()> {
+    fn delete_run(name: &str) -> std::io::Result<()> {
         let (key, name) = (wide(RUN_KEY), wide(name));
         // SAFETY: NUL 로 끝나는 문자열
         let r = unsafe { RegDeleteKeyValueW(HKEY_CURRENT_USER, key.as_ptr(), name.as_ptr()) };
@@ -369,6 +442,20 @@ mod tests {
     }
 
     #[test]
+    fn uninstall_removes_broken_accounts_backups() {
+        let notifier = scratch("broken-accounts");
+        // 깨진 accounts.json 은 accounts.json.broken-<시각>(-2) 으로 옮겨진다. 제거 때 이 백업들도 지운다(mac Uninstall.command 와 같다)
+        touch(&notifier.join("accounts.json.broken-20261029-101010"));
+        touch(&notifier.join("accounts.json.broken-20261029-101010-2"));
+        touch(&notifier.join("keep.txt"));
+        assert!(remove_notifier_files(&notifier));
+        assert!(!notifier.join("accounts.json.broken-20261029-101010").exists(), "broken 백업(-1)은 지워진다");
+        assert!(!notifier.join("accounts.json.broken-20261029-101010-2").exists(), "broken 백업(-2)은 지워진다");
+        assert!(notifier.join("keep.txt").exists(), "관계 없는 파일은 남아야 한다");
+        fs::remove_dir_all(&notifier).unwrap();
+    }
+
+    #[test]
     fn uninstall_dirs_missing_is_success() {
         let notifier = scratch("empty");
         assert!(remove_notifier_dirs(&notifier, false));
@@ -393,6 +480,88 @@ mod tests {
         }
         fs::remove_dir_all(&notifier).unwrap();
         fs::remove_dir_all(&elsewhere).unwrap();
+    }
+
+    #[test]
+    fn login_launch_is_registered_only_without_the_off_mark() {
+        let dir = scratch("login-mark");
+        let mark = dir.join("login-launch-off");
+        assert!(login_launch_wanted(&mark), "표지가 없으면(처음 설치) 등록한다");
+        touch(&mark);
+        assert!(!login_launch_wanted(&mark), "끈 사람은 업데이트가 다시 등록하지 않는다");
+        fs::remove_file(&mark).unwrap();
+        assert!(login_launch_wanted(&mark));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 가짜 Run 자리 — 진짜 레지스트리를 건드리지 않는다. 쓴 것과 지운 것의 이름을 센다
+    #[derive(Default)]
+    struct FakeRun {
+        sets: std::cell::RefCell<Vec<(String, String)>>,
+        deletes: std::cell::RefCell<Vec<String>>,
+    }
+
+    impl RunSink for FakeRun {
+        fn set(&self, name: &str, value: &str) -> io::Result<()> {
+            self.sets.borrow_mut().push((name.to_string(), value.to_string()));
+            Ok(())
+        }
+        fn delete(&self, name: &str) -> io::Result<()> {
+            self.deletes.borrow_mut().push(name.to_string());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn setup_writes_or_deletes_the_run_value_by_the_off_mark() {
+        let dir = scratch("run-sink");
+        let mark = dir.join("login-launch-off");
+        let app = Path::new(r"C:\Apps\ClaudeBoard.exe");
+        let run = FakeRun::default();
+        register_login_launch(app, &mark, false, &run).unwrap();
+        assert_eq!(*run.sets.borrow(), [(RUN_VALUE.to_string(), r#""C:\Apps\ClaudeBoard.exe" --background"#.to_string())]);
+        assert!(run.deletes.borrow().is_empty());
+        touch(&mark);
+        register_login_launch(app, &mark, false, &run).unwrap();
+        assert_eq!(*run.deletes.borrow(), [RUN_VALUE]);
+        assert_eq!(run.sets.borrow().len(), 1);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 폴더를 바꿔 띄운 setup·uninstall 은 표지가 어떻든 진짜 Run 값을 쓰지도 지우지도 않는다
+    #[test]
+    fn redirected_setup_and_uninstall_never_touch_the_run_value() {
+        let dir = scratch("run-redirected");
+        let mark = dir.join("login-launch-off");
+        let app = Path::new(r"C:\Apps\ClaudeBoard.exe");
+        let run = FakeRun::default();
+        for marked in [false, true] {
+            if marked {
+                touch(&mark);
+            }
+            register_login_launch(app, &mark, true, &run).unwrap();
+            unregister_login_launch(true, &run).unwrap();
+        }
+        assert!(run.sets.borrow().is_empty() && run.deletes.borrow().is_empty());
+        unregister_login_launch(false, &run).unwrap();
+        assert_eq!(*run.deletes.borrow(), [RUN_VALUE]);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn uninstall_removes_the_off_mark_with_the_other_fixed_files() {
+        let files = fixed_files(&paths::notifier_dir());
+        for expected in [paths::login_launch_off_file(), paths::notify_position_file(), paths::app_path_file(), paths::hook_exe()] {
+            assert!(files.contains(&expected), "{}", expected.display());
+        }
+        // 지우는 일은 있는 파일만 지우고 없는 파일은 성공으로 본다
+        let dir = scratch("fixed");
+        let mark = dir.join("login-launch-off");
+        touch(&mark);
+        assert!(remove(&mark, fs::remove_file(&mark)));
+        assert!(!mark.exists());
+        assert!(remove(&mark, fs::remove_file(&mark)));
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

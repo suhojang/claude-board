@@ -17,7 +17,7 @@ import { openSession, type OpenEffect } from "$lib/board/openSession";
 import { createClickGate, type ClickGate } from "$lib/board/clickGate";
 import { board } from "$lib/board/store.svelte";
 import type { BoardSurface, OpenSessionPayload, Session } from "$lib/types";
-import { TerminalHub, folderName, openShell, pair, place, select, showConfirm, surfaceOf, workspaceKey } from "./hub.svelte";
+import { TerminalHub, folderName, leaveSettings, openShell, pair, place, select, showConfirm, surfaceOf, workspaceKey } from "./hub.svelte";
 import { uniqueTabName } from "./launch";
 import { isMdRenderOff } from "./mdRender";
 import { applyRenames } from "./renameFlow.svelte";
@@ -48,6 +48,7 @@ const tabOfSurface = (surfaceId: string) => TerminalHub.tabs.find((t) => hasLeaf
 
 /** 그 화면의 탭을 펼쳐 고르고 보드 창을 앞으로(mac reveal) */
 export function reveal(surfaceId: string) {
+  leaveSettings();
   const tab = tabOfSurface(surfaceId);
   if (!tab) return;
   if (!board.snap?.settings.terminalExpanded) setTerminalExpanded(true);
@@ -240,6 +241,7 @@ export function createRowClick(getSession: () => Session | undefined): RowClick 
     click(e) {
       const s = getSession();
       if (!s) return;
+      leaveSettings(); // 세션 줄을 누르면 설정 화면을 닫고 그 세션으로 간다
       const where = place(s);
       if (where.kind === "terminal") {
         if (e.detail <= 1) clickedId = s.id;

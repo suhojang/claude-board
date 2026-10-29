@@ -1,0 +1,355 @@
+{
+  "family": "pairing",
+  "schema": 1,
+  "cases": [
+    {
+      "id": "pairing.workspace-dot.idle-then-paused",
+      "rule": "workspace-dot",
+      "why": "경로에 여러 세션이 걸리면 점은 가장 급한 상태가 이긴다: 일시중지(paused)가 대기(idle)보다 급하므로 목록 뒤에 보여도 일시중지가 이긴다(mac 시험 9 의 /w/d).",
+      "source": "PR #25 · TabPairingTests.swift:470(workspaceDot)",
+      "input": {"states": ["idle", "paused"]},
+      "expect": {"state": "paused"}
+    },
+    {
+      "id": "pairing.workspace-dot.paused-then-idle",
+      "rule": "workspace-dot",
+      "why": "순서를 바꿔도 결과가 같아야 한다: 점은 세션 목록 순서를 따르지 않고 상태 등급만 따른다.",
+      "source": "PR #25 · TabPairingTests.swift:470(workspaceDot)",
+      "input": {"states": ["paused", "idle"]},
+      "expect": {"state": "paused"}
+    },
+    {
+      "id": "pairing.workspace-dot.waiting-first",
+      "rule": "workspace-dot",
+      "why": "승인 대기(waiting)가 가장 급한 상태다: 대기·작업 중·일시중지가 함께 있어도 점은 승인 대기다.",
+      "source": "PR #25 · TabPairingTests.swift:470(workspaceDot)",
+      "input": {"states": ["paused", "working", "waiting", "idle"]},
+      "expect": {"state": "waiting"}
+    },
+    {
+      "id": "pairing.workspace-dot.working-over-paused",
+      "rule": "workspace-dot",
+      "why": "작업 중(working)이 일시중지보다 급하다: 도는 작업이 잊히지 않게 한다.",
+      "source": "PR #25 · TabPairingTests.swift:470(workspaceDot)",
+      "input": {"states": ["working", "paused"]},
+      "expect": {"state": "working"}
+    },
+    {
+      "id": "pairing.workspace-dot.idle-over-ended",
+      "rule": "workspace-dot",
+      "why": "종료(ended)는 점에서 가장 덜 급하다: 같은 경로에 살아 있는 대기(idle)가 있으면 대기가 이긴다.",
+      "source": "PR #25 · TabPairingTests.swift:470(workspaceDot)",
+      "input": {"states": ["ended", "idle"]},
+      "expect": {"state": "idle"}
+    },
+    {
+      "id": "pairing.workspace-dot.only-ended",
+      "rule": "workspace-dot",
+      "why": "경로에 종료 세션만 남으면 점은 종료다: 되살려야 할 세션이 있다는 알림을 잊지 않게 한다.",
+      "source": "PR #25 · TabPairingTests.swift:470(workspaceDot)",
+      "input": {"states": ["ended"]},
+      "expect": {"state": "ended"}
+    },
+    {
+      "id": "pairing.workspace-dot.empty-is-idle",
+      "rule": "workspace-dot",
+      "why": "상태 목록이 비면 점을 내지 않는다: 기본값은 대기(idle)다.",
+      "source": "PR #25 · TabPairingTests.swift:470(workspaceDot)",
+      "input": {"states": []},
+      "expect": {"state": "idle"}
+    },
+    {
+      "id": "pairing.screen-session.updated-wins-a",
+      "rule": "screen-session",
+      "why": "같은 tty 의 살아 있는 세션이 여럿이면 화면의 세션은 updated 가 가장 새로운 것: a 가 이기고 b 는 같은 화면에 짝으로 남는다.",
+      "source": "PR #25 · TabPairingTests.swift:487(sameTtyPick)",
+      "input": {
+        "screens": [{"id": "A1", "tty": "ttys001", "session_id": null}],
+        "sessions": [
+          {"id": "a", "state": "idle", "tty": "ttys001", "updated": 10, "since": 0, "headless": false},
+          {"id": "b", "state": "working", "tty": "ttys001", "updated": 0, "since": 20, "headless": false}
+        ]
+      },
+      "expect": {
+        "screen_session": {"A1": "a"},
+        "paired": {"a": "A1", "b": "A1"}
+      }
+    },
+    {
+      "id": "pairing.screen-session.updated-wins-b",
+      "rule": "screen-session",
+      "why": "목록 순서를 뒤집어도 updated 비교는 그대로다: 최신 세션이 목록 위치와 무관하게 이긴다.",
+      "source": "PR #25 · TabPairingTests.swift:487(sameTtyPick)",
+      "input": {
+        "screens": [{"id": "A1", "tty": "ttys001", "session_id": null}],
+        "sessions": [
+          {"id": "b", "state": "working", "tty": "ttys001", "updated": 0, "since": 20, "headless": false},
+          {"id": "a", "state": "idle", "tty": "ttys001", "updated": 10, "since": 0, "headless": false}
+        ]
+      },
+      "expect": {
+        "screen_session": {"A1": "a"},
+        "paired": {"a": "A1", "b": "A1"}
+      }
+    },
+    {
+      "id": "pairing.screen-session.since-breaks-tie-a",
+      "rule": "screen-session",
+      "why": "updated 가 같으면 since 로 가른다: since 가 더 큰 a 가 화면의 세션이고 b 는 짝으로 남는다.",
+      "source": "PR #25 · TabPairingTests.swift:487(sameTtyPick)",
+      "input": {
+        "screens": [{"id": "A1", "tty": "ttys001", "session_id": null}],
+        "sessions": [
+          {"id": "a", "state": "idle", "tty": "ttys001", "updated": 5, "since": 3, "headless": false},
+          {"id": "b", "state": "idle", "tty": "ttys001", "updated": 5, "since": 1, "headless": false}
+        ]
+      },
+      "expect": {
+        "screen_session": {"A1": "a"},
+        "paired": {"a": "A1", "b": "A1"}
+      }
+    },
+    {
+      "id": "pairing.screen-session.since-breaks-tie-b",
+      "rule": "screen-session",
+      "why": "순서를 바꿔도 since 비교가 그대로 도는지 본다: 결과는 같아야 한다.",
+      "source": "PR #25 · TabPairingTests.swift:487(sameTtyPick)",
+      "input": {
+        "screens": [{"id": "A1", "tty": "ttys001", "session_id": null}],
+        "sessions": [
+          {"id": "b", "state": "idle", "tty": "ttys001", "updated": 5, "since": 1, "headless": false},
+          {"id": "a", "state": "idle", "tty": "ttys001", "updated": 5, "since": 3, "headless": false}
+        ]
+      },
+      "expect": {
+        "screen_session": {"A1": "a"},
+        "paired": {"a": "A1", "b": "A1"}
+      }
+    },
+    {
+      "id": "pairing.screen-session.id-breaks-tie-a",
+      "rule": "screen-session",
+      "why": "updated 와 since 가 모두 같으면 세션 id 로 정한다: 뒤쪽 id 인 b 가 화면의 세션이고 a 는 짝으로 남는다.",
+      "source": "PR #25 · TabPairingTests.swift:487(sameTtyPick)",
+      "input": {
+        "screens": [{"id": "A1", "tty": "ttys001", "session_id": null}],
+        "sessions": [
+          {"id": "a", "state": "working", "tty": "ttys001", "updated": 0, "since": 0, "headless": false},
+          {"id": "b", "state": "idle", "tty": "ttys001", "updated": 0, "since": 0, "headless": false}
+        ]
+      },
+      "expect": {
+        "screen_session": {"A1": "b"},
+        "paired": {"a": "A1", "b": "A1"}
+      }
+    },
+    {
+      "id": "pairing.screen-session.id-breaks-tie-b",
+      "rule": "screen-session",
+      "why": "순서를 바꿔도 id 비교가 그대로인지 본다: b 가 다시 이긴다.",
+      "source": "PR #25 · TabPairingTests.swift:487(sameTtyPick)",
+      "input": {
+        "screens": [{"id": "A1", "tty": "ttys001", "session_id": null}],
+        "sessions": [
+          {"id": "b", "state": "idle", "tty": "ttys001", "updated": 0, "since": 0, "headless": false},
+          {"id": "a", "state": "working", "tty": "ttys001", "updated": 0, "since": 0, "headless": false}
+        ]
+      },
+      "expect": {
+        "screen_session": {"A1": "b"},
+        "paired": {"a": "A1", "b": "A1"}
+      }
+    },
+    {
+      "id": "pairing.screen-session.ended-not-compared-a",
+      "rule": "screen-session",
+      "why": "같은 tty 이어도 종료 세션은 화면의 세션 후보가 아니다: updated 가 더 새로운 z 가 아니라 살아 있는 a 가 이기고 짝 표에서도 빠진다.",
+      "source": "PR #25 · TabPairingTests.swift:487(sameTtyPick)",
+      "input": {
+        "screens": [{"id": "A1", "tty": "ttys001", "session_id": null}],
+        "sessions": [
+          {"id": "a", "state": "idle", "tty": "ttys001", "updated": 10, "since": 0, "headless": false},
+          {"id": "z", "state": "ended", "tty": "ttys001", "updated": 100, "since": 0, "headless": false}
+        ]
+      },
+      "expect": {
+        "screen_session": {"A1": "a"},
+        "paired": {"a": "A1"}
+      }
+    },
+    {
+      "id": "pairing.screen-session.ended-not-compared-b",
+      "rule": "screen-session",
+      "why": "순서를 바꿔도 종료 세션이 이기지 않는지 본다: 결과는 같아야 한다.",
+      "source": "PR #25 · TabPairingTests.swift:487(sameTtyPick)",
+      "input": {
+        "screens": [{"id": "A1", "tty": "ttys001", "session_id": null}],
+        "sessions": [
+          {"id": "z", "state": "ended", "tty": "ttys001", "updated": 100, "since": 0, "headless": false},
+          {"id": "a", "state": "idle", "tty": "ttys001", "updated": 10, "since": 0, "headless": false}
+        ]
+      },
+      "expect": {
+        "screen_session": {"A1": "a"},
+        "paired": {"a": "A1"}
+      }
+    },
+    {
+      "id": "pairing.screen-session.paired-has-all-live",
+      "rule": "screen-session",
+      "why": "화면의 세션이 정해져도 같은 tty 의 살아 있는 나머지가 모두 짝 표에 남는다: paired 는 화면의 세션 하나만 기록하지 않는다.",
+      "source": "PR #25 · TabPairingTests.swift:487(sameTtyPick)",
+      "input": {
+        "screens": [{"id": "A1", "tty": "ttys001", "session_id": null}],
+        "sessions": [
+          {"id": "a", "state": "idle", "tty": "ttys001", "updated": 10, "since": 0, "headless": false},
+          {"id": "b", "state": "working", "tty": "ttys001", "updated": 0, "since": 20, "headless": false},
+          {"id": "c", "state": "idle", "tty": "ttys001", "updated": 4, "since": 0, "headless": false}
+        ]
+      },
+      "expect": {
+        "screen_session": {"A1": "a"},
+        "paired": {"a": "A1", "b": "A1", "c": "A1"}
+      }
+    },
+    {
+      "id": "pairing.place.shell-screen-other-terminal-idle",
+      "rule": "place",
+      "why": "기억해 둔 id 가 화면에 남아 있어도 실제 tty 가 화면 tty 와 다르면 화면 소속이 아니다: claude 가 그 화면에서 뜨지 않으므로 세션은 터미널에 있다.",
+      "source": "PR #25 · TabPairingTests.swift:503(placeBySessionId)",
+      "input": {
+        "screens": [{"id": "A1", "tty": "ttys001", "session_id": "x"}],
+        "sessions": [
+          {"id": "x", "state": "idle", "tty": "ttys007", "updated": 2, "since": 1, "headless": false}
+        ],
+        "runs_claude": [],
+        "owned": []
+      },
+      "expect": {"place": {"x": "terminal"}}
+    },
+    {
+      "id": "pairing.place.shell-screen-other-terminal-working",
+      "rule": "place",
+      "why": "상태가 작업 중이어도 같다: 자리 정하기는 tty 와 짝짓기로 하고 상태로 하지 않는다.",
+      "source": "PR #25 · TabPairingTests.swift:503(placeBySessionId)",
+      "input": {
+        "screens": [{"id": "A1", "tty": "ttys001", "session_id": "x"}],
+        "sessions": [
+          {"id": "x", "state": "working", "tty": "ttys007", "updated": 2, "since": 1, "headless": false}
+        ],
+        "runs_claude": [],
+        "owned": []
+      },
+      "expect": {"place": {"x": "terminal"}}
+    },
+    {
+      "id": "pairing.place.shell-screen-headless-background",
+      "rule": "place",
+      "why": "tty 가 없는 headless 세션은 어떤 화면에도 붙지 않아 백그라운드다: 화면이 기억한 id 는 claude 가 그 화면에서 도는 중일 때만 세션을 화면에 붙인다.",
+      "source": "PR #25 · TabPairingTests.swift:503(placeBySessionId)",
+      "input": {
+        "screens": [{"id": "A1", "tty": "ttys001", "session_id": "x"}],
+        "sessions": [
+          {"id": "x", "state": "working", "tty": "", "updated": 2, "since": 1, "headless": true}
+        ],
+        "runs_claude": [],
+        "owned": []
+      },
+      "expect": {"place": {"x": "background"}}
+    },
+    {
+      "id": "pairing.place.just-reopened-tab",
+      "rule": "place",
+      "why": "이어 열기 직후 세션이 tty 를 아직 다시 갖지 않았어도 claude 가 그 화면에서 뜨면 화면이 기억한 세션 id 로 화면 자리(탭)가 된다.",
+      "source": "PR #25 · TabPairingTests.swift:503(placeBySessionId)",
+      "input": {
+        "screens": [{"id": "A1", "tty": "ttys001", "session_id": "x"}],
+        "sessions": [
+          {"id": "x", "state": "idle", "tty": "", "updated": 2, "since": 1, "headless": false}
+        ],
+        "runs_claude": ["A1"],
+        "owned": []
+      },
+      "expect": {"place": {"x": "tab:A1"}}
+    },
+    {
+      "id": "pairing.place.tty-paired-tab",
+      "rule": "place",
+      "why": "세션 tty 와 화면 tty 가 같아 짝짓기가 화면의 세션으로 결정하면 세션 자리는 그 화면(탭)이다.",
+      "source": "PR #25 · TabPairingTests.swift:503(placeBySessionId)",
+      "input": {
+        "screens": [{"id": "A1", "tty": "ttys001", "session_id": "x"}],
+        "sessions": [
+          {"id": "x", "state": "working", "tty": "ttys001", "updated": 2, "since": 1, "headless": false}
+        ],
+        "runs_claude": [],
+        "owned": []
+      },
+      "expect": {"place": {"x": "tab:A1"}}
+    },
+    {
+      "id": "pairing.place.owned-headless-tab",
+      "rule": "place",
+      "why": "보드에서 띄운 headless 세션은 tty 가 없어도 화면이 기억하는 id 와 runs_claude 로 화면 자리(탭)에 든다: owned 목록은 headless 표지일 뿐 자리를 정하지 않는다.",
+      "source": "PR #25 · TabPairingTests.swift:503(placeBySessionId)",
+      "input": {
+        "screens": [{"id": "A1", "tty": "ttys001", "session_id": "h"}],
+        "sessions": [
+          {"id": "h", "state": "working", "tty": "", "updated": 0, "since": 0, "headless": true}
+        ],
+        "runs_claude": ["A1"],
+        "owned": ["h"]
+      },
+      "expect": {"place": {"h": "tab:A1"}}
+    },
+    {
+      "id": "pairing.place.ended-running-tab",
+      "rule": "place",
+      "why": "claude 가 뜬 화면이 기억하는 세션이면 종료 세션도 화면 자리(탭)가 된다: 종료 자리는 짝과 기억이 모두 없을 때의 나머지다.",
+      "source": "PR #25 · TabPairingTests.swift:503(placeBySessionId)",
+      "input": {
+        "screens": [{"id": "A1", "tty": "ttys001", "session_id": "x"}],
+        "sessions": [
+          {"id": "x", "state": "ended", "tty": "ttys001", "updated": 2, "since": 1, "headless": false}
+        ],
+        "runs_claude": ["A1"],
+        "owned": []
+      },
+      "expect": {"place": {"x": "tab:A1"}}
+    },
+    {
+      "id": "pairing.place.ended-not-running-ended",
+      "rule": "place",
+      "why": "claude 가 뜨지 않으면 종료 세션은 종료 자리다: 화면 기억 하나로는 자리를 되찾지 않는다.",
+      "source": "PR #25 · TabPairingTests.swift:503(placeBySessionId)",
+      "input": {
+        "screens": [{"id": "A1", "tty": "ttys001", "session_id": "x"}],
+        "sessions": [
+          {"id": "x", "state": "ended", "tty": "ttys001", "updated": 2, "since": 1, "headless": false}
+        ],
+        "runs_claude": [],
+        "owned": []
+      },
+      "expect": {"place": {"x": "ended"}}
+    },
+    {
+      "id": "pairing.place.other-session-id-not-used",
+      "rule": "place",
+      "why": "여러 화면이 같은 id 를 기억해도 claude 가 도는 화면만 이긴다: 목록에서 앞서고 기억하는 A1 을 건너뛰고 A2 가 화면 자리다.",
+      "source": "PR #25 · TabPairingTests.swift:503(placeBySessionId)",
+      "input": {
+        "screens": [
+          {"id": "B1", "tty": "ttys002", "session_id": "other"},
+          {"id": "A1", "tty": "ttys001", "session_id": "x"},
+          {"id": "A2", "tty": "ttys003", "session_id": "x"}
+        ],
+        "sessions": [
+          {"id": "x", "state": "idle", "tty": "", "updated": 2, "since": 1, "headless": false}
+        ],
+        "runs_claude": ["B1", "A2"],
+        "owned": []
+      },
+      "expect": {"place": {"x": "tab:A2"}}
+    }
+  ]
+}

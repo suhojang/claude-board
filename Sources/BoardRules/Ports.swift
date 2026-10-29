@@ -4,7 +4,7 @@
 // 다른 터미널 조작(Terminals.swift)·세션 조작(SessionControl.swift)이 바깥(다른 터미널 앱·프로세스·tty 제목·보드 탭·세션 표지·세션 터미널·시계)을 부르는 자리,
 // 보드 탭 짝짓기·자리(TabPairing.swift)가 바깥(보드 탭 화면·부모 pid·Claude Code 의 넘긴 작업 id)을 부르는 자리.
 // 업데이트 판단(Updates.swift)이 바깥(최신 릴리스 VERSION)을 부르는 자리, 단축키 판정(Shortcuts.swift)이 바깥(지금 ASCII 자판의 글자)을 부르는 자리.
-// 진짜 어댑터는 보드 앱(ClaudeBoard.swift)에, 가짜 어댑터는 Tests/BoardRulesTests 에만 둔다(이슈 #9 헥사고날 첫 단계).
+// 진짜 어댑터는 보드 앱(Sources/ClaudeBoard/)에, 가짜 어댑터는 Tests/BoardRulesTests 에만 둔다(이슈 #9 헥사고날 첫 단계).
 // 규칙에 새 OS 호출(파일·프로세스·시각·환경 변수·홈 폴더)이 필요하면 여기 포트를 거친다 — 코어에서 FileManager·kill·Date() 를 직접 부르지 않는다.
 // 포트는 역할로 나눈다(범용 FileSystem 포트를 두면 시험이 경로 문자열 시험이 된다).
 //

@@ -169,17 +169,41 @@ fn pause_session(board: &Arc<Board>, s: &Session) {
     board.publish();
 }
 
-/// 재개: 살아 있는 세션에는 이어서 진행하라는 요청을 넣는다(못 넣으면 알리기만 한다 — 같은 세션을 한 번 더 열지 않는다).
-/// 꺼진 세션은 보드 터미널에서 이어 연다.
+/// 재개 판정 — `Drive` 는 살아 있는 세션(끝나지 않았고, pid 가 없거나 pid 가 살아 있음)에 키를 넣는다.
+/// `Reopen` 은 그 외(끝났거나 pid 가 죽었거나) 보드 터미널에서 이어 연다.
+#[derive(Debug, PartialEq)]
+enum ResumePlan {
+    Reopen,
+    Drive,
+}
+
+/// 재개 판정을 순수 함수로 뗀다(규칙 4) — 살아 있음 = 끝나지 않았고, pid 가 없거나(pid == 0) pid 가 살아 있음.
+fn resume_plan(state: &str, pid: u32, alive: bool) -> ResumePlan {
+    if state != "ended" && (pid == 0 || alive) {
+        ResumePlan::Drive
+    } else {
+        ResumePlan::Reopen
+    }
+}
+
+/// 재개: 살아 있는 세션(끝나지 않았고, pid 가 없거나 pid 가 살아 있음)에는 이어서 진행하라는 요청을 넣는다.
+/// 넣지 못하면 표지를 그대로 두고 알린다(같은 세션을 한 번 더 열면 claude 가 중복으로 뜬다). 꺼진 세션은 보드 터미널에서 이어 연다.
 fn resume_paused(board: &Arc<Board>, s: &Session) {
-    if s.pid == 0 || !proc::alive(s.pid, s.pid_ctime) {
-        return reopen_session(board, s, true);
+    // pid 가 있을 때만 살아 있는지 본다 — pid 가 없으면 살아 있는 것으로 본다
+    let alive = s.pid > 0 && proc::alive(s.pid, s.pid_ctime);
+    match resume_plan(&s.state, s.pid, alive) {
+        ResumePlan::Reopen => return reopen_session(board, s, true),
+        ResumePlan::Drive => {}
     }
     if drive(board, s, &steps_for(SessionAction::Resume), Purpose::Keys) {
         let _ = fs::remove_file(paused_mark(board, s));
         board.publish();
     } else {
-        board.flash("키를 넣을 수 없어 재개하지 못했습니다", true);
+        // 일시중지 표지는 그대로 둔다 — 사용자가 그 터미널에서 이어 간다
+        board.flash(
+            format!("{}: 세션이 아직 돌고 있지만 그 터미널에 키를 넣지 못했습니다. 그 터미널에서 이어 가 주세요", s.project()),
+            true,
+        );
     }
 }
 
@@ -362,21 +386,25 @@ pub fn open_terminal(board: &Arc<Board>, id: String) {
 
 // ── 설치된 Claude Code 버전 (§5.10) ─────────────────────────
 
-/// 숫자 비교 — 점으로 나눈 조각을 숫자로(숫자가 아니면 글자로) 비교한다.
+/// 숫자 비교 — 점으로 나눈 조각에서 앞의 0 을 떼고 길이로, 같은 길이면 글자 차례로 비교한다(u64 를 넘는 자리도 옳다).
 pub fn cmp_version(a: &str, b: &str) -> std::cmp::Ordering {
     let pa: Vec<&str> = a.split('.').collect();
     let pb: Vec<&str> = b.split('.').collect();
     for i in 0..pa.len().max(pb.len()) {
-        let (x, y) = (pa.get(i).copied().unwrap_or("0"), pb.get(i).copied().unwrap_or("0"));
-        let o = match (x.parse::<u64>(), y.parse::<u64>()) {
-            (Ok(x), Ok(y)) => x.cmp(&y),
-            _ => x.cmp(y),
-        };
+        // 없는 조각은 0 과 같다
+        let o = compare_digits(pa.get(i).copied().unwrap_or("0"), pb.get(i).copied().unwrap_or("0"));
         if o != std::cmp::Ordering::Equal {
             return o;
         }
     }
     std::cmp::Ordering::Equal
+}
+
+/// 두 숫자 조각을 견준다 — 앞의 0 을 떼고 길이가 큰 쪽이 크고, 같은 길이면 글자 차례(u64 를 넘는 자리도 옳게 견준다).
+fn compare_digits(x: &str, y: &str) -> std::cmp::Ordering {
+    let x = x.trim_start_matches('0');
+    let y = y.trim_start_matches('0');
+    x.len().cmp(&y.len()).then_with(|| x.cmp(y))
 }
 
 /// `~/.local/share/claude/versions` 안 가장 높은 버전 이름(`.exe` 는 뗀다).
@@ -410,6 +438,35 @@ mod tests {
         }
         assert_eq!(read_claude_version(&home).as_deref(), Some("2.1.301"));
         fs::remove_dir_all(&home).unwrap();
+    }
+
+    /// 재개 판정 표(규칙 4) — 살아 있는 세션(끝나지 않았고, pid 가 없거나 pid 가 살아 있음)은 다시 열지 않는다.
+    /// pid 가 없으면 살아 있는 것으로 본다(중복 claude 를 열지 않는다), 끝난 세션은 pid 가 살아 남아 있어도 다시 연다.
+    #[test]
+    fn resume_plan_table() {
+        let rows: [(&str, u32, bool, ResumePlan); 5] = [
+            // 끝난 세션은 pid 가 살아 있는 것처럼 기록이 남아 있어도(잔송) 다시 연다
+            ("ended", 123, true, ResumePlan::Reopen),
+            ("ended", 0, false, ResumePlan::Reopen),
+            // 돌고 있는 세션은 그 터미널에 키를 넣는다
+            ("working", 123, true, ResumePlan::Drive),
+            // 기록이 끝나지 않았지만 pid 가 죽었으면 다시 연다
+            ("working", 123, false, ResumePlan::Reopen),
+            // pid 가 없으면 살아 있는 것으로 본다
+            ("working", 0, false, ResumePlan::Drive),
+        ];
+        for (state, pid, alive, want) in rows {
+            assert_eq!(resume_plan(state, pid, alive), want, "state={state} pid={pid} alive={alive}");
+        }
+    }
+
+    /// u64 를 넘는 자리도 길이로 견준다(A2), 앞의 0 은 떼며, 조각 수가 달라도 0 을 채운 것과 같다.
+    #[test]
+    fn cmp_version_digits_beyond_u64() {
+        assert_eq!(cmp_version("18446744073709551616", "9"), Ordering::Greater);
+        assert_eq!(cmp_version("007", "7"), Ordering::Equal);
+        assert_eq!(cmp_version("3.2", "3.2.0"), Ordering::Equal);
+        assert_eq!(cmp_version("3.10.0", "3.9.9"), Ordering::Greater);
     }
 
     #[test]

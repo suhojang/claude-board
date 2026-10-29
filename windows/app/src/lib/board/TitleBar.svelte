@@ -11,15 +11,17 @@
   import Icon from "./Icon.svelte";
   import { stateName, stateRgb } from "./format";
   import { hint } from "./hint.svelte";
+  import { keyLabel } from "$lib/shortcuts/store.svelte";
 
   let { mini, counts, rows, expanded, side }: { mini: boolean; counts: Record<State, number>; rows: number; expanded: boolean; side: BoardSide } = $props();
 
   const short: Record<string, string> = { waiting: "승인", working: "작업", idle: "대기" };
+  const snapKey = $derived(keyLabel("snap"));
   const chips = $derived((["waiting", "working", "idle"] as const).filter((st) => counts[st] > 0));
 </script>
 
 <div class="bar" data-tauri-drag-region>
-  <button class="snap" onclick={snapRight} use:hint={"처음 크기로 되돌려 화면 오른쪽에 붙이기 (Ctrl+Alt+B)"}>
+  <button class="snap" onclick={snapRight} use:hint={`처음 크기로 되돌려 화면 오른쪽에 붙이기${snapKey ? ` (${snapKey})` : ""}`}>
     <span class="cap"><Icon name="snap-right" size={11} /></span>
   </button>
   {#if !expanded && !mini}

@@ -1,0 +1,150 @@
+{
+  "family": "session-scan",
+  "schema": 1,
+  "cases": [
+    {
+      "id": "scan.pidless-working-found-gone",
+      "rule": "scan",
+      "why": "state.py 가 claude 를 못 찾으면 기록의 pid 는 null 이 되고, pid 가 없는 세션은 산 것으로 봤다. Claude Code 세션 파일(~/.claude/sessions/<pid>.json) 에서 sessionId 로 pid 를 찾아 생사를 보고, 그 pid 가 확실하게 없으면(ESRCH) 작업 중인 세션도 끝난 세션이다",
+      "source": "PR #12 · SessionScanTests.swift:147-300",
+      "input": {"file": "a", "record": {"state": "working", "cwd": "/p", "updated": -60, "since": -60}, "claude_sessions": [{"pid": 21, "sessionId": "a", "age": 10}], "procs": {"21": "gone"}},
+      "expect": {"kept": true, "state": "ended"}
+    },
+    {
+      "id": "scan.pidless-waiting-found-gone",
+      "rule": "scan",
+      "why": "대기 상태도 같은 판정이다. 기록의 pid 가 없고 sessionId 로 찾은 pid 가 확실하게 없으면(ESRCH) 끝난 세션이다",
+      "source": "PR #12 · SessionScanTests.swift:147-300",
+      "input": {"file": "a", "record": {"state": "waiting", "cwd": "/p", "updated": -60, "since": -60}, "claude_sessions": [{"pid": 21, "sessionId": "a", "age": 10}], "procs": {"21": "gone"}},
+      "expect": {"kept": true, "state": "ended"}
+    },
+    {
+      "id": "scan.pidless-idle-found-gone",
+      "rule": "scan",
+      "why": "대기(idle) 도 같은 판정이다. 기록의 pid 가 없고 sessionId 로 찾은 pid 가 확실하게 없으면(ESRCH) 끝난 세션이다",
+      "source": "PR #12 · SessionScanTests.swift:147-300",
+      "input": {"file": "a", "record": {"state": "idle", "cwd": "/p", "updated": -60, "since": -60}, "claude_sessions": [{"pid": 21, "sessionId": "a", "age": 10}], "procs": {"21": "gone"}},
+      "expect": {"kept": true, "state": "ended"}
+    },
+    {
+      "id": "scan.pidless-found-alive",
+      "rule": "scan",
+      "why": "pid 가 없는 기록이라도 sessionId 로 찾은 pid 가 살아 있으면 끝나지 않았다고 보고 기록 상태를 그대로 둔다",
+      "source": "PR #12 · SessionScanTests.swift:147-300",
+      "input": {"file": "a", "record": {"state": "working", "cwd": "/p", "updated": -60, "since": -60}, "claude_sessions": [{"pid": 21, "sessionId": "a", "age": 10}], "procs": {"21": "alive"}},
+      "expect": {"kept": true, "state": "working"}
+    },
+    {
+      "id": "scan.pidless-found-denied",
+      "rule": "scan",
+      "why": "찾은 pid 를 볼 권한이 없으면(EPERM, sudo 등 다른 사용자로 도는 claude) 죽었다고 단정하지 않고 산 것으로 본다",
+      "source": "PR #12 · SessionScanTests.swift:147-300",
+      "input": {"file": "a", "record": {"state": "working", "cwd": "/p", "updated": -60, "since": -60}, "claude_sessions": [{"pid": 21, "sessionId": "a", "age": 10}], "procs": {"21": "denied"}},
+      "expect": {"kept": true, "state": "working"}
+    },
+    {
+      "id": "scan.pidless-no-claude-file",
+      "rule": "scan",
+      "why": "claude -p 처럼 이 세션 파일을 쓰지 않는 세션이 있으므로, sessionId 로 찾을 파일이 없으면 끝났다고 단정하지 않고 전처럼 산 것으로 본다",
+      "source": "PR #12 · SessionScanTests.swift:147-300",
+      "input": {"file": "a", "record": {"state": "working", "cwd": "/p", "updated": -60, "since": -60}},
+      "expect": {"kept": true, "state": "working"}
+    },
+    {
+      "id": "scan.pidless-ended-not-searched",
+      "rule": "scan",
+      "why": "이미 끝난 세션은 pid 를 찾아보지 않는다 · sessionId 파일이 남아 있고 그 pid 가 gone 이라도 끝남은 그대로다",
+      "source": "PR #12 · SessionScanTests.swift:147-300",
+      "input": {"file": "a", "record": {"state": "ended", "cwd": "/p", "updated": -60}, "claude_sessions": [{"pid": 21, "sessionId": "a", "age": 10}], "procs": {"21": "gone"}},
+      "expect": {"kept": true, "state": "ended"}
+    },
+    {
+      "id": "scan.record-pid-not-searched",
+      "rule": "scan",
+      "why": "기록에 pid 가 있으면 sessionId 로 찾지 않는다 · 같은 sessionId 파일의 pid 가 gone 이어도 기록의 pid 가 살아 있으면 그대로다",
+      "source": "PR #12 · SessionScanTests.swift:147-300",
+      "input": {"file": "a", "record": {"state": "working", "pid": 7, "cwd": "/p", "updated": -60, "since": -60}, "claude_sessions": [{"pid": 21, "sessionId": "a", "age": 10}], "procs": {"7": "alive", "21": "gone"}},
+      "expect": {"kept": true, "state": "working"}
+    },
+    {
+      "id": "scan.pidless-gone-no-transcript-removed",
+      "rule": "scan",
+      "why": "pid 를 찾은 쪽이 gone 이고 대화 기록도 없으면 끝난 세션으로 바꾸고 기록 파일까지 지운다. 작업 중 세션의 claude 가 강제로 죽었을 때의 대표 꼴",
+      "source": "PR #12 · SessionScanTests.swift:147-300",
+      "input": {"file": "a", "record": {"state": "working", "cwd": "/p", "updated": -60, "since": -60}, "transcript": false, "claude_sessions": [{"pid": 21, "sessionId": "a", "age": 10}], "procs": {"21": "gone"}},
+      "expect": {"kept": false}
+    },
+    {
+      "id": "scan.newest-claude-file-wins-gone",
+      "rule": "scan",
+      "why": "같은 sessionId 파일이 둘이면(강제로 죽은 claude 의 파일이 남은 채 같은 세션을 다시 열 때) 가장 최근에 고쳐 쓴 파일의 pid 로 생사를 본다. 늦은 쪽이 gone 이면 끝난 세션이고, 죽은 지가 이틀 안이고 대화 기록이 있으므로 기록 파일은 남는다",
+      "source": "PR #12",
+      "input": {"file": "a", "record": {"state": "working", "cwd": "/p", "updated": -60, "since": -60}, "claude_sessions": [{"pid": 21, "sessionId": "a", "age": 600}, {"pid": 22, "sessionId": "a", "age": 10}], "procs": {"21": "alive", "22": "gone"}},
+      "expect": {"kept": true, "state": "ended"}
+    },
+    {
+      "id": "scan.newest-claude-file-wins-alive",
+      "rule": "scan",
+      "why": "같은 sessionId 파일이 둘이면 가장 최근에 고쳐 쓴 파일이 이긴다 · 늦은 쪽 pid 가 살아 있으면 세션은 그대로이고, 오래된 파일의 pid 가 gone 이라도 다른 쪽을 보지 않는다",
+      "source": "PR #12",
+      "input": {"file": "a", "record": {"state": "working", "cwd": "/p", "updated": -60, "since": -60}, "claude_sessions": [{"pid": 21, "sessionId": "a", "age": 600}, {"pid": 22, "sessionId": "a", "age": 10}], "procs": {"21": "gone", "22": "alive"}},
+      "expect": {"kept": true, "state": "working"}
+    },
+    {
+      "id": "scan.record-pid-gone-ended",
+      "rule": "scan",
+      "why": "기록의 pid 로 생사를 보는 기본 꼴이다 · pid 가 확실하게 없으면(ESRCH) 작업 중이던 세션도 끝난 세션으로 바꾼다",
+      "source": "SessionScanTests.swift:174-182",
+      "input": {"file": "a", "record": {"state": "working", "pid": 7, "cwd": "/p", "updated": -60, "since": -60}, "procs": {"7": "gone"}},
+      "expect": {"kept": true, "state": "ended"}
+    },
+    {
+      "id": "scan.ended-older-than-two-days-removed",
+      "rule": "scan",
+      "why": "끝난 세션은 이틀을 넘기면(여기서는 사흘) 대화 기록이 있어도 기록 파일을 지운다",
+      "source": "SessionScanTests.swift:147-162",
+      "input": {"file": "a", "record": {"state": "ended", "cwd": "/p", "updated": -259200}},
+      "expect": {"kept": false}
+    },
+    {
+      "id": "scan.ended-no-transcript-removed",
+      "rule": "scan",
+      "why": "질문 없이 끝난 세션은 이어 열 대화 기록이 없으므로 목록에서 빼고 기록 파일을 지운다",
+      "source": "SessionScanTests.swift:147-162",
+      "input": {"file": "a", "record": {"state": "ended", "cwd": "/p", "updated": -60}, "transcript": false},
+      "expect": {"kept": false}
+    },
+    {
+      "id": "scan.live-no-transcript-kept",
+      "rule": "scan",
+      "why": "첫 요청을 보내기 전의 세션은 대화 기록이 없을 수 있다 · 끝나지 않은 세션은 기록이 없어도 지우지 않는다",
+      "source": "SessionScanTests.swift:147-162",
+      "input": {"file": "a", "record": {"state": "idle", "pid": 7, "cwd": "/p", "updated": -60, "since": -60}, "transcript": false, "procs": {"7": "alive"}},
+      "expect": {"kept": true, "state": "idle"}
+    },
+    {
+      "id": "scan.paused-marker-live",
+      "rule": "scan",
+      "why": "보드가 남긴 일시중지 표지(<sid>.paused) 가 있으면 끝나지 않은 세션의 상태를 일시중지로 바로잡는다",
+      "source": "SessionScanTests.swift:435-446",
+      "input": {"file": "a", "record": {"state": "idle", "pid": 7, "cwd": "/p", "updated": -60, "since": -60}, "procs": {"7": "alive"}, "paused": true},
+      "expect": {"kept": true, "state": "paused"}
+    },
+    {
+      "id": "scan.paused-marker-ended-stays-ended",
+      "rule": "scan",
+      "why": "일시중지 표지가 있어도 끝난 세션은 끝남 그대로다 · 끝난 세션을 일시중지로 되돌리지 않는다",
+      "source": "SessionScanTests.swift:435-446",
+      "input": {"file": "a", "record": {"state": "ended", "cwd": "/p", "updated": -60}, "paused": true},
+      "expect": {"kept": true, "state": "ended"}
+    },
+    {
+      "id": "scan.missing-state-is-idle",
+      "rule": "scan",
+      "why": "기록에 state 가 없으면(또는 null 이면) 대기(idle) 로 본다 · 예전 hook 이 만든 기록과 깨진 기록의 기본값이고, cwd 도 없으면 ? 로 본다",
+      "source": "SessionScanTests.swift:568-588",
+      "input": {"file": "a", "record": {"cwd": null, "state": null, "updated": -60, "since": -60}},
+      "expect": {"kept": true, "state": "idle"}
+    }
+  ]
+}

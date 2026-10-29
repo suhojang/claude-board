@@ -21,6 +21,7 @@
 !/board-tui.py
 !/hooks.py
 !/hook-table/
+!/rules-table/
 !/tools/
 !/build-board.sh
 !/packaging/

@@ -817,8 +817,9 @@ private let marker = "CBFIND-TEST0001"
 // MARK: - 세션 조작
 
 private let exitSteps = "key:escape wait:0.4 text:/exit wait:0.2 key:enter"
-private let carrySteps = "text:\(carryOnPrompt) wait:0.2 key:enter"
+private let carrySteps = "text:\n\(resumePrompt) wait:0.2 key:enter"
 private let carried = "claude --resume s1 +md '\(carryOnPrompt)'"
+private let noResponse = "toast proj: 지금 멈출 응답이 없어 일시중지하지 않았습니다"
 
 @Suite("세션 조작: 일시중지·재개") struct PauseResumeTests {
     @Test("일시중지 — Esc 를 넣고, 넣었으면 그 뒤 시각과 주제로 표지") func 일시중지() throws {
@@ -836,6 +837,22 @@ private let carried = "claude --resume s1 +md '\(carryOnPrompt)'"
         w.terminals.driveOK = false
         w.sessions.pause(session())
         #expect(w.log.calls == ["drive s1 key:escape"])
+    }
+
+    // 대기 세션에 Esc 와 표지를 남기면 멈춘 것이 없는데 일시중지 카드가 되고, 재개가 이어서 진행 요청을 넣어 지난 작업을 다시 시작하게 한다
+    @Test("일시중지 — 멈출 응답이 있는 세션(작업 중·승인 대기)에만, 메뉴와 같은 판정(--action pause 도 여기로 온다)", arguments: [
+        ("working", ["drive s1 key:escape", "paused-write s1"]),
+        ("waiting", ["drive s1 key:escape", "paused-write s1"]),
+        ("idle", [noResponse]),
+        ("paused", [noResponse]),
+        ("ended", [noResponse]),
+    ])
+    func 일시중지_상태(_ state: String, _ calls: [String]) {
+        let w = World()
+        let s = session(state: state, paused: state == "paused")
+        w.sessions.pause(s)
+        #expect(w.log.calls == calls)
+        #expect(isPausable(s) == (calls.count == 2))
     }
 
     @Test("재개", arguments: resumeRows)
@@ -1005,6 +1022,32 @@ private let openRows: [OpenRow] = [
     .init(note: "다른 터미널 — 두 번은 터미널 창까지", place: .terminal, double: true, calls: ["parked s1", "place s1", "focus s1"]),
 ]
 
+struct ReopenEndedRow: Row {
+    let note: String
+    let place: SessionPlace
+    var state = "ended"
+    var headless = false
+    var paused = false
+    let calls: [String]
+}
+
+private let reopenPlain = ["command s1 claude --resume s1", "prompt s1 /w/proj", "launch /w/proj s1 off=false claude --resume s1 +md"]
+private let notEnded = "toast proj: 세션이 아직 끝나지 않아 다시 열지 않았습니다"
+
+private let reopenEndedRows: [ReopenEndedRow] = [
+    .init(note: "끝난 세션은 이어 열되 일시중지하지 않았으면 이어서 진행 요청을 붙이지 않는다(메뉴의 세션 다시 열기)", place: .ended,
+          calls: ["place s1"] + reopenPlain),
+    .init(note: "끝난 일시중지 세션은 이어서 진행(메뉴의 세션 재개)", place: .ended, paused: true, calls: ["place s1"] + reopenCarry),
+    .init(note: "끝난 백그라운드 세션도 대화형으로 이어 연다(메뉴에 있다, 한 번 누르기와 다름)", place: .ended, headless: true,
+          calls: ["place s1"] + reopenPlain),
+    .init(note: "기록은 끝났어도 보드 탭이 그 세션의 claude 를 돌리고 있으면(place 가 탭) 열지 않는다(같은 대화의 claude 가 둘이 된다)",
+          place: .tab(tabA, headless: false), calls: ["place s1", notEnded]),
+    .init(note: "다른 터미널에서 도는 세션은 열지 않는다", place: .terminal, state: "working", calls: ["place s1", notEnded]),
+    .init(note: "살아 있는 일시중지 세션도 열지 않는다(재개를 쓴다)", place: .terminal, state: "paused", paused: true,
+          calls: ["place s1", notEnded]),
+    .init(note: "도는 백그라운드 세션도 열지 않는다", place: .background, state: "working", headless: true, calls: ["place s1", notEnded]),
+]
+
 @Suite("세션 조작: 이어 열기·한 번 누르기") struct ReopenOpenTests {
     @Test("이어 열기", arguments: reopenRows)
     func 이어_열기(_ row: ReopenRow) {
@@ -1026,6 +1069,14 @@ private let openRows: [OpenRow] = [
         #expect(w.log.calls == row.calls)
     }
 
+    @Test("명령줄 다시 열기(--action reopen)", arguments: reopenEndedRows)
+    func 명령줄_다시_열기(_ row: ReopenEndedRow) {
+        let w = World()
+        w.tabs.places["s1"] = row.place
+        w.sessions.reopenEnded(session(state: row.state, headless: row.headless, paused: row.paused))
+        #expect(w.log.calls == row.calls)
+    }
+
     @Test("이어서 진행 요청 붙이기 — 작은따옴표로 감싸고 안의 ' 는 '\\''", arguments: [
         ("claude --resume s1", "이어 가요", "claude --resume s1 '이어 가요'"),
         ("c", "it's", #"c 'it'\''s'"#),
@@ -1038,6 +1089,13 @@ private let openRows: [OpenRow] = [
 
     @Test("이어서 진행 요청 — 기본 글자") func 기본_요청() {
         #expect(carryOnCommand("claude") == "claude '보드에서 일시중지했던 세션을 재개합니다. 중단된 지점부터 직전 작업을 이어서 진행해 주세요.'")
+    }
+
+    // 실측(Claude Code 2.1.312): 첫 출력 전에 Esc 로 멈추면 그 요청은 대화 맥락에서 빠지고 입력 칸에 되돌아온다. 재개 글을 그 뒤에 바로
+    // 붙이면 두 글이 이어 붙고, 지우면 할 일이 사라진다 — 줄을 바꿔 한 메시지로 보내고, 위에 요청이 있는 경우와 없는 경우를 모두 받는 글로
+    @Test("살아 있는 세션의 재개 글 — 줄바꿈으로 시작하고, 이어서 진행하되 위에 되돌아온 요청이 있으면 그것이 중단된 작업") func 재개_글() {
+        #expect(SessionSteps.resume.map { "\($0.0):\($0.1)" } == ["text:\n\(resumePrompt)", "wait:0.2", "key:enter"])
+        #expect(resumePrompt == "보드에서 일시중지했던 세션을 재개합니다. 중단된 지점부터 직전 작업을 이어서 진행해 주세요. 이 메시지에 이 문장보다 먼저 적힌 요청이 있으면 그 요청이 중단된 작업입니다.")
     }
 
     @Test("이어 열 명령의 바탕", arguments: [("", "claude --resume s1"), ("claude --resume s1 --model x", "claude --resume s1 --model x")])

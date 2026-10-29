@@ -66,6 +66,7 @@
       >
         <span class="check">{it.checked ? "✓" : ""}</span>
         <span class="label">{it.label}</span>
+        {#if it.keys}<span class="keys">{it.keys}</span>{/if}
         {#if it.submenu}<span class="arrow">›</span>{/if}
       </button>
     {/if}
@@ -125,6 +126,11 @@
     flex: 1;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+  .keys {
+    margin-left: 18px;
+    font-size: 11.5px;
+    opacity: 0.6;
   }
   .arrow {
     margin-left: 14px;

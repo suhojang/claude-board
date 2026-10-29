@@ -324,3 +324,108 @@ test("끝난 세션을 같은 id 로 화면이 둘 쥐면 먼저 나온 화면�
   assert.equal(placeOf(ended, { paired: {}, owned: {} }, [a, b], [], 1_100).surfaceId, "fa");
   assert.equal(placeOf(ended, { paired: {}, owned: {} }, [b, a], [], 1_100).surfaceId, "fb");
 });
+
+// ── 화면 기억 세션 id — 살아 있는 세션도 runsClaude·typedAt 문지기를 지난다 ────
+
+test("claude 를 안 도는 화면에 옛 세션 id 만 남아 있으면 살아 있는 세션도 붙지 않는다 — 다른 터미널·백그라운드다", () => {
+  // 세션 x 는 이 보드에 없는 콘솔(ttys007)에서 도는 중 — 화면 f1 에는 옛 id 만 남아 있다
+  const f1 = surface({ id: "f1", termId: "t1", sessionId: "x" });
+  for (const state of ["idle", "working"] as const) {
+    const x = session({ id: "x", state, tty: "ttys007" });
+    const plan = pairSessions({ sessions: [x], surfaces: [f1] });
+    const after = surfaceAfter([f1], plan.changes);
+    assert.deepEqual(placeOf(x, plan, after), { kind: "terminal" }, state);
+  }
+  const bg = session({ id: "x", state: "working", tty: "ttys007", headless: true, mode: "-p" });
+  const bgPlan = pairSessions({ sessions: [bg], surfaces: [f1] });
+  assert.deepEqual(placeOf(bg, bgPlan, surfaceAfter([f1], bgPlan.changes)), { kind: "background" });
+});
+
+test("옛 id 를 쥔 화면에서 claude 가 도는 중이면(runsClaude) 살아 있는 세션도 그 화면이다", () => {
+  const f1 = surface({ id: "f1", termId: "t1", sessionId: "x", command: "claude" });
+  const x = session({ id: "x", state: "working", tty: "ttys007" });
+  const plan = pairSessions({ sessions: [x], surfaces: [f1], runsClaude: ["t1"] });
+  assert.deepEqual(plan.changes, []); // claude 가 도는 중이므로 고침이 없다
+  assert.deepEqual(placeOf(x, plan, [f1], ["t1"]), { kind: "tab", surfaceId: "f1", headless: false });
+});
+
+test("3초 안에 claude 명령을 친 화면도 살아 있는 세션을 붙든다 — 창이 지나면 다른 터미널로 떨어진다", () => {
+  const f1 = surface({ id: "f1", termId: "t1", sessionId: "x", command: "claude", typedAt: 10_000 });
+  const x = session({ id: "x", state: "working", tty: "ttys007" });
+  const plan = pairSessions({ sessions: [x], surfaces: [f1], now: 12_999 }); // 창 안
+  assert.deepEqual(plan.changes, []);
+  assert.deepEqual(placeOf(x, plan, [f1], [], 12_999), { kind: "tab", surfaceId: "f1", headless: false });
+  const expired = pairSessions({ sessions: [x], surfaces: [f1], now: 13_000 }); // 창 밖
+  assert.deepEqual(expired.changes, [{ kind: "reset", surfaceId: "f1" }]);
+  assert.deepEqual(placeOf(x, expired, surfaceAfter([f1], expired.changes), [], 13_000), { kind: "terminal" });
+});
+
+// ── 같은 tty 로 짝지어 온 세션이 여럿 — 화면 주 세션은 (updated, since, id) 차례로 고른다 ──
+
+/**
+ * 같은 tty 로 짝지어 온 세션 쌍을 목록 차례와 그 반대로 두 번 짝짓는다 — 주 세션과 화면 고침은 세션 목록
+ * 차례와 관계없어야 한다(mac TabPairing.ttyWinner: updated, since, id 사전식). 주인은 sessionId 고침의
+ * 대상으로, paired 표의 멤버로 각각 드러난다
+ */
+function assertSameTtyWinner(
+  sessions: Session[],
+  expectedPaired: Record<string, string>,
+  expectedChanges: SurfaceChange[],
+): void {
+  const f1 = surface({ id: "f1", termId: "t1" });
+  for (const order of [sessions, [...sessions].reverse()] as Session[][]) {
+    const label = order.map((item) => item.id).join("+");
+    const plan = pairSessions({ sessions: order, surfaces: [f1], now: 1_000 });
+    assert.deepEqual(plan.paired, expectedPaired, label);
+    assert.deepEqual(plan.changes, expectedChanges, label);
+  }
+}
+
+test("같은 tty 에 짝진 세션 둘 — updated 가 늦은 쪽이 화면 주인이고 sessionId 는 주인을 따라간다", () => {
+  // id 글자 차례(b < a)와 updated 차례가 어긋나 있어야 목록 차례·id 차례 양쪽에서 다른 쪽을 거를 수 있다
+  const a = session({ id: "a", tty: "t1", mode: null, updated: 10 });
+  const b = session({ id: "b", tty: "t1", mode: null, updated: 0, since: 20 });
+  assertSameTtyWinner([a, b], { a: "f1", b: "f1" }, [
+    { kind: "sessionId", surfaceId: "f1", sessionId: "a" },
+    { kind: "command", surfaceId: "f1", command: "claude" },
+  ]);
+});
+
+test("updated 도 같으면 화면에 온 지 더 오래된(since 가 늦은) 쪽이 화면 주인이다 — 목록 차례와 무관", () => {
+  const a = session({ id: "a", tty: "t1", mode: null, updated: 5, since: 3 });
+  const b = session({ id: "b", tty: "t1", mode: null, updated: 5, since: 1 });
+  assertSameTtyWinner([a, b], { a: "f1", b: "f1" }, [
+    { kind: "sessionId", surfaceId: "f1", sessionId: "a" },
+    { kind: "command", surfaceId: "f1", command: "claude" },
+  ]);
+});
+
+test("updated·since 까지 같으면 세션 id 글자 차례의 뒤 쪽이 화면 주인이다(mac ttyWinner) — 목록 차례와 무관", () => {
+  const a = session({ id: "a", tty: "t1", mode: null, updated: 5, since: 1 });
+  const b = session({ id: "b", tty: "t1", mode: null, updated: 5, since: 1 });
+  assertSameTtyWinner([a, b], { a: "f1", b: "f1" }, [
+    { kind: "sessionId", surfaceId: "f1", sessionId: "b" },
+    { kind: "command", surfaceId: "f1", command: "claude" },
+  ]);
+});
+
+test("끝난 세션은 주인 견주기에 들지 않는다 — updated 가 아무리 늦어도 paired 에서 빠진다", () => {
+  const a = session({ id: "a", tty: "t1", mode: null, updated: 2 });
+  const z = session({ id: "z", state: "ended", tty: "t1", mode: null, updated: 100 });
+  assertSameTtyWinner([a, z], { a: "f1" }, [
+    { kind: "sessionId", surfaceId: "f1", sessionId: "a" },
+    { kind: "command", surfaceId: "f1", command: "claude" },
+  ]);
+});
+
+test("주인의 id 가 이미 화면에 남아 있으면 sessionId 고침이 없다 — 패자 id 로 되바꾸지도 않는다", () => {
+  const f1 = surface({ id: "f1", termId: "t1", sessionId: "b" }); // 화면이 이미 주인 b 의 id 를 쥔다
+  const a = session({ id: "a", tty: "t1", mode: "-p", updated: 0 }); // 패자(-p 면 command 새기기도 없어 고침 0)
+  const b = session({ id: "b", tty: "t1", mode: "-p", updated: 10 }); // 주인
+  for (const order of [[a, b], [b, a]] as Session[][]) {
+    const label = order.map((item) => item.id).join("+");
+    const plan = pairSessions({ sessions: order, surfaces: [f1], now: 1_000 });
+    assert.deepEqual(plan.paired, { a: "f1", b: "f1" }, label);
+    assert.deepEqual(plan.changes, [], label);
+  }
+});
