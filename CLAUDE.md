@@ -86,8 +86,8 @@ Claude Code hook ──> state.py  ──> ~/.claude/notifier/sessions/<session_
 
 ### 실행 파일
 
-- `Sources/ClaudeBoard/` (17개 파일, 약 15,500줄 — 그 가운데 자율주행 `Autopilot.swift` 약 5,200줄) — 보드 앱 전체. AppKit 창 위에 SwiftUI 화면을 얹었다. 한 파일 `ClaudeBoard.swift` 이던 것을 2026-10-29 에
-  `tools/split-board.py` 로 맨 위 `// MARK: - ` 절마다 한 파일로 나눴다(코드는 옮기기만 했고 머리의 import 는 파일마다 같다 — 자율주행 `Autopilot.swift` 만 `AutopilotRules` 를 더 import 한다. 자율주행 절은 가지 `autopilot-stage2` 에 main 을 합칠 때 같은 스크립트로 떨어졌다). 절 이름과 내용이 어긋난 곳이 있으니
+- `Sources/ClaudeBoard/` (18개 파일, 약 16,900줄 — 그 가운데 자율주행 `Autopilot.swift` 약 5,700줄·`AutopilotTopic.swift` 약 750줄) — 보드 앱 전체. AppKit 창 위에 SwiftUI 화면을 얹었다. 한 파일 `ClaudeBoard.swift` 이던 것을 2026-10-29 에
+  `tools/split-board.py` 로 맨 위 `// MARK: - ` 절마다 한 파일로 나눴다(코드는 옮기기만 했고 머리의 import 는 파일마다 같다 — 자율주행 `Autopilot.swift`·`AutopilotTopic.swift` 만 `AutopilotRules` 를 더 import 한다. 자율주행 절은 가지 `autopilot-stage2` 에 main 을 합칠 때 같은 스크립트로 떨어졌고, `AutopilotTopic.swift` 는 2단계 5-2b 에서 새로 만든 파일이다). 절 이름과 내용이 어긋난 곳이 있으니
   (`BoardView` 는 `BrainrotMascots.swift`, `Store` 는 `LimitSwitching.swift`, `AppDelegate` 는 `SettingsScreen.swift`) 파일 이름보다 아래 표나 grep 으로 찾는다.
 
   | 파일 | 절 | 들어 있는 것 |
@@ -103,7 +103,8 @@ Claude Code hook ──> state.py  ──> ~/.claude/notifier/sessions/<session_
   | `BrainrotMascots.swift` | 브레인롯 캐릭터 | `Mascot`·`BrainrotFigure`, 터미널 앱 `TerminalAppStore`, 터미널 독 `EdgeDock`, 창 투명도, 보드 화면 `BoardView` |
   | `AppUpdate.swift` | 업데이트 | `Updater`(`releaseRepo`), `UpdateBanner` |
   | `EmbeddedTerminal.swift` | 내장 터미널 | `TerminalHub`·`BoardTab`·`BoardSurface`·`BoardTerminalView`·`BoardRootView`·`PaneDivider`, `confirmShutdown`, `mdRenderDir`, `boardLog` |
-  | `Autopilot.swift` | 자율주행 | 뿌리 `autopilotRoot`, 실행·단위 모델(`APRun`·`APUnit`), `AutopilotStore`, 기록 저장소 읽기 `APRecords`, 보드 본체 줄(`APRunLine`·`APRunCard`·`APEndedLine`·`APBar`), 자율주행 중 `APRunningScreen`·지난 실행 `APHistoryScreen`, 출발 `APStart`·`APStartSheet`, 합치기·승격 `APMerge`·`APMergeSheet`, 엔진·git 부르기(`apEngine`·`apGit`) |
+  | `Autopilot.swift` | 자율주행 | 뿌리 `autopilotRoot`, 실행·단위 모델(`APRun`·`APUnit`), `AutopilotStore`(원문 지우기 `purge` 포함), 기록 저장소 읽기 `APRecords`, 보드 본체 줄(`APRunLine`·`APRunCard`·`APEndedLine`·`APBar`), 자율주행 중 `APRunningScreen`·지난 실행 `APHistoryScreen`, 출발 `APStart`·`APStartSheet`(출발 확인의 설정 줄·승격 차례·자율주행 지시 그 자리 바꾸기), 합치기·승격 `APMerge`·`APMergeSheet`, 엔진·git 부르기(`apEngine`·`apGit`) |
+  | `AutopilotTopic.swift` | 자율주행 · 주제로 시작 | 출발 준비 1단계의 주제로 시작 입력 판 `APTopic`·`APTopicStep1`·`APSlotEditor`(주제 글·자료 링크·작업 경로·기술 스택), 5-2b 규칙의 진짜 어댑터(`APFolderFiles`·`APBoardGit`·`APRepoFiles`·`APHTTPFeeds`·`APCatalogCacheFile`·`APRawRunFiles`·`APSystemClock`) |
   | `BoardWindow.swift` | 창 | `window`, `SizeGuard` |
   | `BoardTiers.swift` | 창 크기 단계 | `BoardTier`·`BoardFit`, 미니 화면 `MiniBoard` |
   | `KeyboardShortcuts.swift` | 단축키 | `Shortcuts`·`ShortcutSettings` |
@@ -129,7 +130,7 @@ Claude Code hook ──> state.py  ──> ~/.claude/notifier/sessions/<session_
   `SettingsScreen.swift`(설정 화면) — 앱 메뉴 > 설정…(⌘,)이 터미널 영역을 덮는 `SettingsView`(`SettingsHostingView` 에 얹음, 열고 닫기는 `SettingsScreen`). 항목은 `SettingsItem` 표 하나에서 그리고 검색도 이 표로 한다.
   `KeyboardShortcuts.swift`(단축키) — `Shortcuts`(사용자가 바꾼 키를 얹은 표를 @Published 로 쥐고 UserDefaults `shortcuts`·메뉴 키 달기·Carbon 전역 단축키·키 감시의 NSEvent 분기)·`ShortcutSettings`(키 받기),
   표와 판정은 BoardRules 의 `ShortcutTable`(메뉴·안내 글자도 여기서 읽음). 로그인할 때 열기는 `LoginItem`(LaunchAgent plist 를 쓰고 지우고, 끄면 `login-launch-off` 표지).
-  `Autopilot.swift`(자율주행) — `AutopilotStore` 가 자율주행 뿌리(시험 빌드는 `Claude Board Dev`)의 `runs/` 와 `private/records.sqlite`(읽기 전용)를 읽어 실행 줄·자율주행 중·지난 실행 화면을 그리고, 일시정지·재개·중단은 `control.json` 으로 남긴다. 출발 준비 시트(`APStart`, 지금은 지난 실행 이어 가기만)가 출발 전 실행 폴더를 쓰고 앱 안 엔진의 `status --json`·`prerun`·`start` 를 부른다. 합치기·승격 시트(`APMerge`)는 끝난 실행의 승격 차례 단계를 git 읽기로 미리 보이고(바뀐 줄·충돌) 사람이 누를 때만 엔진 `finish` 를 부른다. 원래 작업 트리로 도는 경로에 보드 탭 새 세션을 열면 `startSession` 이 경고한다. 판정 규칙은 `AutopilotRules`(아래)에서 import 한다(가지 기록·합치기 상태·남은 변경 보관·지난 실행 고르기). 설계는 `docs/자율주행/설계.md`.
+  `Autopilot.swift`(자율주행) — `AutopilotStore` 가 자율주행 뿌리(시험 빌드는 `Claude Board Dev`)의 `runs/` 와 `private/records.sqlite`(읽기 전용)를 읽어 실행 줄·자율주행 중·지난 실행 화면을 그리고, 일시정지·재개·중단은 `control.json` 으로 남긴다. 출발 준비 시트(`APStart`, 원천은 지난 실행 이어 가기와 주제로 시작 — 주제로 시작은 초안 세션(5단계) 전이라 입력 판과 보드가 할 수 있는 준비(버전 목록·스택 감지·새 폴더 만들기)까지)가 출발 전 실행 폴더를 쓰고 앱 안 엔진의 `status --json`·`prerun`·`start` 를 부른다. 경로 카드 오른쪽 클릭 "이 경로에서 자율주행…"이 그 경로로 연다. 출발 확인에서 모델·멈출 선·승격 차례(출발하면 `projects/<프로젝트>.json`)와 자율주행 지시(세트 `set/autopilot.md`, 고치기 전 글은 `set-backup/`)를 그 자리에서 바꾼다. 지난 실행의 "원문 지우기"는 실행 폴더만 지우고 `purged/<실행 id>.json` 에 남긴다. 합치기·승격 시트(`APMerge`)는 끝난 실행의 승격 차례 단계를 git 읽기로 미리 보이고(바뀐 줄·충돌) 사람이 누를 때만 엔진 `finish` 를 부른다. 원래 작업 트리로 도는 경로에 보드 탭 새 세션을 열면 `startSession` 이 경고한다. 판정 규칙은 `AutopilotRules`(아래)에서 import 한다(가지 기록·합치기 상태·남은 변경 보관·지난 실행 고르기). 설계는 `docs/자율주행/설계.md`.
 - `Sources/BoardRules/` — 보드의 순수 규칙 라이브러리(Foundation 만): 세션·서브에이전트·카드 모델(`Session`·`Sub`·`Group`·`Ctx`·`Brain`), 세션 기록 해석(`Sub.parse`·`sessionID`), 카드에 보일 세션·묶음·정렬(`visibleSessions`·`groupSessions`·`sortGroups`), 화면 경로의 홈 줄이기(`displayPath`), 요금제 사용량(`Usage.swift`: `Limit`·응답 해석 `parseUsage`·토큰 상태 `loginToken`·캐시를 믿을지·받을지 `checkUsageCache`·받기 `fetchUsage`·받은 결과 처리 `settleUsage`, 앱도 쓰는 `isoDate`),
   계정 전환(`Accounts.swift`: `Account`(만료는 `isExpired(at:)`)·저장 계정 목록 해석과 고치기·전환 JSON 변환 `replacingAccountToken`·`switchConfig`·저장 `storeAccount`·`saveCurrentAccount`·전환 `switchAccount`·지우기 `removeAccount`),
   자동 전환 판단(`AutoSwitch.swift`: `decideAutoSwitch` — 한도 세션·전환 까닭·다음 계정과 한도 표시·이어 갈 세션을 값으로 돌려준다),
@@ -159,8 +160,14 @@ Claude Code hook ──> state.py  ──> ~/.claude/notifier/sessions/<session_
   엔진 `finish discard` 의 기록 줄 `apDiscardRows`(지울 것이 없어도 합칠 쪽은 버린 줄)·`finish` 의 뿌리 `apFinishRoot`(`--dev` 는 run.json 과 맞는지만), 합치기·승격 시트의 "출발 가지에만 있던 커밋" 경고 `apCarriesBase`.
   `Leftovers.swift`: 가지를 바꾸기 전 남은 변경 `apLeftover`(그대로·커밋·보관·바꾸지 않음)·읽기 전용 자리에서 보관할 새 경로 `apStashPaths`·보관 메시지 `apStashMessage`·누구 몫 `apStashUnit`.
   `History.swift`: 지난 실행 상세에 보일 실행 `apHistoryPick`(거른 프로젝트 안에서). 이름의 AP 는 보드 자율주행 절의 이름 짓기를 그대로 따른다.
-  아직 바깥을 부르는 규칙이 없어 포트가 없다 — 생기면 `Ports.swift` 에 두고 진짜 어댑터는 보드·엔진에, 가짜는 `Tests/AutopilotRulesTests` 에만 둔다. 입력 승격 차례는 값(`[APStep]`)으로 받고 프로젝트 설정 파일 읽기(`apPromotion`)는 보드에 남았다.
-  시험(`Tests/AutopilotRulesTests/` 의 `BranchesTests`·`LeftoversTests`·`HistoryTests`)은 옮기기 전 함수로 돌린 덤프의 입력·기대값 표다(시험 빌드 뿌리 장난감 기록 26개를 줄이고 경로를 `/w/…` 로 바꿈, 경계 입력). 규칙을 고치면 그 줄의 기대값과 note 를 함께 고친다(5-3b 에서 고친 줄은 note 에 "5-3b").
+  2단계 5-2b(출발 화면 나머지): `Promotion.swift`(가지 자리 `apBranchRoles`·저장소 가지로 채운 승격 차례 `apDefaultPromotion`(보드에서 옮김)·바꾼 차례의 고칠 것 `apPromotionProblems`·고를 것 `apPromotionChoices`),
+  `StartSettings.swift`(설정 줄 모델·멈출 선 고르기와 확인, 출발 준비가 쓸 값의 차례 `apStartSettings`: 프로젝트 설정 → 지난 실행), `Instruction.swift`(자율주행 지시 줄 차이 `apLineDiff`·머리 줄·저장 확인),
+  `Stack.swift`(기존 저장소 빌드·설정 파일 감지 `apDetectStack`·주제 글 낱말 대조 `apTopicHits`·`apTopicStack`·다른 스택 경고 `apStackConflicts`), `Links.swift`(자료 링크 종류·읽기 상태 `apLinkInfo`, 읽지는 않음),
+  `NewRepo.swift`(새 폴더 확인 `apNewRepoCheck`·git 차례·유스케이스 `apCreateRepo`), `Versions.swift`(공식 버전 목록: 고정 주소 `APFeed`·응답 풀기·목록과 추천 `apBuildCatalog`·유스케이스 `apLoadCatalog`, 하루 캐시 → 받기 → 지난 캐시 → 앱에 든 목록 `BuiltinVersions.swift`),
+  `Purge.swift`(지난 실행 원문 지우기 `apPurgeCheck`·유스케이스 `apPurgeRaw`, 실행 폴더만), `Carry.swift`(이어 간 줄 밖의 열린 미룬 몫 `apOpenParked`).
+  바깥은 포트(`Ports.swift`: `APClock`·`APFolders`·`APGitRunner`·`APStackFiles`·`APVersionFeeds`·`APVersionCache`·`APRawFiles`, BoardRules 의 `Clock` 과 이름이 겹치지 않게 AP)로만 부른다 — 진짜 어댑터는 보드 `AutopilotTopic.swift`, 가짜는 `Tests/AutopilotRulesTests` 에만.
+  입력 승격 차례는 값(`[APStep]`)으로 받고 프로젝트 설정 파일 읽기(`apPromotion`)·기록 저장소 읽기(`APRecords`)는 보드에 남았다.
+  시험(`Tests/AutopilotRulesTests/` 의 `BranchesTests`·`LeftoversTests`·`HistoryTests`·`PromotionTests`, 5-2b 새 규칙은 `TopicTests`·`VersionsTests`·`StartTests`(가짜 어댑터))은 옮기기 전 함수로 돌린 덤프의 입력·기대값 표다(시험 빌드 뿌리 장난감 기록 26개를 줄이고 경로를 `/w/…` 로 바꿈, 경계 입력). 규칙을 고치면 그 줄의 기대값과 note 를 함께 고친다(5-3b 에서 고친 줄은 note 에 "5-3b").
   자율주행 규칙은 맨 위 `rules-table/`(Windows 공용 표)에 넣지 않는다.
 - `Sources/ClaudeAutopilot/main.swift` — 자율주행 엔진 `claude-autopilot`(`start`·`run`·`control`·`status`·`records import`·`prerun`·`finish`(`--dev` 는 그 실행의 뿌리와 맞는지만 본다), 사용법은 파일 머리 주석). SwiftPM 실행 타깃 `ClaudeAutopilot`(언어 모드 5, `AutopilotRules` 에 기댐)이고 한 파일이라 최상위 실행문이 있다.
   보드 앱 밖에서 LaunchAgent(KeepAlive)로 돌고, 출발 때 실행 폴더 `pinned/` 에 고정한 자기 사본과 설정(`frozen.json`, 해시는 LaunchAgent 인자)으로 돈다. 모델 세션은 Claude Code 샌드박스(`--settings`)·고른 환경 변수·`--setting-sources project,local` 로 띄운다.

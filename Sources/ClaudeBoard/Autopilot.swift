@@ -466,7 +466,10 @@ struct APLogGroup: Identifiable {
         let st = [apStamp(db), apStamp(db + "-wal")]   // WAL 이라 체크포인트 전까지 본 파일 시각이 그대로다 — 둘 다 본다
         if st != dbStamp {
             dbStamp = st
-            history = APRecords.list(db)
+            var h = APRecords.list(db)
+            let purged = apPurgeRecords()   // 원문을 지운 실행(5-2b) — 기록 저장소는 그대로라 보드가 쓴 지운 기록을 붙인다
+            for i in h.runs.indices { h.runs[i].purged = purged[h.runs[i].id] }
+            history = h
             detailKey = ""
         }
         // 상세에 보일 실행은 규칙 apHistoryPick(AutopilotRules/History.swift) — 거른 프로젝트 안에서
@@ -476,6 +479,36 @@ struct APLogGroup: Identifiable {
         guard id != detailKey else { return }
         detailKey = id
         detail = id.isEmpty ? nil : history.runs.first { $0.id == id }.flatMap { APRecords.detail(db, $0) }
+    }
+
+    // 원문 지우기(2026-10-22 사용자 결정: 자동으로 지우지 않고 지난 실행 화면에서 사람이, 2단계 5-2b) — 규칙 apPurgeCheck 의 입력.
+    // 끝 정리·합치기 기다림은 실행 폴더의 run.json 으로(APRun.parse), 따로 작업 트리는 그 자리가 있는지, 출발 준비가 이어 가는 중인지
+    func purgeInput(_ r: APPastRun) -> APPurgeInput {
+        let parsed = APRun.parse(id: r.id, dir: r.runDir)
+        return APPurgeInput(run: r.id, root: autopilotRoot, runDir: r.runDir, state: parsed?.state ?? r.state, wrapped: parsed?.wrapped ?? false,
+                            mergeWaiting: parsed?.mergeWaiting ?? false, worktreeLeft: FileManager.default.fileExists(atPath: NSHomeDirectory() + "/.claude-board/worktrees/" + r.id),
+                            inDraft: APStart.shared.pastId == r.id, exists: FileManager.default.fileExists(atPath: r.runDir))
+    }
+    @Published private(set) var purging: String?
+    @Published private(set) var purgeError: [String: String] = [:]
+    func purge(_ r: APPastRun) {
+        guard purging == nil else { return }
+        let input = purgeInput(r)
+        purging = r.id
+        purgeError[r.id] = nil
+        DispatchQueue.global(qos: .userInitiated).async {
+            let x = apPurgeRaw(input, files: APRawRunFiles(), clock: APSystemClock())
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self.purging = nil
+                    if let e = x.error { self.purgeError[r.id] = e }
+                    if let rec = x.record { boardLog("자율주행 \(r.id): 원문 지움 \(rec.path) 파일 \(rec.files)개 \(rec.bytes)바이트" + (rec.error.map { " · 오류 \($0)" } ?? "")) }
+                    self.cache[r.runDir] = nil
+                    self.dbStamp = []   // 지운 기록을 붙여 목록을 다시 읽는다
+                    self.tick()
+                }
+            }
+        }
     }
 
     // 경로 카드에 들어갈 실행
@@ -579,6 +612,9 @@ struct APPastRun: Equatable, Identifiable {
     var stashes: [APStash] = []                         // 읽기 전용 자리에 남은 변경을 엔진이 보관한 것(5-3b ①)
     var epic: String?
     var storyRepos: [String: [APPastStoryRepo]] = [:]   // 스토리 키 → 저장소마다 스토리 가지·합친 작업 수·마지막으로 받은 가지(기록 저장소 runs.branches)
+    var root: String?                                   // 프로젝트의 작업 경로(기록 저장소 projects.root) — 경로 카드에서 연 출발 준비가 이 경로의 실행을 찾는다(5-2b)
+    var setId: String?                                  // 이 실행이 쓴 자율주행 세트(기록 저장소 runs.set_id)
+    var purged: APPurgeRecord?                          // 원문을 지운 기록(자율주행 뿌리 purged/<실행 id>.json, 5-2b)
     var jira: Bool { jiraUnits > 0 }
 
     // 결과 한 줄 — "4개 중 3개 통과 · 상한 1"
@@ -692,7 +728,8 @@ enum APRecords {
               r.worktree, r.branches, r.harness, r.epic, r.run_dir,
               (SELECT COUNT(*) FROM units u WHERE u.run_id = r.id AND u.status = 'skipped'),
               (SELECT COUNT(*) FROM units u WHERE u.run_id = r.id AND u.story_key IS NOT NULL),
-              (SELECT COUNT(DISTINCT u.story_key) FROM units u WHERE u.run_id = r.id AND u.story_key IS NOT NULL)
+              (SELECT COUNT(DISTINCT u.story_key) FROM units u WHERE u.run_id = r.id AND u.story_key IS NOT NULL),
+              p.root, r.set_id
             FROM runs r LEFT JOIN projects p ON p.id = r.project_id
             WHERE r.state IN ('done', 'stopped', 'error')
             ORDER BY COALESCE(r.started, r.updated) DESC
@@ -744,10 +781,63 @@ enum APRecords {
             }
             r.epic = c[19] as? String
             r.runDir = c[20] as? String ?? ""
+            r.root = c[24] as? String
+            r.setId = c[25] as? String
             h.runs.append(r)
         }
         h.error = err
         return h
+    }
+
+    // 작업 경로(저장소 뿌리)의 프로젝트와 그 실행 수(5-2b 주제로 시작의 기존 저장소)
+    static func project(_ path: String, root: String) -> (id: String, runs: Int)? {
+        guard let db = open(path) else { return nil }
+        defer { sqlite3_close_v2(db) }
+        var err: String?
+        guard let c = rows(db, "SELECT p.id, (SELECT COUNT(*) FROM runs r WHERE r.project_id = p.id) FROM projects p WHERE p.root = ?", [root], error: &err).first,
+              let id = c[0] as? String else { return nil }
+        return (id, Int(c[1] as? Double ?? 0))
+    }
+
+    // 지난 판 자율주행 지시 — 그 프로젝트에서 가장 최근에 출발한 실행이 쓴 세트(sets.instruction, 엔진이 출발 때 앞뒤를 잘라 남김). 5-2b 지시 차이
+    static func lastSet(_ path: String, project: String) -> (text: String, at: Double, run: String)? {
+        guard let db = open(path) else { return nil }
+        defer { sqlite3_close_v2(db) }
+        var err: String?
+        let sql = """
+            SELECT s.instruction, COALESCE(r.started, s.created), r.id FROM runs r JOIN sets s ON s.id = r.set_id
+            WHERE r.project_id = ? AND s.instruction IS NOT NULL ORDER BY COALESCE(r.started, r.updated) DESC LIMIT 1
+            """
+        guard let c = rows(db, sql, [project], error: &err).first, let t = c[0] as? String else { return nil }
+        return (t, c[1] as? Double ?? 0, c[2] as? String ?? "")
+    }
+
+    // 그 프로젝트의 미룬 몫(next_start) 모두와 카드 답(정함·닫음이 하나라도 있으면 그것, 아니면 마지막 답), 고른 실행이 이어 간 줄(continues 를 거슬러 열 단계)
+    static func projectCarry(_ path: String, project: String, from run: String) -> (rows: [APCarryRow], answers: [String: String], chain: Set<String>) {
+        guard let db = open(path) else { return ([], [:], []) }
+        defer { sqlite3_close_v2(db) }
+        var err: String?
+        let rs = rows(db, """
+            SELECT c.id, c.run_id, c.unit_n, c.kind, c.title, c.why, COALESCE(r.started, r.updated) FROM carry c JOIN runs r ON r.id = c.run_id
+            WHERE r.project_id = ? AND c.kind = 'next_start'
+            """, [project], error: &err).map { c in
+            APCarryRow(id: c[0] as? String ?? "", run: c[1] as? String ?? "", unit: Int(c[2] as? Double ?? 0), kind: c[3] as? String ?? "",
+                       title: apPlain(c[4] as? String ?? ""), why: apPlain(c[5] as? String ?? ""), started: c[6] as? Double)
+        }
+        var answers: [String: String] = [:]
+        for c in rows(db, """
+            SELECT k.card_id, k.answer FROM cards k JOIN runs r ON r.id = k.run_id WHERE r.project_id = ? AND k.answer IS NOT NULL
+            ORDER BY COALESCE(r.started, r.updated)
+            """, [project], error: &err) {
+            guard let k = c[0] as? String, let a = c[1] as? String else { continue }
+            if !["decide", "close"].contains(answers[k] ?? "") { answers[k] = a }
+        }
+        var chain: Set<String> = [run], cur = run
+        for _ in 0..<10 {
+            guard let prev = rows(db, "SELECT continues FROM runs WHERE id = ?", [cur], error: &err).first?.first as? String, !prev.isEmpty, !chain.contains(prev) else { break }
+            chain.insert(prev); cur = prev
+        }
+        return (rs, answers, chain)
     }
 
     static func detail(_ path: String, _ run: APPastRun) -> APPastDetail? {
@@ -1195,7 +1285,7 @@ struct APBar: View {
                 APButton(title: start.preparing ? "출발 준비 중" : (start.step >= 3 || start.prepared ? "출발 준비 끝 · 이어 가기" : "출발 준비"),
                          icon: "steeringwheel", tint: Palette.accent, help: "닫아 둔 출발 준비를 다시 엽니다", axid: "ap-draft") { APStart.shared.open() }
             } else {
-                APButton(title: "새 자율주행", icon: "plus", help: "출발 준비를 엽니다(지금은 지난 실행 이어 가기만)", axid: "ap-new") { APStart.shared.open() }
+                APButton(title: "새 자율주행", icon: "plus", help: "출발 준비를 엽니다(지난 실행 이어 가기·주제로 시작)", axid: "ap-new") { APStart.shared.open() }
             }
         }
     }
@@ -1636,6 +1726,7 @@ struct APHistoryScreen: View {
     @ObservedObject private var fit = BoardFit.shared
     @State private var folded: Set<String> = []     // 접은 프로젝트 묶음
     @State private var reports: Set<Int> = []       // 보고서를 펼친 단위
+    @State private var confirmPurge: String?        // 원문 지우기 확인을 연 실행(화면 안 확인, 5-2b)
 
     private var shown: [APPastRun] { ap.history.runs.filter { ap.historyProject == nil || $0.projectName == ap.historyProject } }
     // 프로젝트별 묶음 — 마지막 실행이 최근인 프로젝트부터
@@ -1760,6 +1851,7 @@ struct APHistoryScreen: View {
                     if r.jira { APChip(text: "스토리 \(r.stories)") }
                     Spacer(minLength: 0)
                     if let s = r.stateLabel { APChip(text: s.0, color: s.1, strong: true) }
+                    if r.purged != nil { APChip(text: "원문 지움") }
                     if let m = r.mergeLabel { APChip(text: m.0, color: m.1, strong: true) }
                 }
                 HStack(spacing: 10) {
@@ -1816,18 +1908,54 @@ struct APHistoryScreen: View {
                 }
             }
             actionButtons(d.run)
+            purgeBlock(d.run)
         }
     }
 
-    // 이 실행 이어 가기(출발 준비를 이 실행으로 엶, 2단계 5-2a) · 보고서 보기(3단계 보고서 틀이라 잠금)
+    // 원문 지우기(2026-10-22 사용자 결정: 자동으로 지우지 않고 사람이, 2단계 5-2b) — 지울 수 있는지는 규칙 apPurgeCheck, 화면 안 확인 뒤에만 지운다.
+    // 지우는 것은 실행 폴더 runs/<실행 id>/ 하나이고, 지운 기록은 자율주행 뿌리 purged/<실행 id>.json
+    @ViewBuilder private func purgeBlock(_ r: APPastRun) -> some View {
+        if let rec = r.purged {
+            Text("원문을 지웠습니다(\(apDate(rec.at)) · 파일 \(rec.files)개 · \(ByteCountFormatter.string(fromByteCount: rec.bytes, countStyle: .file))). 지난 실행 목록과 단위 결과는 기록 저장소에 남았습니다."
+                 + (rec.error.map { " 지우다 생긴 일: \($0)" } ?? ""))
+                .boardFont(10.5).foregroundStyle(rec.error == nil ? Color.secondary : APColor.limit).fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("ap-purged-note")
+        }
+        if let e = ap.purgeError[r.id] { apNote("원문을 지우지 못했습니다: \(e)", APColor.fail) }
+        if confirmPurge == r.id, case .ok(let path) = apPurgeCheck(ap.purgeInput(r)) {
+            APBox(title: "원문 지우기", note: "되돌릴 수 없습니다", tint: APColor.fail, axid: "ap-purge-confirm") {
+                Text(apHome(path)).boardFont(10.5, design: .monospaced).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                apNote("이 실행 폴더(stream 원문·결과 기록 파일·대기열 정의·진행 기록)를 지웁니다. 기록 저장소의 지난 실행 목록과 단위 결과(결과 기록 전문)는 남고, "
+                       + "엔진 전용 private/\(r.id)/(하네스 사본)와 프로젝트 설정·세트도 남깁니다. 지운 뒤에는 이 실행을 이어 가거나(남은 단위의 정의가 없어집니다) 합칠 수 없습니다.")
+                HStack(spacing: 6) {
+                    APButton(title: ap.purging == r.id ? "지우는 중" : "지우기", icon: "trash", tint: APColor.fail, enabled: ap.purging == nil, axid: "ap-purge-go") {
+                        ap.purge(r); confirmPurge = nil
+                    }
+                    APButton(title: "그만두기", axid: "ap-purge-cancel") { confirmPurge = nil }
+                }
+            }
+        }
+    }
+
+    // 이 실행 이어 가기(출발 준비를 이 실행으로 엶, 2단계 5-2a) · 원문 지우기(5-2b) · 보고서 보기(3단계 보고서 틀이라 잠금)
     private func actionButtons(_ r: APPastRun) -> some View {
-        WrapRow(spacing: 6) {
-            APButton(title: "이 실행 이어 가기", primary: true, enabled: r.project != nil,
-                     help: r.project == nil ? "프로젝트가 없는 실행이라 이어 갈 수 없습니다" : "남은 단위와 미룬 사람 몫을 불러와 출발 준비를 엽니다",
+        let pc = apPurgeCheck(ap.purgeInput(r))
+        var purgeOK = false, purgeWhy = ""
+        switch pc {
+        case .ok: purgeOK = true; purgeWhy = "이 실행 폴더(원문)를 지웁니다. 화면 안에서 한 번 더 확인합니다"
+        case .gone: purgeWhy = r.purged == nil ? "실행 폴더가 이미 없습니다" : "원문을 이미 지웠습니다"
+        case .refuse(let w): purgeWhy = w
+        }
+        return WrapRow(spacing: 6) {
+            APButton(title: "이 실행 이어 가기", primary: true, enabled: r.project != nil && r.purged == nil,
+                     help: r.project == nil ? "프로젝트가 없는 실행이라 이어 갈 수 없습니다"
+                        : r.purged != nil ? "원문을 지워 남은 단위의 정의가 없습니다. 이 실행의 열린 미룬 몫은 같은 프로젝트의 다른 실행을 이어 갈 때 '이어 간 줄 밖'으로 보입니다"
+                        : "남은 단위와 미룬 사람 몫을 불러와 출발 준비를 엽니다",
                      axid: "ap-continue-\(r.id)") { APStart.shared.open(continuing: r.id) }
             APButton(title: "합치기·승격", icon: "arrow.triangle.merge", primary: r.merge?.hasWaiting == true, enabled: r.hasBranches && FileManager.default.fileExists(atPath: r.runDir + "/run.json"),
                      help: r.hasBranches ? "바뀐 줄을 보고 승격 차례대로 합치거나 버립니다" : "엔진이 만든 가지가 없는 실행입니다(또는 실행 폴더를 지웠습니다)",
                      axid: "ap-merge-\(r.id)") { APMerge.shared.open(r.runDir) }
+            APButton(title: "원문 지우기", icon: "trash", enabled: purgeOK && ap.purging == nil, help: purgeWhy, axid: "ap-purge-\(r.id)") { confirmPurge = r.id }
             APButton(title: "보고서 보기", enabled: false, help: "아직 만들지 않았습니다(보고서 틀과 함께)") {}
         }
     }
@@ -1850,6 +1978,7 @@ struct APHistoryScreen: View {
             APStashNote(stashes: r.stashes)
             carryBlock(d)
             actionButtons(r)
+            purgeBlock(r)
         }
         .padding(12)
         .background(RoundedRectangle(cornerRadius: 12).fill(Color.white.opacity(0.04)))
@@ -2226,6 +2355,9 @@ struct APEstimate: Equatable {
     var short: Bool { samples < 3 }
 }
 
+// 지난 판 자율주행 지시(기록 저장소 sets.instruction) — 그 판을 쓴 실행과 출발 시각
+struct APSetVersion: Equatable { let text: String; let at: Double; let run: String }
+
 struct APStory: Equatable, Identifiable {
     let id: String               // 스토리 키 또는 새 스토리(new-k)
     var key: String?
@@ -2335,6 +2467,22 @@ extension APRecords {
     @Published private(set) var flash = 0
     // 이어 갈 지난 Jira 실행이 만든 스토리·작업 가지 가운데 아직 남아 출발을 막는 것(2026-10-28 사용자 결정: 먼저 합치거나 버린 뒤 이어 감, 2단계 5-3)
     @Published private(set) var leftBranches: [String] = []
+    // 2단계 5-2b — 원천(continue·topic, 고르지 않았으면 빈 글자), 주제로 시작의 입력 판, 경로 카드 오른쪽 클릭 "이 경로에서 자율주행…"으로 연 경로
+    @Published private(set) var source = ""
+    let topic = APTopic()
+    @Published private(set) var presetRoot: String?
+    // 5-2b — 출발 확인의 설정 줄(모델·멈출 선)·승격 차례·자율주행 지시를 그 자리에서 바꾸기, 이어 간 줄 밖의 열린 미룬 몫
+    @Published private(set) var settingsFrom = "past"            // 설정 값이 어디서 왔나(project·past·default, 규칙 apStartSettings)
+    @Published private(set) var settingsEdited = false
+    @Published private(set) var settingsProblems: [String] = []
+    @Published private(set) var promotionEdited = false
+    private var promotionBefore: [APStep] = []
+    @Published private(set) var lastSet: APSetVersion?
+    @Published var editingSet = false
+    @Published var setDraft = ""
+    @Published private(set) var setNote: String?
+    @Published private(set) var openParked: [APCarryRow] = []
+    @Published private(set) var includeParked: Set<String> = []
     private(set) var id = ""
     private(set) var dir = ""
     private var settings: [String: Any] = [:]
@@ -2387,11 +2535,49 @@ extension APRecords {
     func open(continuing runId: String? = nil) {
         if !sweptDrafts { sweepDrafts() }
         if let runId, runId != pastId {
-            if hasDraft, !preparing, !starting { dropFolder(); reset() }
-            if !hasDraft { load(select: runId) }
-        } else if !hasDraft { reset(); load(select: nil) }
+            if (hasDraft || source == "topic"), !preparing, !starting { dropFolder(); clearAll() }
+            if !hasDraft, source != "topic" { load(select: runId) }
+        } else if !hasDraft, source != "topic" { reset(); load(select: nil) }
         checkLeftovers()
         present()
+    }
+    // 경로 카드 오른쪽 클릭 "이 경로에서 자율주행…"(와이어프레임 보드 본체 ②, 설계 2장) — 그 경로를 작업 경로로 채운 출발 준비 1단계.
+    // 그 경로에 지난 실행이 있으면 가장 최근 실행을 이어 갈 원천으로, 없으면 주제로 시작(기존 저장소)으로 연다(설계 판단). 준비하는 중이면 그 준비를 연다
+    func open(at path: String) {
+        if !sweptDrafts { sweepDrafts() }
+        if preparing || starting { present(); return }
+        dropFolder()
+        clearAll()
+        presetRoot = path
+        past = APRecords.list(db).runs.filter { $0.project != nil }
+        if let r = pastAt(path).first { choose(r.id) } else { chooseSource("topic") }
+        checkLeftovers()
+        present()
+    }
+    // 그 경로의 지난 실행(최근 것부터) — 프로젝트 작업 경로가 그 경로이거나, 그 경로가 작업 경로 안이거나, 작업 경로를 품은 폴더(홈은 뺌). APRun.covers 와 같은 규칙
+    func pastAt(_ path: String) -> [APPastRun] {
+        past.filter { r in
+            guard let root = r.root else { return false }
+            return path == root || path.hasPrefix(root + "/") || (root.hasPrefix(path + "/") && path != NSHomeDirectory())
+        }
+    }
+    // 원천 고르기 — 지난 실행 이어 가기·주제로 시작(나머지 셋은 잠금). 준비하는 중에는 바꾸지 않는다
+    func chooseSource(_ key: String) {
+        guard !preparing, !starting, key != source else { return }
+        switch key {
+        case "continue":
+            let cand = presetRoot.map { pastAt($0) } ?? past
+            if let r = cand.first ?? past.first { choose(r.id) }
+        case "topic":
+            let from = presetRoot ?? (root.isEmpty ? nil : root)
+            let keep = past   // 이어 갈 실행 목록은 둔다(다시 이어 가기로 돌아올 수 있게)
+            if hasDraft { dropFolder(); reset() }
+            past = keep
+            source = "topic"
+            step = 1
+            if topic.existingPath.isEmpty, topic.pathMode == "existing", let f = from { topic.existingPath = f }
+        default: break
+        }
     }
     // 보드를 끄면 준비는 사라진다(메모리에만) — 보드가 처음 출발 준비를 열 때 drafts/ 에 남은 출발하지 않은 폴더를 치운다(drafts/ 는 보드만 쓴다)
     private var sweptDrafts = false
@@ -2438,7 +2624,7 @@ extension APRecords {
         guard !starting else { return }
         dropFolder()
         close()
-        reset()
+        clearAll()
     }
 
     private func reset() {
@@ -2448,6 +2634,16 @@ extension APRecords {
         cards = []; answers = [:]; policyLoaded = []; bases = [:]; baseNote = ""; promotion = []; promotionSaved = false
         epic = ""; stories = []; estimates = [:]; starting = false; startError = nil; changedBy = nil; leftBranches = []
         id = ""; dir = ""; settings = [:]; tickets = [:]; needNewId = false; proposedOnce = false
+        settingsFrom = "past"; settingsEdited = false; settingsProblems = []; promotionEdited = false; promotionBefore = []
+        lastSet = nil; editingSet = false; setDraft = ""; setNote = nil; openParked = []; includeParked = []
+        if source == "continue" { source = "" }
+    }
+    // 원천·주제 입력·경로 카드 경로까지 모두(준비 버리기·출발 뒤)
+    private func clearAll() {
+        reset()
+        source = ""
+        presetRoot = nil
+        topic.reset()
     }
 
     private var db: String { autopilotRoot + "/private/records.sqlite" }
@@ -2465,6 +2661,7 @@ extension APRecords {
         reset()
         past = APRecords.list(db).runs.filter { $0.project != nil }
         pastId = runId
+        source = "continue"
         project = proj
         let detail = APRecords.detail(db, run) ?? APPastDetail(run: run)
         let later = APRecords.later(db, project: proj, run: run)
@@ -2533,8 +2730,22 @@ extension APRecords {
         var seen = Set<String>()
         for u in units { if let s = u.story, seen.insert(s).inserted { stories.append(APStory(id: s, key: s, kind: u.kind)) } }
         let setPath = autopilotRoot + "/private/projects/\(proj)/set/autopilot.md"
-        setText = (try? String(contentsOfFile: setPath, encoding: .utf8)).flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 }
+        setText = (try? String(contentsOfFile: setPath, encoding: .utf8)).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.flatMap { $0.isEmpty ? nil : $0 }
         setAt = mtime(setPath)?.timeIntervalSince1970
+        lastSet = APRecords.lastSet(db, project: proj).map { APSetVersion(text: $0.text, at: $0.at, run: $0.run) }
+        // 모델·멈출 선: 출발 확인에서 바꿔 프로젝트 설정에 남긴 값이 있으면 그것(규칙 apStartSettings, 5-2b). 없으면 지난 실행 그대로(5-2a)
+        let pick = apStartSettings(project: ps, past: pr)
+        settingsFrom = pick.from
+        if pick.from == "project" {
+            if let m = pick.model { settings["model"] = m }
+            var sl = settings["stopline"] as? [String: Any] ?? [:]
+            if let w = pick.week { sl["seven_day"] = w }
+            if let f = pick.five { sl["five_hour"] = f }
+            if !sl.isEmpty { settings["stopline"] = sl }
+        }
+        // 이어 간 줄 밖의 열린 미룬 몫(5-2b) — 같은 프로젝트의 다른 실행이 미뤄 아직 정함·닫음으로 답하지 않은 것. 보이고, 고르면 출발 카드로
+        let pc = APRecords.projectCarry(db, project: proj, from: runId)
+        openParked = apOpenParked(rows: pc.rows, answers: pc.answers, chain: pc.chain, shown: carryPark.map { (id: $0.id, title: $0.title) })
         estimates = calibrate()
         checkLeftovers()
     }
@@ -2850,8 +3061,9 @@ extension APRecords {
                                         APOption(key: "keep", label: "그대로 두기", note: "단위에 넣습니다. 일하지 않고 통과로 남을 수 있습니다")],
                               recommended: "drop", unit: u.id))
         }
-        for c in carryPark {
-            out.append(APCard(id: c.id, kind: "next_start", label: "지난 실행에서 미룬 사람 몫", title: c.title,
+        let outside = openParked.filter { includeParked.contains($0.id) }.map { APCarry(id: $0.id, unit: $0.unit, kind: $0.kind, title: $0.title, why: $0.why) }
+        for c in carryPark + outside {
+            out.append(APCard(id: c.id, kind: "next_start", label: carryPark.contains(c) ? "지난 실행에서 미룬 사람 몫" : "이어 간 줄 밖에서 미룬 사람 몫", title: c.title,
                               why: (c.why.isEmpty ? "" : c.why + " ") + "(지난 실행의 단위 \(c.unit) 이 정하지 못해 보류했습니다)",
                               options: [APOption(key: "park", label: "다시 미룸", note: "이번 실행에서도 그 부분은 보류하고 결과 기록에 남깁니다"),
                                         APOption(key: "decide", label: "근거 문서로 정해도 됨", note: "사람 몫이 아니라고 보고 모델이 근거 문서와 대조해 정합니다"),
@@ -2993,6 +3205,173 @@ extension APRecords {
         runStatus(prerun: prerun, ids: Set(list.map(\.id)))
     }
 
+    // MARK: 5-2b 이어 간 줄 밖의 열린 미룬 몫 — 고르면 출발 카드로(같은 꼴, 답은 그 미룬 몫의 id 로 남아 다음 출발에서 다시 묻지 않는다)
+    func toggleParked(_ id: String) {
+        guard !preparing, !starting else { return }
+        if includeParked.contains(id) { includeParked.remove(id) } else { includeParked.insert(id) }
+        if prepared { buildCards() }
+    }
+
+    // MARK: 5-2b 설정 줄(모델·멈출 선) 그 자리에서 바꾸기 — 이 준비의 run.json 에 쓰고, 출발하면 프로젝트 설정에 남긴다
+    func setModel(_ m: String) {
+        applySettings(model: m, week: stop7 / 100, five: stop5 / 100)
+    }
+    func setStop(week: Int? = nil, five: Int? = nil) {
+        applySettings(model: model, week: Double(week ?? Int(stop7.rounded())) / 100, five: Double(five ?? Int(stop5.rounded())) / 100)
+    }
+    private func applySettings(model m: String, week: Double, five: Double) {
+        guard !preparing, !starting, !rechecking else { return }
+        let p = apSettingsProblems(model: m, week: week, five: five)
+        settingsProblems = p
+        guard p.isEmpty else { return }
+        let changedModel = m != model
+        settings["model"] = m
+        var sl = settings["stopline"] as? [String: Any] ?? [:]
+        sl["seven_day"] = week
+        sl["five_hour"] = five
+        settings["stopline"] = sl
+        settingsEdited = true
+        if changedModel { estimates = calibrate(); buildCards() }   // 추정 보정은 같은 모델의 표본만 쓴다
+        if !dir.isEmpty { writeDraft(chosen + heldByCards) }
+    }
+
+    // MARK: 5-2b 승격 차례 그 자리에서 바꾸기 — 바꾼 차례는 규칙 apPromotionProblems 로 보고, 고칠 것이 있으면 출발을 잠근다. 출발하면 프로젝트 설정에 덮어쓴다
+    // (끝난 같은 프로젝트 실행의 합치기·승격도 그 차례를 따른다)
+    var promotionBranches: [String] {
+        // 묶음이면 모든 저장소에 있는 가지만(엔진은 받는 가지가 없는 저장소를 건너뛴다 — 차례는 모두에 있는 가지로 짠다)
+        let lists = repos.compactMap { repoInfo[$0]?.branches }
+        guard var common = lists.first else { return [] }
+        for l in lists.dropFirst() { common = common.filter(l.contains) }
+        return common.filter { !$0.hasPrefix("autopilot/") }
+    }
+    var promotionProblems: [String] { apPromotionProblems(promotion, branches: promotionBranches) }
+    private func editPromotion(_ f: (inout [APStep]) -> Void) {
+        guard !starting else { return }
+        if !promotionEdited { promotionBefore = promotion }
+        var p = promotion
+        f(&p)
+        promotion = p
+        promotionEdited = true
+    }
+    func setPromotion(_ i: Int, from: String? = nil, into: String? = nil, after: String?? = nil) {
+        editPromotion { p in
+            guard i < p.count else { return }
+            let s = p[i]
+            p[i] = APStep(from: from ?? s.from, into: into ?? s.into, after: after ?? s.after)
+        }
+    }
+    func addPromotionStep() {
+        editPromotion { p in
+            let used = Set(p.map(\.into))
+            let into = promotionBranches.first { !used.contains($0) } ?? promotionBranches.first ?? "dev"
+            p.append(APStep(from: p.last?.into ?? "autopilot", into: into, after: p.last?.into))
+        }
+    }
+    func removePromotionStep(_ i: Int) { editPromotion { p in if i < p.count { p.remove(at: i) } } }
+    func refillPromotion() { editPromotion { p in p = apDefaultPromotion(promotionBranches) } }
+    func undoPromotion() {
+        guard promotionEdited else { return }
+        promotion = promotionBefore
+        promotionEdited = false
+    }
+
+    // MARK: 5-2b 자율주행 지시 그 자리에서 고치기 — 세트 private/projects/<프로젝트>/set/autopilot.md 를 고친다(설계 5장 5절: 보드가 출발 확인에서 고친 판).
+    // 엔진이 출발 때 고정하고 기록 저장소 sets 에 남긴다(보드는 저장소를 쓰지 않는다). 고치기 전 글은 세트 밖 set-backup/ 에 남긴다(엔진이 고정하지 않는 자리)
+    func beginEditSet() { setDraft = setText ?? ""; setNote = nil; editingSet = true }
+    func cancelEditSet() { editingSet = false; setNote = nil }
+    func saveSet() {
+        guard let p = project, !starting else { return }
+        if let why = apInstructionSaveProblem(setDraft) { setNote = why; return }
+        let dirSet = autopilotRoot + "/private/projects/\(p)/set", path = dirSet + "/autopilot.md"
+        let text = setDraft.trimmingCharacters(in: .whitespacesAndNewlines) + "\n"
+        let fm = FileManager.default
+        try? fm.createDirectory(atPath: dirSet, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        if let old = fm.contents(atPath: path), String(decoding: old, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines) != setDraft.trimmingCharacters(in: .whitespacesAndNewlines) {
+            let bdir = autopilotRoot + "/private/projects/\(p)/set-backup"
+            try? fm.createDirectory(atPath: bdir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            let b = bdir + "/autopilot-" + formatter("yyyyMMdd-HHmmss").string(from: Date()) + ".md"
+            if !fm.createFile(atPath: b, contents: old, attributes: [.posixPermissions: 0o600]) { setNote = "고치기 전 글을 남기지 못해 저장하지 않았습니다(\(apHome(b)))"; return }
+        }
+        let tmp = path + ".tmp-\(getpid())"
+        guard fm.createFile(atPath: tmp, contents: Data(text.utf8), attributes: [.posixPermissions: 0o600]), rename(tmp, path) == 0 else {
+            unlink(tmp); setNote = "지시를 쓰지 못했습니다(\(apHome(path)))"; return
+        }
+        boardLog("자율주행: 자율주행 지시를 고쳤습니다 \(path)")
+        setText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        setAt = mtime(path)?.timeIntervalSince1970
+        editingSet = false
+        setNote = "저장했습니다. 이 판이 다음 출발의 기준이 됩니다(출발할 때 엔진이 고정하고 기록 저장소에 남깁니다)."
+    }
+
+    // MARK: 5-2b 주제로 시작의 2단계 "보드가 준비" — 모델·바깥 연결 없이 되는 줄만 하고(버전 목록·스택 감지·새 폴더 만들기), 링크 읽기(4단계)·
+    // 뼈대·초안 세션(5단계)·하네스 읽기(7단계)는 잠금과 까닭. 초안 세션이 단위를 쓰기 전이라 기계 검사·작업 트리 확인·판정 미리 돌리기도 하지 않는다
+    func prepareTopic() {
+        guard source == "topic", !preparing, topic.ready else { return }
+        step = 2
+        preparing = true; prepared = false
+        problems = []
+        let t = topic
+        let new = t.pathMode == "new"
+        var ls: [APPrepLine] = []
+        ls.append(APPrepLine(id: "links", title: "링크 읽기", state: "skip",
+                             note: t.links.isEmpty ? "자료 링크가 없습니다" : "\(t.links.count)개 · 바깥 연결(4단계) 뒤에 메타 정보만 읽습니다. 지금은 읽지 않습니다(연결 필요)",
+                             detail: t.links.map { "\($0.kind) · \($0.url) · \($0.state == "unreadable" ? "읽을 수 없음: " : "연결 필요: ")\($0.why)" }))
+        if new || !t.locked {
+            ls.append(APPrepLine(id: "versions", title: "버전 목록 받기", state: t.catalog == nil ? "wait" : "done", sec: 0,
+                                 note: t.catalog == nil ? "" : t.catalogLabel + " · " + Set(APFeed.allCases.map(\.label)).sorted().joined(separator: " · ")))
+        } else {
+            ls.append(APPrepLine(id: "versions", title: "버전 목록 받기", state: "skip", note: "기존 프로젝트의 규격을 따르므로 받지 않습니다"))
+        }
+        if new {
+            ls.append(APPrepLine(id: "stack", title: "기술 스택", state: "done", sec: 0, note: "고른 스택: " + t.summary()))
+            ls.append(APPrepLine(id: "folder", title: "새 폴더 만들기", state: "run", started: Date().timeIntervalSince1970))
+        } else {
+            let d = t.detected
+            ls.append(APPrepLine(id: "stack", title: "기술 스택 감지", state: t.locked ? "done" : "warn", sec: 0,
+                                 note: t.locked ? t.summary() + " (" + [d?.back, d?.front, d?.db].compactMap { $0?.sources.first }.joined(separator: " · ") + ")"
+                                                : "감지된 것 없음 · 고른 스택: " + t.summary(),
+                                 detail: t.conflicts))
+            ls.append(APPrepLine(id: "harness", title: "하네스 읽기", state: "skip", note: "하네스 확인 지점 읽기와 지시 초안은 7단계에서 엽니다"))
+        }
+        ls.append(APPrepLine(id: "skeleton", title: new ? "뼈대 만들기" : "뼈대", state: "skip",
+                             note: new ? "공식 생성기로 뼈대를 자율주행 가지 첫 커밋에 넣는 것은 5단계(시험 실행기)에서 엽니다" : "기존 저장소라 뼈대를 만들지 않습니다"))
+        ls.append(APPrepLine(id: "draft", title: "초안 세션", state: "skip",
+                             note: "명세·단위·판정 시나리오·출발 카드·지시 초안을 쓰는 초안 세션은 5단계에서 엽니다. 그때까지 주제로 시작은 여기서 멈춥니다"))
+        ls.append(APPrepLine(id: "check", title: "단위마다 기계 검사 · 따로 작업 트리 확인 · 판정 미리 돌리기", state: "skip",
+                             note: "초안 세션이 단위와 판정 시나리오를 쓴 뒤에 합니다"))
+        lines = ls
+        project = t.projectName
+        root = t.root
+        let finishLater: @MainActor () -> Void = {
+            self.preparing = false
+            self.prepared = true
+            if !self.shown { TerminalHub.shared.toast("자율주행 출발 준비(주제로 시작)가 끝났습니다. 초안 세션(5단계) 전이라 여기서 멈춥니다") }
+        }
+        // 버전 목록이 아직이면 받은 뒤 그 줄을 채우고 끝낸다(새 폴더·감지에 실패한 기존 저장소)
+        let afterFolder: @MainActor () -> Void = {
+            guard new || !t.locked else { finishLater(); return }
+            if t.catalog == nil { self.setLine("versions", "run") }
+            t.whenCatalog {
+                guard self.source == "topic" else { return }
+                self.setLine("versions", t.catalog?.origin == .builtin || t.catalog?.origin == .stale ? "warn" : "done",
+                             note: t.catalogLabel + " · " + Set(APFeed.allCases.map(\.label)).sorted().joined(separator: " · "),
+                             detail: (t.catalog?.failed ?? []).map { "받지 못함: \($0)" })
+                finishLater()
+            }
+        }
+        guard new else { afterFolder(); return }
+        t.createRepo { r in
+            guard self.source == "topic" else { return }
+            if r.ok {
+                self.setLine("folder", "done", note: apHome(t.newPlan?.path ?? "") + " · " + r.done.joined(separator: " · "))
+                self.root = t.newPlan?.path ?? self.root
+            } else {
+                self.setLine("folder", "fail", note: r.error ?? "새 폴더를 만들지 못했습니다", detail: r.done)
+            }
+            afterFolder()
+        }
+    }
+
     // 출발을 막는 까닭(모두 풀려야 출발 단추가 풀린다)
     var locks: [String] {
         var l: [String] = []
@@ -3003,6 +3382,8 @@ extension APRecords {
         if left > 0 { l.append("카드 \(cards.count)장 가운데 \(left)장이 남았습니다. 다 고르면 출발할 수 있습니다") }
         if !problems.isEmpty { l.append("엔진의 출발 전 확인에 고칠 것이 \(problems.count)개 있습니다") }
         if !leftBranches.isEmpty { l.append("지난 실행의 스토리·작업 가지 \(leftBranches.count)개가 남아 있습니다. 합치기·승격에서 먼저 합치거나 버린 뒤 이어 갑니다") }
+        if promotionEdited, !promotionProblems.isEmpty { l.append("바꾼 승격 차례에 고칠 것이 \(promotionProblems.count)개 있습니다") }
+        if editingSet { l.append("자율주행 지시를 고치는 중입니다. 저장하거나 그만둔 뒤 출발합니다") }
         if jira {
             if epic.isEmpty { l.append("에픽 번호를 넣어 주세요(출발 준비 1단계)") }
             else if epic.range(of: "^[A-Z][A-Z0-9_]*-[0-9]+$", options: .regularExpression) == nil { l.append("에픽 번호 꼴이 아닙니다(예: SHOP-10)") }
@@ -3039,7 +3420,7 @@ extension APRecords {
                     if r.code == 0 {
                         self.remember()
                         self.close()
-                        self.reset()
+                        self.clearAll()
                         AutopilotStore.shared.screen = .running(runId)
                     } else {
                         self.startError = r.out.isEmpty ? "엔진이 출발하지 않았습니다(종료 코드 \(r.code))" : r.out
@@ -3058,8 +3439,15 @@ extension APRecords {
         var lb = o["last_base"] as? [String: Any] ?? [:]
         for (r, b) in bases { lb[r] = b }
         o["last_base"] = lb
-        if o["promotion"] == nil, !promotion.isEmpty {
+        if (o["promotion"] == nil && !promotion.isEmpty) || promotionEdited {
             o["promotion"] = promotion.map { s -> [String: Any] in var d: [String: Any] = ["from": s.from, "into": s.into]; if let a = s.after { d["after"] = a }; return d }
+        }
+        // 출발 확인에서 바꾼 모델·멈출 선은 프로젝트 설정으로(다음 출발의 기본값, 규칙 apStartSettings). 바꾸지 않았으면 쓰지 않는다
+        if settingsEdited {
+            o["model"] = settings["model"]
+            var sl = o["stopline"] as? [String: Any] ?? [:]
+            for (k, v) in settings["stopline"] as? [String: Any] ?? [:] { sl[k] = v }
+            o["stopline"] = sl
         }
         let pol = cards.filter(\.policy).compactMap { c in answers[c.id].map { (c.id, $0) } }
         if !pol.isEmpty {
@@ -3214,10 +3602,15 @@ struct APStartSheet: View {
         HStack(spacing: 8) {
             APMark()
             Text(s.step == 4 ? "출발 확인" : "새 자율주행").boardFont(15, weight: .bold).fixedSize()
-            if let p = s.project { APChip(text: p, color: APColor.board) }
+            if s.source == "topic" { APChip(text: "주제로 시작", color: Palette.accent) }
+            if let p = s.project, s.source != "topic" || s.step > 1 { APChip(text: p, color: APColor.board) }
             if s.jira { APChip(text: "Jira 연결", color: APColor.jira) }
             Spacer(minLength: 4)
-            if s.hasDraft { APButton(title: "준비 버리기", icon: "trash", enabled: !s.starting, help: "출발하지 않은 이 준비와 실행 폴더를 지웁니다", axid: "ap-start-discard") { s.discard() } }
+            if s.hasDraft || s.source == "topic" {
+                APButton(title: "준비 버리기", icon: "trash", enabled: !s.starting && !s.preparing,
+                         help: s.source == "topic" ? "이 준비(주제 글·링크·고른 스택)를 버립니다. 보드가 이미 만든 새 폴더는 지우지 않습니다" : "출발하지 않은 이 준비와 실행 폴더를 지웁니다",
+                         axid: "ap-start-discard") { s.discard() }
+            }
             APButton(title: "닫기", help: "준비는 남아 뒤에서 이어 갑니다. 보드 위 '출발 준비'로 다시 엽니다", axid: "ap-start-close") { s.close() }
         }
         .padding(.horizontal, 16).padding(.top, 12).padding(.bottom, 8)
@@ -3228,7 +3621,7 @@ struct APStartSheet: View {
         return WrapRow(spacing: 6) {
             ForEach(0..<4, id: \.self) { i in
                 let n = i + 1
-                let can = n == 1 || (n == 2 && (s.preparing || s.prepared)) || (n >= 3 && s.prepared && !s.preparing)
+                let can = n == 1 || (n == 2 && (s.preparing || s.prepared)) || (n >= 3 && s.prepared && !s.preparing && s.source != "topic")
                 Button {
                     guard can, n != s.step, !s.starting else { return }
                     if n == 4 { s.toConfirm() } else if n == 3 { s.toProposal() } else { s.step = n }
@@ -3256,6 +3649,7 @@ struct APStartSheet: View {
 struct APStartFoot: View {
     @ObservedObject var s: APStart
     @ObservedObject private var ap = AutopilotStore.shared   // 같은 경로에서 도는 실행이 끝나면 잠금이 풀리게
+    @ObservedObject private var tp = APStart.shared.topic    // 주제로 시작 입력이 바뀌면 다음 단추가 풀리게
     var body: some View {
         HStack(alignment: .center, spacing: 8) {
             if s.step > 1 { APButton(title: "이전", enabled: !s.starting, axid: "ap-prev") { s.step == 4 ? s.toProposal() : (s.step = s.step - 1) } }
@@ -3266,9 +3660,12 @@ struct APStartFoot: View {
 
     @ViewBuilder private var message: some View {
         switch s.step {
-        case 1: apNote(s.hasDraft ? "원천은 하나만 고릅니다" : "이어 갈 지난 실행이 아직 없습니다")
+        case 1:
+            if s.source == "topic" { apNote(tp.blocker ?? "원천은 하나만 고릅니다", tp.blocker == nil ? .secondary : APColor.limit) }
+            else { apNote(s.hasDraft ? "원천은 하나만 고릅니다" : (s.past.isEmpty ? "이어 갈 지난 실행이 아직 없습니다. 주제로 시작을 고를 수 있습니다" : "원천을 하나 고릅니다")) }
         case 2:
             if s.preparing { apNote("준비하는 중입니다. 끝나면 다음으로 갈 수 있습니다. 시트를 닫아도 뒤에서 이어 갑니다") }
+            else if s.source == "topic" { apNote("주제로 시작은 초안 세션(5단계)을 만들 때까지 여기서 멈춥니다. 단위 제안과 출발 확인은 초안 세션이 단위를 쓴 뒤에 열립니다", APColor.limit) }
             else if !s.problems.isEmpty { apNote("엔진이 출발 전 확인에서 고칠 것을 찾았습니다. 단위 제안은 볼 수 있고 출발은 잠깁니다", APColor.limit) }
             else if s.mode == "in_place", !s.modeReason.contains("설정으로") { apNote("따로 작업 트리 확인이 실패해 원래 작업 트리에서 돕니다", APColor.limit) }
             else { apNote("준비가 끝났습니다") }
@@ -3286,11 +3683,19 @@ struct APStartFoot: View {
     @ViewBuilder private var next: some View {
         switch s.step {
         case 1:
-            APButton(title: "다음: 보드가 준비", primary: true, enabled: s.hasDraft && !s.units.isEmpty && s.noDefs == nil,
-                     help: s.units.isEmpty ? "이어 갈 단위가 없습니다" : "보드가 혼자 준비합니다", axid: "ap-next") {
-                if s.prepared || s.preparing { s.step = 2 } else { s.prepare() }
+            if s.source == "topic" {
+                APButton(title: "다음: 보드가 준비", primary: true, enabled: tp.ready && !s.preparing, help: tp.blocker ?? "보드가 혼자 준비합니다(새 폴더면 이때 만듭니다)", axid: "ap-next") {
+                    s.prepareTopic()
+                }
+            } else {
+                APButton(title: "다음: 보드가 준비", primary: true, enabled: s.hasDraft && !s.units.isEmpty && s.noDefs == nil,
+                         help: s.units.isEmpty ? "이어 갈 단위가 없습니다" : "보드가 혼자 준비합니다", axid: "ap-next") {
+                    if s.prepared || s.preparing { s.step = 2 } else { s.prepare() }
+                }
             }
-        case 2: APButton(title: "다음: 단위 제안", primary: true, enabled: s.prepared && !s.preparing, axid: "ap-next") { s.toProposal() }
+        case 2:
+            APButton(title: "다음: 단위 제안", primary: true, enabled: s.prepared && !s.preparing && s.source != "topic",
+                     help: s.source == "topic" ? "초안 세션(5단계)이 단위를 써야 단위 제안으로 갑니다" : "", axid: "ap-next") { s.toProposal() }
         case 3: APButton(title: "다음: 출발 확인", primary: true, enabled: s.prepared, axid: "ap-next") { s.toConfirm() }
         default:
             APButton(title: s.starting ? "출발하는 중" : "출발", icon: "steeringwheel", primary: true, enabled: s.locks.isEmpty && !s.starting,
@@ -3303,31 +3708,54 @@ struct APStartFoot: View {
 struct APStep1: View {
     @ObservedObject var s: APStart
     @State private var pickRun = false
+    @State private var openParked = false
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
+            if let p = s.presetRoot {
+                HStack(spacing: 6) {
+                    Image(systemName: "folder").font(.system(size: 11)).foregroundStyle(Palette.accent)
+                    apNote("경로 카드에서 열었습니다: \(apHome(p)). 이 경로가 작업 경로로 채워져 있고 원천만 고르면 됩니다.")
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityIdentifier("ap-preset-root")
+            }
             APBox(title: "어디서 일을 가져올까요?", note: "하나만 고릅니다") {
-                source("continue", "지난 실행 이어 가기", continueSummary, lock: nil)
+                source("continue", "지난 실행 이어 가기", continueSummary, lock: continueLock)
                 source("todo", "저장소 할 일 문서", "docs/TODO.md 같은 파일과 그 안의 절을 고릅니다", lock: "가져오기 세션이 항목마다 단위 초안을 쓰는 7단계에서 엽니다")
                 source("list", "바깥 목록", "Jira 필터나 Notion 데이터베이스. 연결이 있을 때만 고를 수 있습니다", lock: "바깥 연결(4단계) 뒤 7단계에서 엽니다")
                 source("legacy", "옛 자동화 옮기기", "다른 도구로 돌던 자동화의 멈춘 자리 기록과 원장을 가져옵니다", lock: "7단계에서 엽니다")
-                source("topic", "주제로 시작", "주제 글과 자료 링크를 주면 초안 세션이 명세와 단위를 씁니다. 새 폴더에서도 됩니다",
-                       lock: "입력 판(주제 글·자료 링크·작업 경로·기술 스택)은 다음 조각, 초안 세션은 5단계에서 엽니다")
+                source("topic", "주제로 시작", "주제 글과 자료 링크를 주면 초안 세션이 명세와 단위를 씁니다. 새 폴더에서도 됩니다", lock: nil,
+                       after: "입력 판은 지금 열고, 링크 읽기는 바깥 연결(4단계), 명세·단위를 쓰는 초안 세션은 5단계에서 엽니다")
             }
-            if !s.past.isEmpty { pastList }
-            if s.hasDraft { pathBox }
-            if !s.leftBranches.isEmpty { APLeftBranches(s: s) }
-            if s.jira { APEpicBox(s: s) }
-            if s.hasDraft { importBox }
+            if s.source == "topic" {
+                APTopicStep1(s: s, t: s.topic)
+            } else {
+                if !s.past.isEmpty, s.source == "continue" { pastList }
+                if s.hasDraft { pathBox }
+                if !s.leftBranches.isEmpty { APLeftBranches(s: s) }
+                if s.jira { APEpicBox(s: s) }
+                if s.hasDraft { importBox }
+            }
         }
     }
 
+    private var continueLock: String? {
+        if s.past.isEmpty { return "끝난 자율주행 실행이 아직 없습니다" }
+        if let p = s.presetRoot, s.pastAt(p).isEmpty { return "이 경로(\(apHome(p)))의 지난 실행이 없습니다" }
+        return nil
+    }
+
     private var continueSummary: String {
-        guard let r = s.pastRun else { return "끝난 자율주행 실행이 아직 없습니다" }
+        guard let r = s.pastRun else {
+            if s.past.isEmpty { return "끝난 자율주행 실행이 아직 없습니다" }
+            if let p = s.presetRoot { let n = s.pastAt(p).count; return n == 0 ? "남은 단위·미룬 사람 몫을 이어 갑니다" : "이 경로의 끝난 실행 \(n)개 가운데 하나를 이어 갑니다" }
+            return "끝난 실행 \(s.past.count)개 가운데 하나를 이어 갑니다"
+        }
         return "\(apDay(r.started)) 실행 · 남은 단위 \(s.units.count) · 미룬 사람 몫 \(s.carryPark.count) · 새로 찾은 일 \(s.carryNew.count)"
     }
 
-    private func source(_ key: String, _ title: String, _ sub: String, lock: String?) -> some View {
-        APPickRow(on: key == "continue" && s.hasDraft, enabled: lock == nil && !s.past.isEmpty, help: lock ?? "", axid: "ap-src-\(key)", action: {}) {
+    private func source(_ key: String, _ title: String, _ sub: String, lock: String?, after: String? = nil) -> some View {
+        APPickRow(on: s.source == key, enabled: lock == nil && !s.preparing && !s.starting, help: lock ?? "", axid: "ap-src-\(key)", action: { s.chooseSource(key) }) {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text(title).boardFont(12, weight: .semibold).fixedSize()
@@ -3335,6 +3763,7 @@ struct APStep1: View {
                 }
                 apNote(sub)
                 if let lock { apNote(lock, APColor.limit.opacity(0.85)) }
+                if let after { apNote(after) }
             }
         }
     }
@@ -3342,8 +3771,8 @@ struct APStep1: View {
     private var pastList: some View {
         let cur = s.pastRun.map { "\($0.projectName) · \(apDate($0.started)) · \($0.result)" } ?? "고르지 않음"
         return APFold(title: "이어 갈 실행", summary: cur, axid: "ap-fold-past", open: $pickRun) {
-            apNote("끝난 실행 가운데 하나 · 최근 것부터")
-            ForEach(s.past.prefix(12)) { r in
+            apNote("끝난 실행 가운데 하나 · 최근 것부터" + (s.presetRoot == nil ? "" : " · 경로 카드의 경로에서 돈 실행만"))
+            ForEach((s.presetRoot.map { s.pastAt($0) } ?? s.past).prefix(12)) { r in
                 APPickRow(on: r.id == s.pastId, enabled: !s.preparing && !s.starting, axid: "ap-past-\(r.id)", action: { s.choose(r.id) }) {
                     VStack(alignment: .leading, spacing: 2) {
                         HStack(spacing: 6) {
@@ -3378,6 +3807,23 @@ struct APStep1: View {
             item("새로 찾은 일", s.carryNew.count, s.carryNew.map(\.title))
             if !s.carryNew.isEmpty {
                 apNote("새로 찾은 일은 아직 판정 명령이 없어 이번 실행에 넣지 못하고 대기열 후보로 남습니다(단위 초안은 가져오기 세션이 쓰는 뒤 조각).")
+            }
+            if !s.openParked.isEmpty { openParkedBox }
+        }
+    }
+
+    // 이어 간 줄 밖의 열린 미룬 몫(5-2b) — 같은 프로젝트의 다른 실행이 미뤄 아직 정하거나 닫지 않은 것. 고르면 출발 카드로 넣는다(기본은 넣지 않음)
+    private var openParkedBox: some View {
+        APFold(title: "이어 간 줄 밖에서 미룬 사람 몫 \(s.openParked.count)", summary: s.includeParked.isEmpty ? "보이기만 · 카드에 넣지 않음" : "카드에 넣음 \(s.includeParked.count)",
+               axid: "ap-fold-open-parked", open: $openParked) {
+            apNote("이 실행이 이어 간 줄 밖의 실행(이어 가지 않은 옛 실행 등)이 미룬 몫입니다. 아직 어느 출발 카드에서도 정하거나 닫지 않았습니다. 고르면 이번 출발 카드에 넣습니다.")
+            ForEach(s.openParked, id: \.id) { c in
+                APPickRow(on: s.includeParked.contains(c.id), square: true, enabled: !s.preparing && !s.starting, axid: "ap-open-parked-\(c.id)", action: { s.toggleParked(c.id) }) {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(c.title).boardFont(11.5, weight: .semibold).fixedSize(horizontal: false, vertical: true)
+                        apNote("\(apDay(c.started)) 실행 \(c.run) · 단위 \(c.unit)" + (c.why.isEmpty ? "" : " · " + c.why))
+                    }
+                }
             }
         }
     }
@@ -3670,6 +4116,7 @@ struct APConfirm: View {
     @ObservedObject var s: APStart
     @ObservedObject private var ap = AutopilotStore.shared
     @State private var open: Set<String> = []
+    @State private var editPromo = false
     @State private var card = 0
     @State private var hl = false
     private func bind(_ k: String) -> Binding<Bool> { Binding(get: { open.contains(k) }, set: { if $0 { open.insert(k) } else { open.remove(k) } }) }
@@ -3784,15 +4231,75 @@ struct APConfirm: View {
             let from = st.from == "autopilot" ? (s.jira ? "스토리 가지" : "autopilot 가지") : st.from
             return "\(i < nums.count ? nums[i] : "\(i + 1).") \(st.into) ← \(from)" + (st.after.map { " (\($0) 뒤)" } ?? "")
         }.joined(separator: " · ")
+        let probs = s.promotionProblems
         return HStack(alignment: .firstTextBaseline, spacing: 8) {
             Text("승격 차례").boardFont(11, weight: .semibold).foregroundStyle(.secondary).frame(width: 52, alignment: .leading)
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 3) {
                 Text((s.jira ? "스토리마다 " : "") + (text.isEmpty ? "승격할 가지(dev·live·master)가 없습니다" : text)).boardFont(11.5).fixedSize(horizontal: false, vertical: true)
-                apNote(s.promotionSaved ? "프로젝트 설정의 차례입니다." : "저장소 가지로 채웠습니다. 출발하면 프로젝트 설정에 남깁니다.")
-                APButton(title: "프로젝트 설정 바꾸기", enabled: false, help: "승격 차례를 이 자리에서 바꾸는 것은 다음 조각에서 엽니다") {}
+                    .accessibilityIdentifier("ap-promotion-text")
+                if s.promotionEdited {
+                    apNote("바꾼 차례입니다. 출발하면 프로젝트 설정에 덮어씁니다(같은 프로젝트의 끝난 실행 합치기·승격도 이 차례를 따릅니다).", APColor.limit)
+                } else {
+                    apNote(s.promotionSaved ? "프로젝트 설정의 차례입니다." : "저장소 가지로 채웠습니다. 출발하면 프로젝트 설정에 남깁니다.")
+                }
+                ForEach(probs, id: \.self) { apNote("· " + $0, s.promotionEdited ? APColor.fail : APColor.limit) }
+                HStack(spacing: 6) {
+                    APButton(title: editPromo ? "바꾸기 닫기" : "프로젝트 설정 바꾸기", enabled: !s.starting && !s.repos.isEmpty,
+                             help: s.repos.isEmpty ? "저장소 가지를 읽은 뒤에 바꿀 수 있습니다" : "승격 차례를 이 자리에서 바꿉니다", axid: "ap-promo-edit") { editPromo.toggle() }
+                    if s.promotionEdited { APButton(title: "되돌리기", help: "바꾸기 전 차례로", axid: "ap-promo-undo") { s.undoPromotion() } }
+                }
+                if editPromo { promotionEditor }
             }
             Spacer(minLength: 0)
         }
+    }
+
+    // 승격 차례 바꾸기 — 단계마다 받는 가지·올릴 것·뒤 조건을 고른다(객관식, 고를 것은 규칙 apPromotionChoices). 고칠 것은 위에(규칙 apPromotionProblems)
+    private var promotionEditor: some View {
+        let br = s.promotionBranches
+        return VStack(alignment: .leading, spacing: 6) {
+            ForEach(Array(s.promotion.enumerated()), id: \.offset) { i, st in
+                let c = apPromotionChoices(s.promotion, at: i, branches: br)
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 5) {
+                        Text(apCircled(i + 1)).boardFont(11, weight: .bold)
+                        Text("\(st.into) ← \(st.from == "autopilot" ? (s.jira ? "스토리 가지" : "autopilot 가지") : st.from)" + (st.after.map { " (\($0) 뒤)" } ?? ""))
+                            .boardFont(11, weight: .semibold).lineLimit(1)
+                        Spacer(minLength: 0)
+                        APButton(title: "빼기", axid: "ap-promo-\(i)-remove") { s.removePromotionStep(i) }
+                    }
+                    WrapRow(spacing: 5) {
+                        Text("받는 가지").boardFont(10.5).foregroundStyle(.secondary)
+                        ForEach(c.into, id: \.self) { b in
+                            APButton(title: b, tint: st.into == b ? Palette.accent : nil, axid: "ap-promo-\(i)-into-\(b)") { s.setPromotion(i, into: b) }
+                        }
+                    }
+                    .padding(.leading, 18)
+                    WrapRow(spacing: 5) {
+                        Text("올릴 것").boardFont(10.5).foregroundStyle(.secondary)
+                        ForEach(c.from, id: \.self) { f in
+                            APButton(title: f == "autopilot" ? (s.jira ? "스토리 가지" : "autopilot 가지") : f, tint: st.from == f ? Palette.accent : nil,
+                                     axid: "ap-promo-\(i)-from-\(f)") { s.setPromotion(i, from: f) }
+                        }
+                        Text("뒤 조건").boardFont(10.5).foregroundStyle(.secondary).padding(.leading, 6)
+                        APButton(title: "없음", tint: st.after == nil ? Palette.accent : nil, axid: "ap-promo-\(i)-after-none") { s.setPromotion(i, after: .some(nil)) }
+                        ForEach(c.after, id: \.self) { a in
+                            APButton(title: "\(a) 뒤", tint: st.after == a ? Palette.accent : nil, axid: "ap-promo-\(i)-after-\(a)") { s.setPromotion(i, after: .some(a)) }
+                        }
+                    }
+                    .padding(.leading, 18)
+                }
+                .padding(6)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color.white.opacity(0.03)))
+            }
+            HStack(spacing: 6) {
+                APButton(title: "＋ 단계 더하기", enabled: !br.isEmpty, axid: "ap-promo-add") { s.addPromotionStep() }
+                APButton(title: "저장소 가지로 다시 채우기", enabled: !br.isEmpty, axid: "ap-promo-refill") { s.refillPromotion() }
+            }
+            apNote("받을 수 있는 가지: " + (br.isEmpty ? "없음" : br.joined(separator: " · ")) + (s.repos.count > 1 ? "(묶음의 모든 저장소에 있는 가지)" : ""))
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("ap-promo-editor")
     }
 
     private func startErrorBox(_ e: String) -> some View {
@@ -3906,17 +4413,33 @@ struct APConfirm: View {
         }
     }
 
-    // 설정 — 프로젝트(이어 가기는 지난 실행)에 저장된 값. 이 자리에서 바꾸기는 다음 조각, 게시 방식·보고서·알림은 4단계
+    // 설정 — 모델·멈출 선은 그 자리에서 바꾼다(5-2b, 객관식, 출발하면 프로젝트 설정에 남김). 게시 방식·보고서·알림은 4단계
     private var settingsFold: some View {
         let t = s.ticketsToMake
-        let head = "모델 \(s.model) · 멈출 선 주간 \(Int(s.stop7))% · 5시간 \(Int(s.stop5))%" + (s.jira ? " · 만들 티켓 \(t.stories + t.tasks + t.moved)" : "")
-        return APFold(title: "설정", summary: head, axid: "ap-fold-settings", open: bind("settings")) {
-            apNote("지난 실행의 실행 설정을 그대로 잇습니다.")
-            row("모델", s.model)
-            row("멈출 선", "주간 \(Int(s.stop7))% · 5시간 \(Int(s.stop5))%")
+        let w = Int(s.stop7.rounded()), f = Int(s.stop5.rounded())
+        let head = "모델 \(s.model) · 멈출 선 주간 \(w)% · 5시간 \(f)%" + (s.jira ? " · 만들 티켓 \(t.stories + t.tasks + t.moved)" : "")
+        return APFold(title: "설정", summary: head, axid: "ap-fold-settings", open: bind("settings"), tag: s.settingsEdited ? "바꿈" : nil) {
+            apNote(s.settingsEdited ? "바꾼 값은 이 출발에 쓰고, 출발하면 프로젝트 설정에 남깁니다(다음 출발의 기본값)."
+                   : s.settingsFrom == "project" ? "프로젝트 설정에 저장된 값입니다. 그 자리에서 바꿉니다." : "지난 실행의 실행 설정을 그대로 잇습니다. 그 자리에서 바꿉니다.")
+            pickRow("모델", apModelOptions(current: s.model), s.model, axid: "ap-set-model") { s.setModel($0) }
+            pickRow("멈출 선 주간", apStopOptions(apStopWeekChoices, current: w).map(String.init), String(w), suffix: "%", axid: "ap-set-week") { s.setStop(week: Int($0)) }
+            pickRow("5시간", apStopOptions(apStopFiveChoices, current: f).map(String.init), String(f), suffix: "%", axid: "ap-set-five") { s.setStop(five: Int($0)) }
+            ForEach(s.settingsProblems, id: \.self) { apNote("· " + $0, APColor.fail) }
+            apNote("모델을 바꾸면 단위 예상(보정)도 그 모델의 지난 값으로 다시 셉니다.")
             row("게시 방식", "바깥 연결(4단계)과 함께 엽니다. 지금은 바깥에 올리는 글이 없습니다")
             row("보고서·알림", "보고서 틀(3단계)·연결(4단계)과 함께 엽니다")
             if s.jira { row("만들 티켓", "\(t.stories + t.tasks + t.moved)건 · 출발 확인 위 '만들 티켓' 나무") }
+        }
+    }
+    private func pickRow(_ k: String, _ options: [String], _ cur: String, suffix: String = "", axid: String, _ act: @escaping @MainActor (String) -> Void) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(k).boardFont(11, weight: .semibold).foregroundStyle(.secondary).frame(width: 70, alignment: .leading)
+            WrapRow(spacing: 4) {
+                ForEach(options, id: \.self) { o in
+                    APButton(title: o + suffix, tint: o == cur ? Palette.accent : nil, enabled: !s.starting && !s.preparing && !s.rechecking, axid: "\(axid)-\(o)") { act(o) }
+                }
+            }
+            Spacer(minLength: 0)
         }
     }
     private func row(_ k: String, _ v: String) -> some View {
@@ -3924,25 +4447,57 @@ struct APConfirm: View {
             Text(k).boardFont(11, weight: .semibold).foregroundStyle(.secondary).frame(width: 70, alignment: .leading)
             Text(v).boardFont(11).fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 4)
-            APButton(title: "바꾸기", enabled: false, help: "이 자리에서 바꾸는 것은 다음 조각에서 엽니다") {}
+            APButton(title: "바꾸기", enabled: false, help: "게시 방식·보고서·알림은 바깥 연결(4단계)·보고서 틀(3단계)과 함께 엽니다") {}
         }
     }
 
     // 자율주행 지시 — 펼치면 그 자리에서 지시 글(읽기만), 나머지 칸은 접혀 있다. 고치기·지난 판 차이·하네스 확인 지점은 뒤 조각(7단계)
     private var instructionFold: some View {
-        let head = s.setText.map { "지시 \($0.count)자 · \(apDay(s.setAt)) 판" } ?? "지시 없음 · 공통 규칙만으로 돕니다"
-        return APFold(title: "자율주행 지시", summary: head, axid: "ap-fold-set", open: bind("set")) {
-            if let t = s.setText {
+        let diffHead = apInstructionHead(old: s.lastSet?.text, new: s.setText, date: apDay(s.lastSet?.at))
+        let head = (s.setText.map { "지시 \($0.count)자 · " } ?? "") + diffHead
+        let diff = s.lastSet.map { apLineDiff($0.text, s.setText ?? "") } ?? []
+        let counts = apDiffCount(diff)
+        return APFold(title: "자율주행 지시", summary: head, axid: "ap-fold-set", open: bind("set"), tag: s.editingSet ? "고치는 중" : nil) {
+            if s.editingSet {
+                apNote("지시 글 · 이 자리에서 고치는 중입니다. 저장하면 세트(private/projects/\(s.project ?? "")/set/autopilot.md)가 바뀌고 다음 출발의 기준이 됩니다.")
+                TextEditor(text: $s.setDraft)
+                    .font(.system(size: 11, design: .monospaced))
+                    .scrollContentBackground(.hidden)
+                    .frame(minHeight: 220, maxHeight: 520)
+                    .padding(6)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Color.black.opacity(0.3)))
+                    .accessibilityIdentifier("ap-set-editor")
+                HStack(spacing: 6) {
+                    APButton(title: "저장", primary: true, axid: "ap-set-save") { s.saveSet() }
+                    APButton(title: "그만두기", axid: "ap-set-cancel") { s.cancelEditSet() }
+                    let c = s.lastSet.map { apDiffCount(apLineDiff($0.text, s.setDraft)) }
+                    if let c { apNote("지난 판과 +\(c.add) −\(c.del)") }
+                }
+            } else if let t = s.setText {
                 HStack(spacing: 6) {
                     apNote("지시 글 · 펼쳐 둡니다")
                     Spacer(minLength: 4)
-                    APButton(title: "이 자리에서 고치기", enabled: false, help: "지시 글을 이 자리에서 고치는 것은 다음 조각에서 엽니다") {}
+                    APButton(title: "이 자리에서 고치기", enabled: s.project != nil && !s.starting, help: "지시 글을 이 자리에서 고칩니다. 고친 판이 다음 출발의 기준이 됩니다", axid: "ap-set-edit") { s.beginEditSet() }
                 }
                 Text(t).boardFont(11, design: .monospaced).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
                     .padding(8).frame(maxWidth: .infinity, alignment: .leading)
                     .background(RoundedRectangle(cornerRadius: 8).fill(Color.black.opacity(0.25)))
+                    .accessibilityIdentifier("ap-set-text")
             } else {
                 apNote("이 프로젝트의 자율주행 세트(private/projects/\(s.project ?? "")/set/autopilot.md)가 없습니다. 엔진이 공통 규칙만 얹습니다.")
+                APButton(title: "이 자리에서 쓰기", enabled: s.project != nil && !s.starting, help: "이 프로젝트의 자율주행 지시를 새로 씁니다", axid: "ap-set-edit") { s.beginEditSet() }
+            }
+            if let n = s.setNote { apNote(n, n.hasPrefix("저장했습니다") ? APColor.ok : APColor.fail) }
+            if let l = s.lastSet, counts.add + counts.del > 0 {
+                APFold(title: "지난 판과 차이 +\(counts.add) −\(counts.del)", summary: "\(apDay(l.at)) 판(실행 \(l.run)) · 기록 저장소", axid: "ap-fold-set-diff", open: bind("setdiff")) {
+                    ForEach(Array(diff.prefix(300).enumerated()), id: \.offset) { _, d in
+                        Text((d.kind == .add ? "+ " : d.kind == .del ? "− " : "  ") + d.text)
+                            .boardFont(10.5, design: .monospaced)
+                            .foregroundStyle(d.kind == .add ? APColor.ok : d.kind == .del ? APColor.fail : Color.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    if diff.count > 300 { apNote("… \(diff.count - 300)줄 더") }
+                }
             }
             APFold(title: "판정 명령 \(s.chosen.count)", summary: "읽기 전용 · 출발 뒤에는 고정본으로 판정합니다", axid: "ap-fold-checks", open: bind("checks")) {
                 ForEach(s.chosen) { u in Text("\(u.n). " + u.check).boardFont(10.5, design: .monospaced).foregroundStyle(.secondary).lineLimit(2) }

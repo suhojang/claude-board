@@ -1414,8 +1414,11 @@ struct GroupCard: View {
             }
             .contextMenu {
                 Button(pinned ? "상단 고정 풀기" : "상단에 고정", action: togglePin)
+                // 이 경로를 작업 경로로 채운 자율주행 출발 준비(와이어프레임 보드 본체 ②, 2단계 5-2b)
+                Button("이 경로에서 자율주행…") { APStart.shared.open(at: g.id) }
                 Button("목록에서 지우기", role: .destructive, action: remove)
             }
+            .accessibilityIdentifier("group-head-\(g.name)")
 
             // 원래 작업 트리로 자율주행이 도는 경로의 표지 — 기본 보기에서도 남긴다. 좁은 카드에서 이름이 밀리지 않게 머리 아래 줄에 둔다
             if let r = apRuns.first(where: \.inPlace) { APInPlaceRow(run: r) }

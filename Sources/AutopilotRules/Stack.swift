@@ -261,7 +261,7 @@ public func apStackConflicts(detected: APStackSet, topic text: String) -> [Strin
             // 언어 낱말: 감지한 백엔드의 언어와 다르면(Java ↔ Kotlin 처럼)
             if let b = detected.back, !b.lang.isEmpty, b.lang.lowercased() != h.target, ["java", "kotlin", "python", "typescript"].contains(h.target),
                !(h.target == "typescript" && b.lang == "Node.js") {
-                let m = "주제의 '\(h.word)' 는 이 프로젝트 규격(\(b.lang))과 달라 쓰지 않습니다. 스택을 바꾸려면 그 일을 주제로 따로 출발합니다."
+                let m = "주제에 적힌 '\(h.word)': 이 프로젝트 규격(\(b.lang))과 달라 쓰지 않습니다. 스택을 바꾸려면 그 일을 주제로 따로 출발합니다."
                 if !out.contains(m) { out.append(m) }
             }
             continue
@@ -280,7 +280,7 @@ public func apStackConflicts(detected: APStackSet, topic text: String) -> [Strin
         default: same = true
         }
         if !same {
-            let m = "주제의 '\(h.word)' 는 이 프로젝트 규격(\(s.framework.isEmpty ? s.name : s.framework))과 달라 쓰지 않습니다. 스택을 바꾸려면 그 일을 주제로 따로 출발합니다."
+            let m = "주제에 적힌 '\(h.word)': 이 프로젝트 규격(\(s.framework.isEmpty ? s.name : s.framework))과 달라 쓰지 않습니다. 스택을 바꾸려면 그 일을 주제로 따로 출발합니다."
             if !out.contains(m) { out.append(m) }
         }
     }

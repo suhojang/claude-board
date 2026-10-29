@@ -137,15 +137,15 @@ struct ConflictRow: Row {
 }
 private let conflictRows: [ConflictRow] = [
     .init(note: "와이어프레임 예시: Spring Boot 저장소에 NestJS 주제", detected: ["build.gradle": gradleSpring], topic: "회의실 예약 기능을 NestJS 로 더한다.",
-          want: ["주제의 'NestJS' 는 이 프로젝트 규격(Spring Boot)과 달라 쓰지 않습니다. 스택을 바꾸려면 그 일을 주제로 따로 출발합니다."]),
+          want: ["주제에 적힌 'NestJS': 이 프로젝트 규격(Spring Boot)과 달라 쓰지 않습니다. 스택을 바꾸려면 그 일을 주제로 따로 출발합니다."]),
     .init(note: "같은 스택이면 경고 없음", detected: ["build.gradle": gradleSpring], topic: "스프링 부트로 예약 API 를 더한다", want: []),
     .init(note: "감지하지 못한 칸(프론트)은 알리지 않는다", detected: ["build.gradle": gradleSpring], topic: "React 화면을 더한다", want: []),
     .init(note: "언어가 다르면(Java 저장소에 Kotlin)", detected: ["build.gradle": gradleSpring], topic: "Kotlin 으로 다시 쓴다",
-          want: ["주제의 'Kotlin' 는 이 프로젝트 규격(Java)과 달라 쓰지 않습니다. 스택을 바꾸려면 그 일을 주제로 따로 출발합니다."]),
+          want: ["주제에 적힌 'Kotlin': 이 프로젝트 규격(Java)과 달라 쓰지 않습니다. 스택을 바꾸려면 그 일을 주제로 따로 출발합니다."]),
     .init(note: "DB 가 다르면", detected: ["build.gradle": gradleSpring, "src/main/resources/application.yml": "url: jdbc:postgresql://x"], topic: "MySQL 에 붙인다",
-          want: ["주제의 'MySQL' 는 이 프로젝트 규격(PostgreSQL)과 달라 쓰지 않습니다. 스택을 바꾸려면 그 일을 주제로 따로 출발합니다."]),
+          want: ["주제에 적힌 'MySQL': 이 프로젝트 규격(PostgreSQL)과 달라 쓰지 않습니다. 스택을 바꾸려면 그 일을 주제로 따로 출발합니다."]),
     .init(note: "같은 낱말이 두 번이면 한 번만", detected: ["build.gradle": gradleSpring], topic: "NestJS 로, 다시 말해 NestJS 로", want: [
-        "주제의 'NestJS' 는 이 프로젝트 규격(Spring Boot)과 달라 쓰지 않습니다. 스택을 바꾸려면 그 일을 주제로 따로 출발합니다."]),
+        "주제에 적힌 'NestJS': 이 프로젝트 규격(Spring Boot)과 달라 쓰지 않습니다. 스택을 바꾸려면 그 일을 주제로 따로 출발합니다."]),
 ]
 
 @Suite("자율주행 주제로 시작: 기존 저장소의 다른 스택 경고") struct ConflictTests {
@@ -262,5 +262,39 @@ private let newRepoRows: [NewRepoRow] = [
         // 폴더를 만들지 못함
         let f3 = FakeFolders([:]); f3.canMake = false
         #expect(apCreateRepo(plan, folders: f3, git: FakeGit()).error == "폴더를 만들지 못했습니다: /Users/u/workspace/todo")
+    }
+}
+
+// MARK: - 자료 링크
+
+@Suite("자율주행 주제로 시작: 자료 링크 줄") struct LinkTests {
+    @Test("종류와 읽기 상태(연결 전이라 읽지 않는다)", arguments: [
+        ("https://www.figma.com/design/Rm8k2Tq/room?node-id=12-4", "Figma needs_connection"),
+        ("  https://example.atlassian.net/wiki/spaces/OPS/pages/48213  ", "Confluence needs_connection"),
+        ("https://example.atlassian.net/browse/SHOP-12", "Jira needs_connection"),
+        ("https://www.notion.so/team/abc123", "Notion needs_connection"),
+        ("https://team.notion.site/page", "Notion needs_connection"),
+        ("https://docs.example.com/policy", "웹 needs_connection"),
+        ("http://intranet.example.com/a", "웹 needs_connection"),
+        ("figma.com/design/x", "웹 unreadable"),
+        ("ftp://files.example.com/a", "웹 unreadable"),
+        ("https://localhost/a", "웹 unreadable"),
+        ("회의실 정책 문서", "웹 unreadable"),
+        ("https://u:secret@example.com/a", "웹 unreadable"),
+    ])
+    func 표(_ a: (String, String)) {
+        let l = apLinkInfo(a.0)
+        #expect("\(l.kind) \(l.state)" == a.1)
+        #expect(!l.url.contains("secret"))
+    }
+
+    @Test("더하기: 같은 주소 한 번, 빈 주소, 20줄까지")
+    func 더하기() {
+        let a = apLinkInfo("https://www.figma.com/design/x")
+        #expect(apLinkAddProblem(a, to: []) == nil)
+        #expect(apLinkAddProblem(a, to: [a]) == "이미 있는 주소입니다")
+        #expect(apLinkAddProblem(apLinkInfo(""), to: []) == "주소를 붙여 넣어 주세요")
+        let many = (0..<20).map { apLinkInfo("https://example.com/\($0)") }
+        #expect(apLinkAddProblem(apLinkInfo("https://example.com/x"), to: many) == "자료 링크는 20줄까지입니다")
     }
 }
