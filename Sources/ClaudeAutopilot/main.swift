@@ -707,9 +707,9 @@ func branchHeads(_ repo: String) -> [String: String] {
     return m
 }
 func currentBranch(_ repo: String, env: [String] = []) -> String? { gitOut(["symbolic-ref", "-q", "--short", "HEAD"], cwd: repo, env: env).flatMap { $0.isEmpty ? nil : $0 } }
-func headOf(_ repo: String, _ ref: String) -> String? { gitOut(["rev-parse", "-q", "--verify", ref + "^{commit}"], cwd: repo).flatMap { $0.isEmpty ? nil : $0 } }
-func branchExists(_ repo: String, _ b: String) -> Bool { headOf(repo, "refs/heads/" + b) != nil }
-func isAncestor(_ repo: String, _ a: String, _ b: String) -> Bool { gitRun(["merge-base", "--is-ancestor", a, b], cwd: repo).code == 0 }
+func headOf(_ repo: String, _ ref: String, env: [String] = []) -> String? { gitOut(["rev-parse", "-q", "--verify", ref + "^{commit}"], cwd: repo, env: env).flatMap { $0.isEmpty ? nil : $0 } }
+func branchExists(_ repo: String, _ b: String, env: [String] = []) -> Bool { headOf(repo, "refs/heads/" + b, env: env) != nil }
+func isAncestor(_ repo: String, _ a: String, _ b: String, env: [String] = []) -> Bool { gitRun(["merge-base", "--is-ancestor", a, b], cwd: repo, env: env).code == 0 }
 // 작업 트리 상태 줄(추적 안 하는 파일 포함, 무시 파일 제외). 색인을 고쳐 쓰지 않게 --no-optional-locks.
 // 줄 앞 빈칸이 상태 글자라("XY 경로") 출력 전체를 다듬지 않는다 — gitOut 은 다듬어 첫 줄의 " M" 이 "M" 이 됐다(5-3b ①, 경로만 보관할 때 경로가 어긋남)
 func porcelain(_ repo: String, env: [String] = []) -> [String] {
@@ -781,34 +781,59 @@ func gitPlaceIn(_ d: String) -> String? {
     if lstat(d + "/HEAD", &st) == 0, (isDir(d + "/objects") && isDir(d + "/refs")) || lstat(d + "/commondir", &st) == 0 { return d + " (git 폴더 꼴)" }
     return nil
 }
-// 작업 트리 안에 실행 중에 새로 생긴(lstat ctime 이 출발 뒤) git 자리 — 끝 보고(branches.nested_git_new·nested_git_scan). 깊이 상한 없이 모든 폴더를
-// 이름만 보며 훑는다(node_modules·build 같은 폴더도, 링크는 따라가지 않는다). 뿌리의 .git 과 다른 저장소 뿌리는 건너뛴다(출발 때 기록한 것).
-// 항목 수·시간 상한에 닿으면 다 훑지 못한 것으로 돌려준다(complete false) — 보고는 "있을 수 있음"으로 한다(fail closed).
-// 실행 중의 막기는 이것이 아니라 단위마다의 unitGitOK·GIT_DIR 박기·safe.bareRepository 이고, 이 훑기는 실행이 끝난 뒤 사람이 그 폴더에서 돌릴 git 을 위한 받침이다
-func newNestedGit(_ roots: [String], since: Double, maxEntries: Int = 2_000_000, maxSec: Double = 30) -> (paths: [String], complete: Bool, why: String?) {
-    var out: [String] = [], n = 0
+// 작업 트리 안의 git 꼴 자리(.git 폴더·파일·링크, 그리고 git 폴더 꼴 — gitPlaceIn 과 같은 기준)와 그 지문 — 알림용 받침(5-4 보안 검토 셋째).
+// 막는 힘은 엔진 git 의 GIT_DIR·GIT_WORK_TREE 박기와 safe.bareRepository=explicit·GIT_CEILING_DIRECTORIES, 단위마다의 unitGitOK 이고, 이 훑기는
+// 출발 때 집합(branches.git_places)과 견주어 단위마다·끝에 새로 생기거나 설정이 바뀐 자리를 알린다(실행이 끝난 뒤 사람이 그 폴더에서 돌릴 git 을 위해).
+// 지문은 git 이 코드를 부를 수 있는 자리만 본다: config·config.worktree·info/attributes·commondir·gitdir·objects/info/alternates 와 hooks/ 의 파일들
+// (HEAD·refs·objects 는 보지 않는다 — 커밋마다 바뀐다). .git 이 파일·링크면 그 글·대상.
+// 깊이 상한 없이 모든 폴더를 이름만 보며 훑고(링크는 따라가지 않음), 뿌리의 .git 과 다른 저장소 뿌리는 건너뛴다. 항목·시간 상한에 닿거나
+// 읽지 못한 폴더가 있으면 complete=false(놓쳤을 수 있음 — 알림은 "있을 수 있음"으로)
+func gitPlaceDigest(_ p: String) -> String {
+    var st = stat()
+    guard lstat(p, &st) == 0 else { return "none" }
+    switch st.st_mode & S_IFMT {
+    case S_IFLNK: return "link:" + ((try? fm.destinationOfSymbolicLink(atPath: p)) ?? "?")
+    case S_IFREG: return "file:" + sha256(fm.contents(atPath: p) ?? Data())
+    case S_IFDIR: break
+    default: return "other"
+    }
+    var lines: [String] = []
+    for f in ["config", "config.worktree", "info/attributes", "commondir", "gitdir", "objects/info/alternates"] {
+        lines.append(f + "\t" + (fm.contents(atPath: p + "/" + f).map(sha256) ?? "-"))
+    }
+    for h in ((try? fm.contentsOfDirectory(atPath: p + "/hooks")) ?? []).sorted() {
+        lines.append("hooks/" + h + "\t" + (fm.contents(atPath: p + "/hooks/" + h).map(sha256) ?? "?"))
+    }
+    return "dir:" + sha256(Data(lines.joined(separator: "\n").utf8))
+}
+func gitPlaces(_ roots: [String], maxEntries: Int = 2_000_000, maxSec: Double = 30) -> (places: [String: String], complete: Bool, why: String?) {
+    var out: [String: String] = [:], n = 0
     let others = Set(roots.map(canonical)), t0 = Date()
-    func new(_ p: String) -> Bool { var st = stat(); return lstat(p, &st) == 0 && Double(st.st_ctimespec.tv_sec) + 1 >= since }
+    var unread: String?
     for root in roots {
         let base = canonical(root)
-        guard let en = fm.enumerator(atPath: base) else { continue }
-        while let rel = en.nextObject() as? String {
+        guard let en = fm.enumerator(at: URL(fileURLWithPath: base), includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey], options: [],
+                                     errorHandler: { url, _ in if unread == nil { unread = url.path }; return true }) else { return (out, false, "\(base) 를 열지 못해") }
+        while let url = en.nextObject() as? URL {
             n += 1
-            if n > maxEntries { return (out.sorted(), false, "항목이 \(maxEntries)개를 넘어") }
-            if n % 4096 == 0, Date().timeIntervalSince(t0) > maxSec { return (out.sorted(), false, "\(Int(maxSec))초 안에 다 훑지 못해") }
-            let name = (rel as NSString).lastPathComponent, full = base + "/" + rel
+            if n > maxEntries { return (out, false, "항목이 \(maxEntries)개를 넘어") }
+            if n % 4096 == 0, Date().timeIntervalSince(t0) > maxSec { return (out, false, "\(Int(maxSec))초 안에 다 훑지 못해") }
+            let full = url.path, name = url.lastPathComponent
             if name == ".git" {
-                if rel != ".git", new(full) { out.append(full) }
+                if full != base + "/.git" { out[full] = gitPlaceDigest(full) }
                 en.skipDescendants()
             } else if others.contains(full) {
                 en.skipDescendants()
             } else if name == "HEAD" {
                 let d = (full as NSString).deletingLastPathComponent
-                if d != base, !d.hasSuffix("/.git"), (isDir(d + "/objects") && isDir(d + "/refs")) || fm.fileExists(atPath: d + "/commondir"), new(full) { out.append(d + " (git 폴더 꼴)") }
+                if d != base, !d.hasSuffix("/.git"), (isDir(d + "/objects") && isDir(d + "/refs")) || fm.fileExists(atPath: d + "/commondir") {
+                    out[d] = gitPlaceDigest(d)
+                }
             }
         }
     }
-    return (out.sorted(), true, nil)
+    if let u = unread { return (out, false, "읽지 못한 자리(\(u))가 있어") }
+    return (out, true, nil)
 }
 // 중첩 .git 막기(2026-10-30 5-4, 보안 검토 지적): 단위 작업 폴더(dir)에서 위로 올라가며 .git 자리(폴더·파일·링크 모두)를 파일 시스템으로만 찾는다.
 // root 는 그 단위의 저장소 뿌리(그 자리의 .git 은 gitDirChange 가 따로 본다, 보지 않음). git 은 작업 폴더에서 위로 올라가 처음 만난 .git 을 쓰므로,
@@ -1635,6 +1660,14 @@ final class Engine {
                     event("engine", "\(repoName(r)): 출발 가지 \(base) 에서 만든 \(i["work"] ?? "?") 로 원래 작업 트리를 바꿔 돕니다. 끝나면 깨끗할 때 \((i["original"] as? String) ?? "출발 때 자리") 로 되돌립니다.")
                 }
             }
+            if !repos.isEmpty {   // 작업 트리 안 git 꼴 자리의 출발 때 집합(알림용 받침, 5-4 보안) — 모델이 돌기 전
+                let snap = gitPlaces(repos.map(wt))
+                var b = br
+                b["git_places"] = snap.places
+                b["git_places_scan"] = ["complete": snap.complete, "why": snap.why ?? NSNull(), "when": "출발"] as [String: Any]
+                br = b
+                if !snap.complete { event("engine", "보안: 출발 때 작업 트리를 다 훑지 못했습니다(\(snap.why ?? "?")). git 자리 알림이 빠질 수 있습니다.") }
+            }
             setState("running", "단위를 시작하는 중입니다.")
             record("출발")
         } else if prev == "paused" {
@@ -1971,6 +2004,35 @@ final class Engine {
         guard let g = repoInfo(r)["git_dir"] as? String else { return [] }
         return ["GIT_DIR=" + g, "GIT_WORK_TREE=" + wt(r)]
     }
+    // 가지·커밋만 다루는 git(가지 만들기·스토리로 합치기)은 작업 트리 없이 공통 git 폴더로 박는다
+    func pinRefs(_ r: String) -> [String] {
+        guard let c = repoInfo(r)["common_dir"] as? String else { return [] }
+        return ["GIT_DIR=" + c]
+    }
+    // 작업 트리 안 git 꼴 자리를 출발 때 집합(branches.git_places)과 견주어 새로 생기거나 설정이 바뀐 것을 알린다(알림용 받침, gitPlaces 의 주석).
+    // 찾은 것은 branches.git_places_changed 에 쌓고(같은 자리·같은 지문은 한 번), 훑기를 다 하지 못하면 branches.git_places_scan 에 적고 알린다
+    func checkGitPlaces(_ when: String) {
+        guard let base = br["git_places"] as? [String: String], !repos.isEmpty else { return }
+        let scan = gitPlaces(repos.map(wt))
+        var b = br
+        var seen = b["git_places_changed"] as? [[String: Any]] ?? []
+        var found: [String] = []
+        for (p, d) in scan.places.sorted(by: { $0.key < $1.key }) where base[p] != d {
+            guard !seen.contains(where: { $0["path"] as? String == p && $0["digest"] as? String == d }) else { continue }
+            seen.append(["path": p, "digest": d, "change": base[p] == nil ? "new" : "changed", "when": when, "at": r3(now())])
+            found.append((p.hasPrefix(home + "/") ? "~/" + p.dropFirst(home.count + 1) : p) + (base[p] == nil ? "" : "(설정 바뀜)"))
+        }
+        b["git_places_changed"] = seen
+        let last = b["git_places_scan"] as? [String: Any]
+        b["git_places_scan"] = ["complete": scan.complete, "why": scan.why ?? NSNull(), "when": when] as [String: Any]
+        br = b; saveRun()
+        if !found.isEmpty {
+            event("engine", "보안: \(when) 작업 트리 안에 출발 때 없던(또는 설정이 바뀐) git 자리 \(found.count)곳이 있습니다(\(found.prefix(3).joined(separator: ", "))\(found.count > 3 ? " 등" : "")). 지우지 않았습니다. 그 폴더에서 git 을 돌리기 전에 사람이 확인하세요.")
+        }
+        if !scan.complete, (last?["complete"] as? Bool ?? true) || (last?["why"] as? String) != scan.why {
+            event("engine", "보안: \(when) 작업 트리를 다 훑지 못했습니다(\(scan.why ?? "?")). 출발 때 없던 git 자리가 있을 수 있는 것으로 봅니다. 그 작업 트리의 하위 폴더에서 git 을 돌리기 전에 사람이 확인하세요.")
+        }
+    }
     func unitGitOK(_ n: Int) -> Bool {
         let r = repoOf(cwd(n))
         if let why = strayGitDir(from: cwd(n), root: r.map(wt)) {
@@ -2066,7 +2128,7 @@ final class Engine {
                 }
                 want = task
             } else if let k = def(n)["story"] as? String, let sb = storyRepo(k, r)["branch"] as? String, storyRepo(k, r)["head"] != nil,
-                      (repoInfo(r)["made"] as? [String] ?? []).contains(sb), branchExists(r, sb) {
+                      (repoInfo(r)["made"] as? [String] ?? []).contains(sb), branchExists(r, sb, env: pinRefs(r)) {
                 want = sb
             }
             if let why = switchTo(r, want) { skipUnit(n, why); return false }
@@ -2077,12 +2139,13 @@ final class Engine {
     // 이 실행이 만드는 가지(스토리·작업): 없으면 만들고 made 에 적는다. 이미 있는데 이 실행이 만든 것이 아니면 움직이지 않는다(까닭을 돌려줌)
     func ensureBranch(_ r: String, _ b: String, from: String, story k: String?) -> String? {
         let made = repoInfo(r)["made"] as? [String] ?? []
-        if branchExists(r, b) { return made.contains(b) ? nil : "\(repoName(r)) 에 \(b) 가지가 이미 있어(이 실행이 만든 것이 아님) 쓰지 않습니다" }
+        let rp = pinRefs(r)   // 이 저장소의 git 폴더로 박는다(5-4 보안)
+        if branchExists(r, b, env: rp) { return made.contains(b) ? nil : "\(repoName(r)) 에 \(b) 가지가 이미 있어(이 실행이 만든 것이 아님) 쓰지 않습니다" }
         addMade(r, b); saveRun()   // 만들기 전에 적는다 — 만든 뒤 끊겨 다시 떠도 이 실행의 가지로 안다
-        let c = gitRun(["branch", b, from], cwd: r)
+        let c = gitRun(["branch", b, from], cwd: r, env: rp)
         guard c.code == 0 else { return "\(repoName(r)) 에 \(b) 가지를 만들지 못했습니다: \(firstLine(c.out))" }
         if let k {
-            let h = headOf(r, "refs/heads/" + b) ?? ""
+            let h = headOf(r, "refs/heads/" + b, env: rp) ?? ""
             var e = storyRepo(k, r)   // 이 저장소의 기록(앞서 건너뛴 작업이 남긴 합치지 않음 줄이 있으면 잇는다)
             e["branch"] = b; e["base"] = h; e["head"] = h
             if e["merged"] == nil { e["merged"] = [] as [Any] }
@@ -2197,30 +2260,31 @@ final class Engine {
               let r = repoOf(cwd(n)) else { return [:] }
         guard gitDirOK(r) else { return ["story": k, "task": task, "branch": sb, "state": "not_merged", "why": "git 폴더가 바뀌어 합치지 않았습니다", "at": r3(now())] }
         var m: [String: Any] = ["story": k, "task": task, "branch": sb, "at": r3(now())]
-        let th = headOf(r, "refs/heads/" + task), sh = headOf(r, "refs/heads/" + sb)
+        let rp = pinRefs(r)   // 이 저장소의 git 폴더로 박는다(5-4 보안)
+        let th = headOf(r, "refs/heads/" + task, env: rp), sh = headOf(r, "refs/heads/" + sb, env: rp)
         func no(_ why: String) { m["state"] = "not_merged"; m["why"] = why }
         if th == nil || sh == nil { no("작업 가지나 스토리 가지를 찾지 못했습니다") }
         else if th == sh { m["state"] = "nothing"; m["why"] = "작업 가지에 새 커밋이 없어 합칠 것이 없습니다" }
-        else if isAncestor(r, th!, sh!) { m["state"] = "merged"; m["head"] = sh! }   // 이미 들어 있음
-        else if !isAncestor(r, sh!, th!) { no("스토리 가지 머리가 작업 가지의 조상이 아니라(그 사이 스토리 가지가 움직임) 합치지 않았습니다. 사람이 합칩니다") }
+        else if isAncestor(r, th!, sh!, env: rp) { m["state"] = "merged"; m["head"] = sh! }   // 이미 들어 있음
+        else if !isAncestor(r, sh!, th!, env: rp) { no("스토리 가지 머리가 작업 가지의 조상이 아니라(그 사이 스토리 가지가 움직임) 합치지 않았습니다. 사람이 합칩니다") }
         else {
             var head = th!
             let ff = (cfg["tickets"] as? [String: Any])?["merge"] as? String == "ff"
             if !ff {
-                let c = gitOut(["rev-parse", th! + "^{tree}"], cwd: r).map {
-                    gitRun(["commit-tree", $0, "-p", sh!, "-p", th!, "-m", "Merge branch '\(task)' into \(sb)\n\n자율주행 \(id) 단위 \(n): \(title(n))"], cwd: r, commit: true)
+                let c = gitOut(["rev-parse", th! + "^{tree}"], cwd: r, env: rp).map {
+                    gitRun(["commit-tree", $0, "-p", sh!, "-p", th!, "-m", "Merge branch '\(task)' into \(sb)\n\n자율주행 \(id) 단위 \(n): \(title(n))"], cwd: r, commit: true, env: rp)
                 }
                 if let c, c.code == 0 { head = c.out } else { head = "" ; no("병합 커밋을 만들지 못했습니다: \(firstLine(c?.out ?? ""))") }
             }
             if !head.isEmpty {
-                let up = gitRun(["update-ref", "-m", "autopilot \(id): merge \(task)", "refs/heads/" + sb, head, sh!], cwd: r)
+                let up = gitRun(["update-ref", "-m", "autopilot \(id): merge \(task)", "refs/heads/" + sb, head, sh!], cwd: r, env: rp)
                 if up.code == 0 { m["state"] = "merged"; m["head"] = head; m["how"] = ff ? "ff" : "merge" }
                 else { no("스토리 가지를 올리지 못했습니다(그 사이 움직였을 수 있음): \(firstLine(up.out))") }
             }
         }
         var s = storyRepo(k, r)   // 이 작업이 일한 저장소의 스토리 기록
         if s["branch"] == nil { s["branch"] = sb }
-        if let h = headOf(r, "refs/heads/" + sb) { s["head"] = h }
+        if let h = headOf(r, "refs/heads/" + sb, env: rp) { s["head"] = h }
         if m["state"] as? String == "not_merged" {
             s["unmerged"] = (s["unmerged"] as? [Any] ?? []) + [["task": task, "why": m["why"] ?? ""]]
         } else if !(s["merged"] as? [String] ?? []).contains(task) {
@@ -2283,24 +2347,15 @@ final class Engine {
         }
         b["replace_new"] = replaceNew; b["tags_changed"] = tagsChanged; b["shallow_changed"] = shallowChanged; b["include_changed"] = includeChanged
         b["config_worktree_changed"] = worktreeConfigChanged
-        // 실행 중에 작업 트리 안에 새로 생긴 .git(중첩 git 자리, 5-4 보안) — 실행이 끝나도 남아 사람이 그 폴더에서 돌리는 git 이 그 설정을 쓴다
-        let scan = newNestedGit(repos.map(wt), since: num(run["started"]) ?? 0), nested = scan.paths
-        b["nested_git_new"] = nested
-        b["nested_git_scan"] = ["complete": scan.complete, "why": scan.why ?? NSNull()] as [String: Any]
         br = b
+        // 작업 트리 안에 출발 때 없던(또는 설정이 바뀐) git 꼴 자리(5-4 보안, 알림용 받침) — 실행이 끝나도 남아 사람이 그 폴더에서 돌리는 git 이 그 설정을 쓴다
+        checkGitPlaces("끝")
         let other = created.filter { $0["by"] as? String == "other" }.compactMap { $0["branch"] as? String }
         if moved.isEmpty {
             event("engine", "출발 때 있던 가지는 하나도 움직이지 않았습니다. 이 실행이 만든 가지 \(created.count - other.count)개\(other.isEmpty ? "" : ", 그 밖에 새로 생긴 가지 \(other.count)개(\(other.prefix(3).joined(separator: ", ")))").")
         } else {
             let some = moved.prefix(3).map { "\(repoName($0["repo"] as? String ?? "")) \($0["branch"] ?? "")" }
             event("engine", "출발 때 있던 가지 \(moved.count)개가 움직였습니다(\(some.joined(separator: ", "))\(moved.count > 3 ? " 등" : "")). 되돌리지 않았습니다. 사람이 확인하세요.")
-        }
-        if !nested.isEmpty {
-            let some = nested.prefix(3).map { $0.hasPrefix(home + "/") ? "~/" + $0.dropFirst(home.count + 1) : $0 }
-            event("engine", "보안: 실행 중에 작업 트리 안에 git 자리 \(nested.count)곳이 새로 생겼습니다(\(some.joined(separator: ", "))\(nested.count > 3 ? " 등" : "")). 지우지 않았습니다. 그 폴더에서 git 을 돌리기 전에 사람이 확인하세요.")
-        }
-        if !scan.complete {
-            event("engine", "보안: 작업 트리를 다 훑지 못했습니다(\(scan.why ?? "?")). 실행 중에 새로 생긴 git 자리가 있을 수 있는 것으로 봅니다. 그 작업 트리의 하위 폴더에서 git 을 돌리기 전에 사람이 확인하세요.")
         }
         if !replaceNew.isEmpty || !tagsChanged.isEmpty || !shallowChanged.isEmpty || !includeChanged.isEmpty || !worktreeConfigChanged.isEmpty {
             event("engine", "보안: 실행 중에 replace 객체 \(replaceNew.count)개, 태그 변화 \(tagsChanged.count)개, shallow 변화 \(shallowChanged.count)곳, include/filter 변화 \(includeChanged.count)곳, config.worktree 변화 \(worktreeConfigChanged.count)곳이 생겼습니다. 사람이 push·검토 전에 확인하세요.")
@@ -2442,6 +2497,7 @@ final class Engine {
         queue[n - 1]["status"] = status
         saveQueue()
         if status != "done" { noteUnmerged(n, unitLabel[status] ?? status) }   // Jira 작업: 합치지 않고 작업 가지만 남긴다
+        checkGitPlaces("단위 \(n) 뒤")
         let spent = "\(dur(num(u["active_sec"]) ?? 0)), \(usd(num(u["cost_usd"]) ?? 0)) USD"
         event("board", "단위 \(n)/\(total) \(unitLabel[status] ?? status): \(reason) (\(spent))")
         if !ok, status != "stopped" { event("board", "모델이 결과 기록(result.json)을 남기지 않았습니다.") }
