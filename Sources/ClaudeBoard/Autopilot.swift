@@ -523,9 +523,10 @@ struct APLogGroup: Identifiable {
     // 일시정지·재개·중단 — control.json 을 엔진 control 명령과 같은 꼴({"action","ts"}, 임시 파일을 바꿔 넣음)로 쓴다.
     // 쓰기 직전에 run.json 을 다시 읽어 끝난 실행이면 쓰지 않는다
     func send(_ action: String, _ run: APRun) {
-        guard ["pause", "resume", "stop"].contains(action), sent[run.id] == nil else { return }
+        guard sent[run.id] == nil else { return }
+        // 아는 요청이고 출발한·끝나지 않은 실행인지는 규칙 apBoardCanControl(AutopilotRules/Control.swift)
         let state = (apRead(run.dir + "/run.json") as? [String: Any])?["state"] as? String ?? ""
-        guard !state.isEmpty, !["done", "stopped", "error"].contains(state) else { return }
+        guard apBoardCanControl(action, state: state) else { return }
         let ts = (Date().timeIntervalSince1970 * 1000).rounded() / 1000
         guard let data = try? JSONSerialization.data(withJSONObject: ["action": action, "ts": ts], options: [.prettyPrinted, .sortedKeys]) else { return }
         let path = run.dir + "/control.json", tmp = path + ".tmp-\(getpid())"
@@ -1554,7 +1555,7 @@ struct APRunningScreen: View {
                 }
             }
             if let w = wait {
-                Text("\(["pause": "일시정지", "resume": "재개", "stop": "중단"][w.action] ?? w.action) 요청을 보냈습니다. 엔진이 받기를 기다립니다…")
+                Text("\(apControlNames[w.action] ?? w.action) 요청을 보냈습니다. 엔진이 받기를 기다립니다…")
                     .boardFont(10.5).foregroundStyle(APColor.stop)
                     .accessibilityIdentifier("ap-sent")
             } else if !run.active {

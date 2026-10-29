@@ -1485,12 +1485,11 @@ final class Engine {
     // 새 요청이면 action 을 돌려준다. 받은 것은 run.json 에 남기고 파일은 지운다 — 다시 뜬 엔진이 같은 요청을 또 하지 않게
     func readControl() -> String? {
         guard fm.fileExists(atPath: controlPath) else { return nil }
-        let c = readJSON(controlPath) as? [String: Any]
+        let c = readJSON(controlPath)
         let m = ((try? fm.attributesOfItem(atPath: controlPath))?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? now()
         try? fm.removeItem(atPath: controlPath)
-        guard let a = c?["action"] as? String else { return nil }
-        let ts = num(c?["ts"]) ?? m
-        guard ts > num(run["control_seen"]) ?? 0 else { return nil }
+        // 새 요청인지는 규칙 apControlNew(AutopilotRules/Control.swift)
+        guard let (a, ts) = apControlNew(c, mtime: m, seen: num(run["control_seen"])) else { return nil }
         run["control_seen"] = ts; run["control_last"] = a
         saveRun()
         return a
@@ -1500,13 +1499,14 @@ final class Engine {
     func pollControl() -> Stop? {
         if gotTerm != 0 { terminated() }
         guard let a = readControl() else { return nil }
-        switch a {
-        case "pause": event("board", "일시정지 요청을 받았습니다."); return .pause
-        case "stop": event("board", "중단 요청을 받았습니다."); return .stop
-        case "resume": event("board", "재개 요청을 받았지만 일시정지 상태가 아니라 그대로 갑니다.")
-        default: event("board", "아직 엔진이 하지 못하는 요청(\(a))이라 넘깁니다.")
+        // 받은 요청으로 할 일은 규칙 apControlOutcome
+        let o = apControlOutcome(a, paused: false)
+        if let t = o.text { event("board", t) }
+        switch o.step {
+        case .pause: return .pause
+        case .stop: return .stop
+        case .resume, .none: return nil
         }
-        return nil
     }
 
     // 누가 엔진을 끄면(SIGTERM) claude 는 같은 group 이라 함께 끝난다. 상태는 그대로 두어 다시 뜨면 잇는다
@@ -1738,14 +1738,14 @@ final class Engine {
         while true {
             if gotTerm != 0 { terminated() }
             if let a = readControl() {
-                switch a {
-                case "resume":
-                    event("board", "재개합니다. 멈춘 자리에서 같은 세션으로 이어 갑니다.")
+                let o = apControlOutcome(a, paused: true)
+                if let t = o.text { event("board", t) }
+                switch o.step {
+                case .resume:
                     setState("running", "재개했습니다.")
                     return
-                case "stop": stopRun()
-                case "pause": event("board", "이미 일시정지 상태입니다.")
-                default: event("board", "아직 엔진이 하지 못하는 요청(\(a))이라 넘깁니다.")
+                case .stop: stopRun()
+                case .pause, .none: break
                 }
             }
             sleep(1)
@@ -3457,13 +3457,13 @@ func cmdRun(_ args: [String]) -> Never {
 }
 
 func cmdControl(_ args: [String]) -> Never {
-    guard args.count >= 2, ["pause", "resume", "stop"].contains(args[1]) else { usage() }
+    guard args.count >= 2, apControlActions.contains(args[1]) else { usage() }
     let dir = runDir(args[0])
     guard let run = readJSON(dir + "/run.json") as? [String: Any] else { fail("run.json 을 읽지 못했습니다") }
     let s = run["state"] as? String ?? ""
-    if ["stopped", "done", "error"].contains(s) { print("이미 끝난 실행입니다(\(stateLabel[s] ?? s))."); exit(0) }
+    if apRunEnded(s) { print("이미 끝난 실행입니다(\(stateLabel[s] ?? s))."); exit(0) }
     writeJSON(dir + "/control.json", ["action": args[1], "ts": r3(now())])
-    print("보냈습니다: \(["pause": "일시정지", "resume": "재개", "stop": "중단"][args[1]]!). 엔진이 1초 안에 받습니다.")
+    print("보냈습니다: \(apControlNames[args[1]] ?? args[1]). 엔진이 1초 안에 받습니다.")
     exit(0)
 }
 
