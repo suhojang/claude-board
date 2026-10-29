@@ -757,6 +757,17 @@ func gitStat(_ p: String) -> String? {
     var st = stat(); guard lstat(p, &st) == 0 else { return nil }
     return "\(st.st_dev):\(st.st_ino)"
 }
+// 보안(2026-10-22 둘째, 2026-10-30 5-4 첫머리에 끝 정리·finish 로 넓힘): 저장소의 git 폴더가 출발 때(branches.repos.<저장소> 의 common_dir·common_ino,
+// 따로 작업 트리면 work_git_dir·work_git_ino)와 같은가. 다르면 그 까닭(문장의 앞부분), 같거나 출발 때 적은 값이 없으면 nil.
+// 모델이 쓸 수 있는 작업 트리에서 밖의 git(status·switch·stash 등)이 바꿔치기된 git 폴더의 설정(filter 드라이버 등)을 실행하지 않게, git 을 돌리기 전에 본다.
+// 여기서 쓰는 rev-parse --git-common-dir 는 설정을 읽기만 하고 filter·hook 을 돌리지 않는다
+func gitDirChange(_ i: [String: Any], at w: String) -> String? {
+    guard let c = i["common_dir"] as? String else { return nil }
+    let live = gitOut(["rev-parse", "--git-common-dir"], cwd: w).map { $0.hasPrefix("/") ? canonical($0) : canonical(w + "/" + $0) }
+    if live != c || (i["common_ino"] as? String).map({ $0 != gitStat(c) }) == true { return "git 폴더가 출발 때와 달라져" }
+    if let wg = i["work_git_dir"] as? String, (i["work_git_ino"] as? String).map({ $0 != gitStat(wg) }) == true { return "작업 트리 git 폴더가 출발 때와 달라져" }
+    return nil
+}
 // replace ref·tag·shallow 묶음(보안: 실행 중 새 replace·shallow·tag 변화를 끝에 보고하려고)
 func extraRefs(_ repo: String, _ common: String) -> [String: Any] {
     var tags: [String: String] = [:], replace: [String] = []
@@ -1886,19 +1897,13 @@ final class Engine {
     // 보안(2026-10-22 둘째): 엔진이 샌드박스 밖에서 쓰는 git 을 돌리기 전에 그 저장소의 git 폴더가 출발 때와 같은지 본다.
     // 모델이 .git 을 바꿔치기했으면(장치·inode·절대 경로가 다름) git 을 돌리지 않고 위반으로 알린다(샌드박스가 이미 막지만 받침)
     func gitDirOK(_ r: String) -> Bool {
-        let i = repoInfo(r)
-        guard let c = i["common_dir"] as? String else { return true }
-        let live = gitOut(["rev-parse", "--git-common-dir"], cwd: wt(r)).map { $0.hasPrefix("/") ? canonical($0) : canonical(wt(r) + "/" + $0) }
-        if live != c || (i["common_ino"] as? String).map({ $0 != gitStat(c) }) == true {
-            event("engine", "보안: \(repoName(r)) 의 git 폴더가 출발 때와 달라져 git 을 돌리지 않습니다(바꿔치기 의심). 사람이 확인하세요.")
-            return false
-        }
-        if let wg = i["work_git_dir"] as? String, (i["work_git_ino"] as? String).map({ $0 != gitStat(wg) }) == true {
-            event("engine", "보안: \(repoName(r)) 의 작업 트리 git 폴더가 출발 때와 달라져 git 을 돌리지 않습니다. 사람이 확인하세요.")
-            return false
-        }
-        return true
+        guard let why = gitDirChange(repoInfo(r), at: wt(r)) else { return true }
+        event("engine", "보안: \(repoName(r)) 의 \(why) git 을 돌리지 않습니다\(why.hasPrefix("git") ? "(바꿔치기 의심)" : ""). 사람이 확인하세요.")
+        return false
     }
+    // 단위 작업 폴더가 든 저장소의 git 폴더가 출발 때와 같은가(저장소 밖 작업 폴더면 true). 모델을 띄우기 전과 상한 때 git 기록 전에 본다 —
+    // claude 는 세션을 열 때 샌드박스 밖에서 git status 를 부른다(claudeEnv 의 주석, 실측)
+    func cwdGitOK(_ n: Int) -> Bool { repoOf(cwd(n)).map(gitDirOK) ?? true }
     // 스토리 기록은 저장소별(2026-10-28, 한 스토리가 여러 저장소에 걸침): stories.<키>.repos.<저장소> = {branch, base, head, merged, unmerged}
     func storyRepo(_ k: String, _ r: String) -> [String: Any] { apStoryRepos((br["stories"] as? [String: Any])?[k] as? [String: Any] ?? [:])[r] ?? [:] }
     func setStoryRepo(_ k: String, _ r: String, _ e: [String: Any]) {
@@ -1978,6 +1983,8 @@ final class Engine {
         for r in repos {
             var want = repoInfo(r)["work"] as? String ?? ""
             if r == target, let k = def(n)["story"] as? String, let sb = def(n)["story_branch"] as? String, let task = def(n)["branch"] as? String {
+                // 가지를 만들기 전에도 git 폴더를 본다(5-4 첫머리 보안) — 바꿔치기된 저장소에 스토리·작업 가지를 만들지 않게
+                guard gitDirOK(r) else { skipUnit(n, "\(repoName(r)) 의 git 폴더가 바뀌어 \(task) 가지를 만들지 않았습니다"); return false }
                 if let why = ensureBranch(r, sb, from: (repoInfo(r)["base"] as? [String: Any])?["head"] as? String ?? "", story: k)
                     ?? ensureBranch(r, task, from: sb, story: nil) {
                     skipUnit(n, why); return false
@@ -2054,9 +2061,11 @@ final class Engine {
     func switchTo(_ r: String, _ want: String) -> String? {
         var i = repoInfo(r)
         let w = wt(r)   // 작업 트리 모드면 작업 트리에서, 아니면 원래 저장소에서 바꾼다
+        // git 폴더를 지금 가지 읽기보다 먼저 본다(5-4 첫머리 보안, stashReadOnly 와 같은 차례). 바꿀 것이 없는 단위에서도 보므로
+        // 바꿔치기된 저장소가 있으면 뒤 단위는 모두 건너뛴다(전에는 가지를 바꾸는 단위에서만 봤다)
+        guard gitDirOK(r) else { return "\(repoName(r)) 의 git 폴더가 바뀌어 \(want) 로 바꾸지 않았습니다" }
         let on = i["on"] as? String ?? "", cur = currentBranch(w) ?? ""
         if on == want, cur == want { return nil }
-        guard gitDirOK(r) else { return "\(repoName(r)) 의 git 폴더가 바뀌어 \(want) 로 바꾸지 않았습니다" }
         if cur != on { return "\(repoName(r)) 의 가지가 실행 중에 바뀌어(지금 \(cur.isEmpty ? "가지 없음" : cur)) \(want) 로 바꾸지 않았습니다" }
         let dirty = porcelain(w), dirtyStart = i["dirty_start"] as? [String] ?? []
         // 남은 변경을 어떻게 할지는 규칙 apLeftover(AutopilotRules/Leftovers.swift)가 정한다
@@ -2221,8 +2230,17 @@ final class Engine {
                 i["restored"] = NSNull(); i["restore_note"] = "따로 작업 트리라 원래 작업 트리·가지를 건드리지 않았습니다"; setRepoInfo(r, i)
                 continue
             }
-            let original = i["original"] as? String, on = i["on"] as? String ?? "", cur = currentBranch(r)
+            let original = i["original"] as? String, on = i["on"] as? String ?? ""
             var ok = false, note: String
+            // git 폴더를 git status·switch 보다 먼저 본다(5-4 첫머리 보안, switchTo·stashReadOnly 와 같은 차례) — 모델이 쓸 수 있는 원래 작업 트리라
+            // 바꿔치기된 git 폴더의 설정(filter 드라이버 등)으로 끝 정리의 git 이 돌지 않게. 바뀌었으면 되돌리지 않고 까닭을 남긴다
+            guard gitDirOK(r) else {
+                i["restored"] = false; i["restore_note"] = "보안: git 폴더가 출발 때와 달라져 git 을 돌리지 않아 출발 때 가지로 되돌리지 않았습니다(작업 트리는 \(on) 에 있을 수 있습니다)"
+                setRepoInfo(r, i); changed = true
+                event("engine", "\(repoName(r)): \(i["restore_note"] as? String ?? "").")
+                continue
+            }
+            let cur = currentBranch(r)
             if let o = original, cur == o { ok = true; note = "이미 출발 때 가지(\(o))에 있습니다" }
             else if (cur ?? "") != on { note = "실행 중에 가지가 바뀌어(지금 \(cur ?? "가지 없음")) 출발 때 가지로 되돌리지 않았습니다" }
             else if porcelain(r) != (i["dirty_start"] as? [String] ?? []) {
@@ -2317,7 +2335,10 @@ final class Engine {
         var u = loadUnit(n)
         u["status"] = status; u["phase"] = "end"; u["ended"] = r3(now()); u["reason"] = reason
         if status == "capped" {
-            u["git"] = ["status": safeGit(["status", "--porcelain"], cwd: cwd(n)), "diff_stat": safeGit(["diff", "--stat"], cwd: cwd(n))]
+            // 상한 때 남기는 git 기록도 git 폴더를 먼저 본다(5-4 첫머리 보안) — status·diff 는 바꿔치기된 git 폴더의 filter 를 돌린다
+            u["git"] = cwdGitOK(n)
+                ? ["status": safeGit(["status", "--porcelain"], cwd: cwd(n)), "diff_stat": safeGit(["diff", "--stat"], cwd: cwd(n))]
+                : ["note": "보안: git 폴더가 출발 때와 달라져 git status·diff 를 돌리지 않았습니다"]
         }
         let ok = readJSON(unitDir(n) + "/result.json") is [String: Any]
         u["result_ok"] = ok
@@ -2342,6 +2363,12 @@ final class Engine {
         while true {
             switch u["phase"] as? String ?? "model" {
             case "model":
+                // 모델을 띄우기 전에 작업 폴더 저장소의 git 폴더를 본다(5-4 첫머리 보안) — claude 는 세션을 열 때 샌드박스 밖에서 git status 를 부르므로
+                // 바꿔치기된 git 폴더의 filter 가 돌 수 있다. 가지를 바꾸지 않는 단위·판정 실패 뒤 다시 맡길 때도 여기서 막는다
+                guard cwdGitOK(n) else {
+                    endUnit(n, "failed", "보안: 작업 폴더 저장소의 git 폴더가 출발 때와 달라져 모델을 띄우지 않았습니다. 사람이 확인하세요.")
+                    return
+                }
                 let end = turn(n, &u, message: u["next_message"] as? String ?? msgRestart)
                 switch end {
                 case .finished:
@@ -3797,6 +3824,14 @@ func cmdFinish(_ args: [String]) -> Never {
     var b = run["branches"] as? [String: Any] ?? [:]
     let info = b["repos"] as? [String: Any] ?? [:]
     guard !info.isEmpty else { fail("이 실행에는 엔진이 만든 가지가 없습니다(git 저장소에서 돌지 않았거나 가지 기능 전의 실행).") }
+    // 보안(5-4 첫머리): 모델이 쓸 수 있던 작업 트리에서 git(작업 트리 앞으로 감기·작업 트리 지우기 등)을 돌리기 전에 git 폴더가 출발 때와 같은지 본다
+    // (엔진 gitDirOK 와 같은 확인). 따로 작업 트리를 이미 지웠으면 원래 저장소에서 본다. 저장소 자리가 없으면 전처럼(git 이 실패한다)
+    for r in info.keys.sorted() {
+        guard var i = info[r] as? [String: Any], isDir(r) else { continue }
+        let w = (i["work_tree"] as? String).flatMap { isDir($0) ? $0 : nil } ?? r
+        if w == r { i["work_git_dir"] = nil }
+        if let why = gitDirChange(i, at: w) { fail("보안: \(repoName(r)) 의 \(why) 합치거나 버리지 않습니다(바꿔치기 의심). 사람이 확인하세요.") }
+    }
     var promoted = b["promoted"] as? [[String: Any]] ?? []
     var failed: [[String: Any]] = []   // 저장소마다 하다가 하지 못한 것(먼저 본 확인을 지난 뒤의 중간 실패) — branches.failed 에 남긴다
     let defs = (readJSON(dir + "/pinned/frozen.json") as? [String: Any])?["units"] as? [[String: Any]] ?? []
