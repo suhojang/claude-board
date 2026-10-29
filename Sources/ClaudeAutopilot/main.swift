@@ -794,9 +794,10 @@ func fileMark(_ p: String, budget: inout Int) -> (mark: String, full: Bool) {
     switch readHarnessFile(p, budget: min(harnessFileCap, max(budget, 0))) {
     case .data(let d)?: budget -= d.count; return ("file:" + sha256(d), true)
     case .large(let n)?:
-        // 해시하지 않은 파일(1 MiB 넘음·읽기 상한 다 씀)은 크기·고친 시각·inode 로 — 같은 크기로 고쳐도 알 수 있게. 그 훑기는 다 본 것이 아니다(full false)
+        // 해시하지 않은 파일(1 MiB 넘음·읽기 상한 다 씀)은 크기·inode 바뀐 시각(ctime)·장치·inode 로 — 같은 크기로 고쳐도 알 수 있게. mtime 은 모델이
+        // touch 로 되돌릴 수 있어 쓰지 않는다(ctime 은 사용자 공간에서 정할 수 없다, 5-4 보안 검토 여섯째). 그 훑기는 다 본 것이 아니다(full false)
         var st = stat(); _ = lstat(p, &st)
-        return ("large:\(n):\(st.st_mtimespec.tv_sec).\(st.st_mtimespec.tv_nsec):\(st.st_ino)", false)
+        return ("large:\(n):\(st.st_ctimespec.tv_sec).\(st.st_ctimespec.tv_nsec):\(st.st_dev):\(st.st_ino)", false)
     case .other(let k)?: return (k, true)
     case nil: return ("-", true)
     }
@@ -827,7 +828,7 @@ func gitPlaceDigest(_ p: String, budget: inout Int) -> (digest: String, cost: In
     return ("dir:" + sha256(Data(lines.joined(separator: "\n").utf8)), cost, full)
 }
 func gitPlaces(_ roots: [String], maxEntries: Int = 2_000_000, maxSec: Double = 30, maxBytes: Int = harnessTotalCap) -> (places: [String: String], complete: Bool, why: String?) {
-    var out: [String: String] = [:], n = 0, checked = 0, budget = maxBytes, partial = false
+    var out: [String: String] = [:], n = 0, checked = 0, budget = maxBytes, partial: [String] = []
     let others = Set(roots.map(canonical)), t0 = Date()
     var unread: String?
     // 시간 상한은 항목 4096개를 넘길 때마다와 지문을 볼 때마다(지문은 한 번에 여러 칸 오른다)
@@ -847,7 +848,7 @@ func gitPlaces(_ roots: [String], maxEntries: Int = 2_000_000, maxSec: Double = 
             let full = url.path, name = url.lastPathComponent
             if name == ".git" {
                 if full != base + "/.git" {
-                    let g = gitPlaceDigest(full, budget: &budget); out[full] = g.digest; n += g.cost; partial = partial || !g.full
+                    let g = gitPlaceDigest(full, budget: &budget); out[full] = g.digest; n += g.cost; if !g.full { partial.append(full) }
                     if Date().timeIntervalSince(t0) > maxSec { return (out, false, "\(Int(maxSec))초 안에 다 훑지 못해") }
                 }
                 en.skipDescendants()
@@ -856,14 +857,18 @@ func gitPlaces(_ roots: [String], maxEntries: Int = 2_000_000, maxSec: Double = 
             } else if name == "HEAD" {
                 let d = (full as NSString).deletingLastPathComponent
                 if d != base, !d.hasSuffix("/.git"), (isDir(d + "/objects") && isDir(d + "/refs")) || fm.fileExists(atPath: d + "/commondir") {
-                    let g = gitPlaceDigest(d, budget: &budget); out[d] = g.digest; n += g.cost; partial = partial || !g.full
+                    let g = gitPlaceDigest(d, budget: &budget); out[d] = g.digest; n += g.cost; if !g.full { partial.append(d) }
                     if Date().timeIntervalSince(t0) > maxSec { return (out, false, "\(Int(maxSec))초 안에 다 훑지 못해") }
                 }
             }
         }
     }
     if let u = unread { return (out, false, "읽지 못한 자리(\(u))가 있어") }
-    if partial { return (out, false, "해시하지 못한 파일(1 MiB 넘음·읽기 상한·hooks 256개 넘음)이 있어 그 파일은 크기·시각·inode 만 봄") }
+    // 까닭에 그 자리를 적는다 — 해시하지 못한 자리가 새로 생기면 까닭 글이 바뀌어 다시 알린다(5-4 보안 검토 여섯째)
+    if !partial.isEmpty {
+        let ps = partial.sorted()
+        return (out, false, "해시하지 못한 파일(1 MiB 넘음·읽기 상한·hooks 256개 넘음)이 든 자리(\(ps.prefix(5).joined(separator: ", "))\(ps.count > 5 ? " 외 \(ps.count - 5)곳" : ""))가 있어 그 파일은 크기·ctime·inode 만 봄")
+    }
     return (out, true, nil)
 }
 // 중첩 .git 막기(2026-10-30 5-4, 보안 검토 지적): 단위 작업 폴더(dir)에서 위로 올라가며 .git 자리(폴더·파일·링크 모두)를 파일 시스템으로만 찾는다.
