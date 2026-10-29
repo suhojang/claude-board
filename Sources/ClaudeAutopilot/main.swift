@@ -766,7 +766,49 @@ func gitDirChange(_ i: [String: Any], at w: String) -> String? {
     let live = gitOut(["rev-parse", "--git-common-dir"], cwd: w).map { $0.hasPrefix("/") ? canonical($0) : canonical(w + "/" + $0) }
     if live != c || (i["common_ino"] as? String).map({ $0 != gitStat(c) }) == true { return "git 폴더가 출발 때와 달라져" }
     if let wg = i["work_git_dir"] as? String, (i["work_git_ino"] as? String).map({ $0 != gitStat(wg) }) == true { return "작업 트리 git 폴더가 출발 때와 달라져" }
+    // 그 자리의 git 폴더(작업 트리면 .git/worktrees/<이름>)도 출발 때 자리로 풀리는가(5-4 중첩 .git 고침) — .git 파일의 gitdir 을 다른 곳으로 바꾼 경우
+    if let g = i["git_dir"] as? String, let lg = gitOut(["rev-parse", "--absolute-git-dir"], cwd: w).map(canonical), lg != g { return "git 폴더가 출발 때와 다른 자리로 풀려" }
     return nil
+}
+// 작업 트리 안(뿌리의 .git 은 빼고, 깊이 6 까지, 무거운 폴더는 건너뜀)에 since 뒤로 생긴(lstat ctime) .git 자리 — 끝 보고(branches.nested_git_new)
+func newNestedGit(_ roots: [String], since: Double) -> [String] {
+    let skip: Set<String> = [".git", "node_modules", "build", ".gradle", "target", "dist", "out", ".idea", ".build"]
+    var out: [String] = [], seen = 0
+    let others = Set(roots)   // 다른 저장소 뿌리(이 실행이 쓰는 묶음의 다른 저장소)는 그 저장소 차례에 본다 — 그 .git 은 출발 때 기록한 것
+    for root in roots {
+        var level = [root], depth = 0
+        while !level.isEmpty, depth <= 6, seen < 50_000 {
+            var next: [String] = []
+            for d in level {
+                let names = (try? fm.contentsOfDirectory(atPath: d)) ?? []
+                seen += names.count
+                if d != root, others.contains(d) { continue }
+                if d != root, names.contains(".git") {
+                    var st = stat()
+                    if lstat(d + "/.git", &st) == 0, Double(st.st_ctimespec.tv_sec) + 1 >= since { out.append(d + "/.git") }
+                }
+                for name in names where !skip.contains(name) && isDir(d + "/" + name) && !isLink(d + "/" + name) { next.append(d + "/" + name) }
+            }
+            level = next; depth += 1
+        }
+    }
+    return out.sorted()
+}
+// 중첩 .git 막기(2026-10-30 5-4, 보안 검토 지적): 단위 작업 폴더(dir)에서 위로 올라가며 .git 자리(폴더·파일·링크 모두)를 파일 시스템으로만 찾는다.
+// root 는 그 단위의 저장소 뿌리(그 자리의 .git 은 gitDirChange 가 따로 본다, 보지 않음). git 은 작업 폴더에서 위로 올라가 처음 만난 .git 을 쓰므로,
+// 뿌리 밑에 모델이 만든 .git(설정에 filter 드라이버를 심은 것 등)이 있으면 뿌리 확인을 지나도 그 git 폴더로 돈다. git 을 부르지 않는 까닭은
+// rev-parse 도 그 .git 의 설정을 읽기 때문(읽기만 하지만 바꿔치기된 자리에서는 git 을 아예 돌리지 않는다).
+// 돌려주는 값: nil(뿌리까지 .git 없음, root 가 nil 이면 / 까지 없음), 아니면 까닭(찾은 자리, 또는 뿌리 밖으로 풀림)
+func strayGitDir(from dir: String, root: String?) -> String? {
+    var d = canonical(dir)
+    let stop = root.map(canonical)
+    while true {
+        if let s = stop, d == s { return nil }
+        var st = stat()
+        if lstat(d + "/.git", &st) == 0 { return "작업 폴더 위에 출발 때 없던 git 자리(\(d)/.git)가 있어" }
+        if d == "/" || d.isEmpty { return stop == nil ? nil : "작업 폴더가 저장소(\(stop!)) 밖으로 풀려" }
+        d = (d as NSString).deletingLastPathComponent
+    }
 }
 // replace ref·tag·shallow 묶음(보안: 실행 중 새 replace·shallow·tag 변화를 끝에 보고하려고)
 func extraRefs(_ repo: String, _ common: String) -> [String: Any] {
@@ -1854,6 +1896,8 @@ final class Engine {
     // 단위의 시험 환경이 살아 있는가(precheck, 선택). 실패하면 단위를 시작하지 않고 precheck_retry_min(기본 5분) 뒤 다시 확인한다(false)
     func precheckGate(_ n: Int) -> Bool {
         guard let cmd = def(n)["precheck"] as? String, !cmd.isEmpty else { return true }
+        // 시험 환경 확인 명령도 작업 폴더에서 git 을 부를 수 있다 — 그 자리의 git 폴더를 먼저 본다(5-4 보안). 바뀌었으면 단위를 시작하지 않고 건너뛴다
+        guard unitGitOK(n) else { skipUnit(n, "보안: 작업 폴더의 git 폴더가 출발 때와 달라져 시험 환경 확인을 돌리지 않았습니다"); return false }
         let log = privateDir + "/precheck-\(n).log"
         try? fm.removeItem(atPath: log)
         var code: Int32 = -1
@@ -1901,9 +1945,18 @@ final class Engine {
         event("engine", "보안: \(repoName(r)) 의 \(why) git 을 돌리지 않습니다\(why.hasPrefix("git") ? "(바꿔치기 의심)" : ""). 사람이 확인하세요.")
         return false
     }
-    // 단위 작업 폴더가 든 저장소의 git 폴더가 출발 때와 같은가(저장소 밖 작업 폴더면 true). 모델을 띄우기 전과 상한 때 git 기록 전에 본다 —
-    // claude 는 세션을 열 때 샌드박스 밖에서 git status 를 부른다(claudeEnv 의 주석, 실측)
-    func cwdGitOK(_ n: Int) -> Bool { repoOf(cwd(n)).map(gitDirOK) ?? true }
+    // 단위 작업 폴더에서 도는 git 이 출발 때 git 폴더로 풀리는가. 모델을 띄우기 전, 상한 때 git 기록 전, 판정·고정 단계·시험 환경 확인 명령 전에 본다 —
+    // claude 는 세션을 열 때 샌드박스 밖에서 git status 를 부르고(claudeEnv 의 주석, 실측), 판정 명령도 그 자리에서 git 을 부를 수 있다.
+    // 저장소 안 작업 폴더: 작업 폴더에서 뿌리 사이에 .git 이 없고(strayGitDir, 파일 시스템으로만) 뿌리의 git 폴더가 출발 때와 같을 때만(gitDirOK).
+    // 저장소 밖 작업 폴더(출발 때 git 저장소가 아님): 위로 / 까지 .git 이 없을 때만 — 실행 중에 생긴 git 자리는 모두 막는다(fail closed, 5-4 보안 검토)
+    func unitGitOK(_ n: Int) -> Bool {
+        let r = repoOf(cwd(n))
+        if let why = strayGitDir(from: cwd(n), root: r.map(wt)) {
+            event("engine", "보안: 단위 \(n) 의 \(why) 그 자리에서 git(모델·판정·기록)을 돌리지 않습니다(바꿔치기 의심). 사람이 확인하세요.")
+            return false
+        }
+        return r.map(gitDirOK) ?? true
+    }
     // 스토리 기록은 저장소별(2026-10-28, 한 스토리가 여러 저장소에 걸침): stories.<키>.repos.<저장소> = {branch, base, head, merged, unmerged}
     func storyRepo(_ k: String, _ r: String) -> [String: Any] { apStoryRepos((br["stories"] as? [String: Any])?[k] as? [String: Any] ?? [:])[r] ?? [:] }
     func setStoryRepo(_ k: String, _ r: String, _ e: [String: Any]) {
@@ -2206,6 +2259,9 @@ final class Engine {
         }
         b["replace_new"] = replaceNew; b["tags_changed"] = tagsChanged; b["shallow_changed"] = shallowChanged; b["include_changed"] = includeChanged
         b["config_worktree_changed"] = worktreeConfigChanged
+        // 실행 중에 작업 트리 안에 새로 생긴 .git(중첩 git 자리, 5-4 보안) — 실행이 끝나도 남아 사람이 그 폴더에서 돌리는 git 이 그 설정을 쓴다
+        let nested = newNestedGit(repos.map(wt), since: num(run["started"]) ?? 0)
+        b["nested_git_new"] = nested
         br = b
         let other = created.filter { $0["by"] as? String == "other" }.compactMap { $0["branch"] as? String }
         if moved.isEmpty {
@@ -2213,6 +2269,10 @@ final class Engine {
         } else {
             let some = moved.prefix(3).map { "\(repoName($0["repo"] as? String ?? "")) \($0["branch"] ?? "")" }
             event("engine", "출발 때 있던 가지 \(moved.count)개가 움직였습니다(\(some.joined(separator: ", "))\(moved.count > 3 ? " 등" : "")). 되돌리지 않았습니다. 사람이 확인하세요.")
+        }
+        if !nested.isEmpty {
+            let some = nested.prefix(3).map { $0.hasPrefix(home + "/") ? "~/" + $0.dropFirst(home.count + 1) : $0 }
+            event("engine", "보안: 실행 중에 작업 트리 안에 git 자리 \(nested.count)곳이 새로 생겼습니다(\(some.joined(separator: ", "))\(nested.count > 3 ? " 등" : "")). 지우지 않았습니다. 그 폴더에서 git 을 돌리기 전에 사람이 확인하세요.")
         }
         if !replaceNew.isEmpty || !tagsChanged.isEmpty || !shallowChanged.isEmpty || !includeChanged.isEmpty || !worktreeConfigChanged.isEmpty {
             event("engine", "보안: 실행 중에 replace 객체 \(replaceNew.count)개, 태그 변화 \(tagsChanged.count)개, shallow 변화 \(shallowChanged.count)곳, include/filter 변화 \(includeChanged.count)곳, config.worktree 변화 \(worktreeConfigChanged.count)곳이 생겼습니다. 사람이 push·검토 전에 확인하세요.")
@@ -2336,7 +2396,7 @@ final class Engine {
         u["status"] = status; u["phase"] = "end"; u["ended"] = r3(now()); u["reason"] = reason
         if status == "capped" {
             // 상한 때 남기는 git 기록도 git 폴더를 먼저 본다(5-4 첫머리 보안) — status·diff 는 바꿔치기된 git 폴더의 filter 를 돌린다
-            u["git"] = cwdGitOK(n)
+            u["git"] = unitGitOK(n)
                 ? ["status": safeGit(["status", "--porcelain"], cwd: cwd(n)), "diff_stat": safeGit(["diff", "--stat"], cwd: cwd(n))]
                 : ["note": "보안: git 폴더가 출발 때와 달라져 git status·diff 를 돌리지 않았습니다"]
         }
@@ -2365,8 +2425,8 @@ final class Engine {
             case "model":
                 // 모델을 띄우기 전에 작업 폴더 저장소의 git 폴더를 본다(5-4 첫머리 보안) — claude 는 세션을 열 때 샌드박스 밖에서 git status 를 부르므로
                 // 바꿔치기된 git 폴더의 filter 가 돌 수 있다. 가지를 바꾸지 않는 단위·판정 실패 뒤 다시 맡길 때도 여기서 막는다
-                guard cwdGitOK(n) else {
-                    endUnit(n, "failed", "보안: 작업 폴더 저장소의 git 폴더가 출발 때와 달라져 모델을 띄우지 않았습니다. 사람이 확인하세요.")
+                guard unitGitOK(n) else {
+                    endUnit(n, "failed", "보안: 작업 폴더에서 도는 git 이 출발 때 git 폴더로 풀리지 않아 모델을 띄우지 않았습니다. 사람이 확인하세요.")
                     return
                 }
                 let end = turn(n, &u, message: u["next_message"] as? String ?? msgRestart)
@@ -2915,6 +2975,12 @@ final class Engine {
         try? fm.createDirectory(atPath: ev, withIntermediateDirectories: true)
         let log = ev + "/output.log"
         try? fm.removeItem(atPath: log)
+        // 판정·고정 단계 명령은 작업 폴더에서 샌드박스 밖으로 돈다 — 그 자리의 git 이 바꿔치기된 git 폴더로 풀리면 돌리지 않는다(5-4 보안, 실패로 넘김)
+        guard unitGitOK(n) else {
+            let why = "보안: 작업 폴더의 git 폴더가 출발 때와 달라져 엔진이 이 명령을 돌리지 않았습니다"
+            try? Data((why + "\n").utf8).write(to: URL(fileURLWithPath: log))
+            return (-1, why, nil, false, [], 0)
+        }
         var env = commandEnv(n)
         env["CLAUDE_BOARD_EVIDENCE_DIR"] = ev
         guard let c = Child(shell, ["-l", "-c", cmd], env: env, cwd: cwd(n), outFile: log, newGroup: true) else {
