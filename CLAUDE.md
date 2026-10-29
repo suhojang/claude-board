@@ -11,19 +11,21 @@ Claude Code hook 이 Python 스크립트를 실행해 세션 상태를 파일로
 
 ## 명령
 
-Xcode 프로젝트는 없다. 보드(`Sources/ClaudeBoard/`)는 내장 터미널 엔진(libghostty-spm) 때문에 저장소 맨 위 `Package.swift` 의 SwiftPM 실행 타깃으로 빌드하고(소스는 그 폴더와 순수 규칙 라이브러리 `Sources/BoardRules/`, Command Line Tools 만으로 된다),
-나머지 Swift 파일은 하나가 실행 파일 하나이고 `swiftc` 로 바로 빌드한다. 시험은 `BoardRules` 의 Swift Testing 시험(`Tests/BoardRulesTests/`, `swift test`)과 md-render 플러그인의 `claude plugin test` 가 있고, 린트 설정은 없다.
+Xcode 프로젝트는 없다. 보드(`Sources/ClaudeBoard/`)는 내장 터미널 엔진(libghostty-spm) 때문에, 자율주행 엔진(`Sources/ClaudeAutopilot/`)은 규칙 라이브러리를 import 하려고 저장소 맨 위 `Package.swift` 의 SwiftPM 실행 타깃으로 빌드하고
+(소스는 그 폴더들과 순수 규칙 라이브러리 `Sources/BoardRules/`·`Sources/AutopilotRules/`, Command Line Tools 만으로 된다), 나머지 Swift 파일은 하나가 실행 파일 하나이고 `swiftc` 로 바로 빌드한다.
+시험은 두 규칙 라이브러리의 Swift Testing 시험(`Tests/BoardRulesTests/`·`Tests/AutopilotRulesTests/`, `swift test`)과 md-render 플러그인의 `claude plugin test` 가 있고, 린트 설정은 없다.
 모든 `swift build`/`swift test`/`swift package` 에 `--disable-keychain`(빼면 엔진 내려받기에서 키체인 조회로 10분 넘게 멈춘다)과 `--triple`(배포 빌드와 같은 `.build` 를 쓰므로 생략한 빌드와 섞으면 오류)을 붙인다.
 
 ```sh
-# 빠른 확인 — 보드는 import GhosttyTerminal 때문에 swiftc -typecheck 를 못 쓰고 빌드로 확인한다(첫 빌드는 엔진 약 77 MB 를 내려받아 1분 남짓, 그 뒤 약 20초)
+# 빠른 확인 — 보드는 import GhosttyTerminal, 자율주행 엔진은 import AutopilotRules 때문에 swiftc -typecheck 를 못 쓰고 빌드로 확인한다(한 번에 둘 다.
+# 첫 빌드는 엔진 약 77 MB 를 내려받아 1분 남짓, 그 뒤 약 20초). 결과 실행 파일은 swift build … --show-bin-path 의 ClaudeBoard·ClaudeAutopilot
 swift build -c release --disable-keychain --triple "$(uname -m)-apple-macosx14.0"
-swift test --disable-keychain --triple "$(uname -m)-apple-macosx14.0" --toolset clt-testing.json   # BoardRules 시험. 끝 줄 "Test run with N tests" 의 N 이 0 보다 큰지 본다
+swift test --disable-keychain --triple "$(uname -m)-apple-macosx14.0" --toolset clt-testing.json   # BoardRules·AutopilotRules 시험. 끝 줄 "Test run with N tests" 의 N 이 0 보다 큰지 본다
+#  → 자율주행 규칙 시험(Tests/AutopilotRulesTests) 이 돌았는지는 출력의 "자율주행 …" Suite 줄로 본다(--filter AutopilotRulesTests 로 그것만)
 #  → Windows 판과 함께 쓰는 보드 규칙 표 rules-table/*.json 도 읽는다(RulesTableTests.swift, 꼴은 rules-table/README.md — 사람이 쓴 의도라 Swift 출력으로 만들지 않는다)
 #  → --toolset 은 Command Line Tools 만 있는 Mac 용(SwiftPM 이 CLT 의 Testing.framework 를 못 찾아 빼면 no such module 'Testing'). Xcode 가 있는 Mac 에서는 뺀다.
 #    같은 -F·-rpath 를 Package.swift 의 unsafeFlags 로 넣으면 시험이 0개 돌고 성공으로 끝나므로 toolset 파일로만 넣는다. 처음에는 앱·엔진까지 debug 로 빌드해 1분 남짓
 swiftc -typecheck ClaudeNotifier.swift
-swiftc -typecheck ClaudeAutopilot.swift   # 자율주행 엔진 — 아직 SwiftPM 밖 swiftc 단독 빌드(build-board.sh·make-dmg.sh 가 앱 Contents/MacOS/claude-autopilot 로)
 python3 -m py_compile state.py notify.py hooks.py board-tui.py   # 만들어진 __pycache__ 는 지운다
 python3 -I hook-table/gen.py && git diff --exit-code hook-table/   # hook 공유 시험 표 다시 만들기·차이 확인(Rust 쪽: cd windows && cargo test -p claude-board-core --test hook_table)
 claude plugin validate plugins/md-render --strict && claude plugin test plugins/md-render   # Claude Code 가 저장소 사본에 만드는 tsconfig.json 은 올리지 않는다
@@ -44,7 +46,7 @@ claude plugin validate plugins/md-render --strict && claude plugin test plugins/
 packaging/release.sh <버전>   # 버전은 시맨틱 버전 MAJOR.MINOR.PATCH(3.0.0 부터). make-dmg.sh 로 universal(arm64+x86_64) 빌드·서명 → gh release 생성
 ```
 
-macOS CI `.github/workflows/rules.yml` 이 hook·보드 규칙 파일이 바뀐 push·PR 마다 표 차이·`hooks.py` 사본(`cmp`)·core `cargo test`·`swift test`(시험 수가 0 이면 실패)를 돌린다.
+macOS CI `.github/workflows/rules.yml` 이 hook·보드 규칙 파일이 바뀐 push·PR 마다 표 차이·`hooks.py` 사본(`cmp`)·core `cargo test`·`swift test`(BoardRules·AutopilotRules 시험, 시험 수가 0 이면 실패. 보드·엔진도 debug 로 함께 빌드된다)를 돌린다.
 
 `release.sh` 는 CHANGELOG 의 `## <버전>` 항목이 없으면 빌드 전에 멈추고, 그 항목을 릴리스 설명으로 쓴다. `gh auth login` 과 서명 인증서(`packaging/make-cert.sh` 로 만드는 "Claude Board Signing")가 필요하다.
 
@@ -85,7 +87,7 @@ Claude Code hook ──> state.py  ──> ~/.claude/notifier/sessions/<session_
 ### 실행 파일
 
 - `Sources/ClaudeBoard/` (17개 파일, 약 15,500줄 — 그 가운데 자율주행 `Autopilot.swift` 약 5,200줄) — 보드 앱 전체. AppKit 창 위에 SwiftUI 화면을 얹었다. 한 파일 `ClaudeBoard.swift` 이던 것을 2026-10-29 에
-  `tools/split-board.py` 로 맨 위 `// MARK: - ` 절마다 한 파일로 나눴다(코드는 옮기기만 했고 머리의 import 는 파일마다 같다. 자율주행 절은 가지 `autopilot-stage2` 에 main 을 합칠 때 같은 스크립트로 떨어졌다). 절 이름과 내용이 어긋난 곳이 있으니
+  `tools/split-board.py` 로 맨 위 `// MARK: - ` 절마다 한 파일로 나눴다(코드는 옮기기만 했고 머리의 import 는 파일마다 같다 — 자율주행 `Autopilot.swift` 만 `AutopilotRules` 를 더 import 한다. 자율주행 절은 가지 `autopilot-stage2` 에 main 을 합칠 때 같은 스크립트로 떨어졌다). 절 이름과 내용이 어긋난 곳이 있으니
   (`BoardView` 는 `BrainrotMascots.swift`, `Store` 는 `LimitSwitching.swift`, `AppDelegate` 는 `SettingsScreen.swift`) 파일 이름보다 아래 표나 grep 으로 찾는다.
 
   | 파일 | 절 | 들어 있는 것 |
@@ -127,7 +129,7 @@ Claude Code hook ──> state.py  ──> ~/.claude/notifier/sessions/<session_
   `SettingsScreen.swift`(설정 화면) — 앱 메뉴 > 설정…(⌘,)이 터미널 영역을 덮는 `SettingsView`(`SettingsHostingView` 에 얹음, 열고 닫기는 `SettingsScreen`). 항목은 `SettingsItem` 표 하나에서 그리고 검색도 이 표로 한다.
   `KeyboardShortcuts.swift`(단축키) — `Shortcuts`(사용자가 바꾼 키를 얹은 표를 @Published 로 쥐고 UserDefaults `shortcuts`·메뉴 키 달기·Carbon 전역 단축키·키 감시의 NSEvent 분기)·`ShortcutSettings`(키 받기),
   표와 판정은 BoardRules 의 `ShortcutTable`(메뉴·안내 글자도 여기서 읽음). 로그인할 때 열기는 `LoginItem`(LaunchAgent plist 를 쓰고 지우고, 끄면 `login-launch-off` 표지).
-  `Autopilot.swift`(자율주행) — `AutopilotStore` 가 자율주행 뿌리(시험 빌드는 `Claude Board Dev`)의 `runs/` 와 `private/records.sqlite`(읽기 전용)를 읽어 실행 줄·자율주행 중·지난 실행 화면을 그리고, 일시정지·재개·중단은 `control.json` 으로 남긴다. 출발 준비 시트(`APStart`, 지금은 지난 실행 이어 가기만)가 출발 전 실행 폴더를 쓰고 앱 안 엔진의 `status --json`·`prerun`·`start` 를 부른다. 합치기·승격 시트(`APMerge`)는 끝난 실행의 승격 차례 단계를 git 읽기로 미리 보이고(바뀐 줄·충돌) 사람이 누를 때만 엔진 `finish` 를 부른다. 원래 작업 트리로 도는 경로에 보드 탭 새 세션을 열면 `startSession` 이 경고한다. 설계는 `docs/자율주행/설계.md`.
+  `Autopilot.swift`(자율주행) — `AutopilotStore` 가 자율주행 뿌리(시험 빌드는 `Claude Board Dev`)의 `runs/` 와 `private/records.sqlite`(읽기 전용)를 읽어 실행 줄·자율주행 중·지난 실행 화면을 그리고, 일시정지·재개·중단은 `control.json` 으로 남긴다. 출발 준비 시트(`APStart`, 지금은 지난 실행 이어 가기만)가 출발 전 실행 폴더를 쓰고 앱 안 엔진의 `status --json`·`prerun`·`start` 를 부른다. 합치기·승격 시트(`APMerge`)는 끝난 실행의 승격 차례 단계를 git 읽기로 미리 보이고(바뀐 줄·충돌) 사람이 누를 때만 엔진 `finish` 를 부른다. 원래 작업 트리로 도는 경로에 보드 탭 새 세션을 열면 `startSession` 이 경고한다. 판정 규칙은 `AutopilotRules`(아래)에서 import 한다(지금은 가지 기록·합치기 상태). 설계는 `docs/자율주행/설계.md`.
 - `Sources/BoardRules/` — 보드의 순수 규칙 라이브러리(Foundation 만): 세션·서브에이전트·카드 모델(`Session`·`Sub`·`Group`·`Ctx`·`Brain`), 세션 기록 해석(`Sub.parse`·`sessionID`), 카드에 보일 세션·묶음·정렬(`visibleSessions`·`groupSessions`·`sortGroups`), 화면 경로의 홈 줄이기(`displayPath`), 요금제 사용량(`Usage.swift`: `Limit`·응답 해석 `parseUsage`·토큰 상태 `loginToken`·캐시를 믿을지·받을지 `checkUsageCache`·받기 `fetchUsage`·받은 결과 처리 `settleUsage`, 앱도 쓰는 `isoDate`),
   계정 전환(`Accounts.swift`: `Account`(만료는 `isExpired(at:)`)·저장 계정 목록 해석과 고치기·전환 JSON 변환 `replacingAccountToken`·`switchConfig`·저장 `storeAccount`·`saveCurrentAccount`·전환 `switchAccount`·지우기 `removeAccount`),
   자동 전환 판단(`AutoSwitch.swift`: `decideAutoSwitch` — 한도 세션·전환 까닭·다음 계정과 한도 표시·이어 갈 세션을 값으로 돌려준다),
@@ -150,8 +152,16 @@ Claude Code hook ──> state.py  ──> ~/.claude/notifier/sessions/<session_
   업데이트 판단은 `ReleaseVersions`(최신 VERSION, 진짜 어댑터 `GitHubReleaseVersions` — URLSession), 단축키 글자는 `KeyboardLayout`(지금 ASCII 자판, 진짜 어댑터 `SystemKeyboardLayout` — `asciiKeyCharacters`) 포트로만 부른다.
   사용자가 바꾼 키는 포트 없이 값으로 넘긴다(읽고 쓰기는 UserDefaults 한 줄씩이라). Carbon 수정키 `carbonMods`·NSEvent 변환·시스템 단축키 목록 읽기(`systemHotKeys`)는 앱에 둔다.
   규칙에 새 OS 호출(파일·프로세스·시각·홈 폴더)을 넣을 때는 포트를 거친다 — BoardRules 에서 FileManager·kill·`Date()` 를 직접 부르지 않는다(남은 예외: `Group.path` 의 `NSHomeDirectory()`).
-  새 기능(다음은 자율주행)도 같은 꼴로 쓴다: 판정은 Foundation 만 쓰는 규칙 라이브러리(BoardRules 또는 따로 타깃, 예: `Sources/AutopilotRules`)에, 바깥(git·프로세스·HTTP·SQLite 등)은 포트로, 가짜 어댑터 표 시험을 붙인다. 이미 있는 코드는 한꺼번에 옮기지 않고 손대는 부분부터 옮기며, 옮길 때는 옮기기 전 출력과 견주는 덤프·시험으로 동작이 그대로인지 확인한다.
-- `ClaudeAutopilot.swift` — 자율주행 엔진 `claude-autopilot`(`start`·`run`·`control`·`status`·`records import`·`prerun`·`finish`). 보드 앱 밖에서 LaunchAgent(KeepAlive)로 돌고, 출발 때 실행 폴더 `pinned/` 에 고정한 자기 사본과 설정(`frozen.json`, 해시는 LaunchAgent 인자)으로 돈다. 모델 세션은 Claude Code 샌드박스(`--settings`)·고른 환경 변수·`--setting-sources project,local` 로 띄운다. 앱 `Contents/MacOS/` 에 build-board.sh·make-dmg.sh 가 함께 싣는다. 설계·실측은 `docs/자율주행/설계.md`·`진행 상황.md`.
+  새 기능(자율주행)도 같은 꼴로 쓴다: 판정은 Foundation 만 쓰는 규칙 라이브러리(자율주행은 `Sources/AutopilotRules`, 아래)에, 바깥(git·프로세스·HTTP·SQLite 등)은 포트로, 가짜 어댑터 표 시험을 붙인다. 이미 있는 코드는 한꺼번에 옮기지 않고 손대는 부분부터 옮기며, 옮길 때는 옮기기 전 출력과 견주는 덤프·시험으로 동작이 그대로인지 확인한다.
+- `Sources/AutopilotRules/` — 자율주행 판정 규칙 라이브러리(Foundation 만). 보드 `Autopilot.swift` 와 엔진 `Sources/ClaudeAutopilot/main.swift` 가 함께 `import AutopilotRules` 한다(보드의 다른 파일은 import 하지 않는다).
+  지금은 `Branches.swift` 하나: 끝난 실행의 가지 기록(run.json·기록 저장소 `runs.branches` 의 `branches`) 읽기 `APStep`·`APPromoted`·`APFailed`·`apStoryRepos`(엔진 `storyRepos` 도 대신함, 새 꼴 `repos`·옛 꼴 `repo`)·`apPromotedRows`·`apFailedRows`·`apUnresolved`·`apStepDone`,
+  합치기 상태 `apMergeOpen`(보드 본체 끝난 실행 줄의 "합치기 기다림")·`apMergeMark`(지난 실행의 버림·…에 합침·…까지 올림·합치기 기다림, 색은 보드가 고름). 이름의 AP 는 보드 자율주행 절의 이름 짓기를 그대로 따른다.
+  아직 바깥을 부르는 규칙이 없어 포트가 없다 — 생기면 `Ports.swift` 에 두고 진짜 어댑터는 보드·엔진에, 가짜는 `Tests/AutopilotRulesTests` 에만 둔다. 입력 승격 차례는 값(`[APStep]`)으로 받고 프로젝트 설정 파일 읽기(`apPromotion`)는 보드에 남았다.
+  시험(`Tests/AutopilotRulesTests/BranchesTests.swift`)은 옮기기 전 함수로 돌린 덤프의 입력·기대값 표다(시험 빌드 뿌리 장난감 기록 26개를 줄이고 경로를 `/w/…` 로 바꿈, 경계 입력). 지금 동작을 적었으니 규칙을 고치면 그 줄의 기대값과 note 를 함께 고친다.
+  자율주행 규칙은 맨 위 `rules-table/`(Windows 공용 표)에 넣지 않는다.
+- `Sources/ClaudeAutopilot/main.swift` — 자율주행 엔진 `claude-autopilot`(`start`·`run`·`control`·`status`·`records import`·`prerun`·`finish`, 사용법은 파일 머리 주석). SwiftPM 실행 타깃 `ClaudeAutopilot`(언어 모드 5, `AutopilotRules` 에 기댐)이고 한 파일이라 최상위 실행문이 있다.
+  보드 앱 밖에서 LaunchAgent(KeepAlive)로 돌고, 출발 때 실행 폴더 `pinned/` 에 고정한 자기 사본과 설정(`frozen.json`, 해시는 LaunchAgent 인자)으로 돈다. 모델 세션은 Claude Code 샌드박스(`--settings`)·고른 환경 변수·`--setting-sources project,local` 로 띄운다.
+  build-board.sh 는 보드와 같은 `swift build` 결과의 `ClaudeAutopilot` 을, make-dmg.sh 는 두 아키텍처 결과를 `lipo` 로 합쳐 앱 `Contents/MacOS/claude-autopilot` 에 싣는다(앱보다 먼저 서명). 설계·실측은 `docs/자율주행/설계.md`·`진행 상황.md`.
 - `ClaudeNotifier.swift` — 알림 패널. 인자는 파일 머리 주석 참고. 여러 패널이 동시에 뜨면 슬롯 파일로 자리를 나눈다. `--session` 을 받으면 누를 때 보드에 `focus` 동작을 알린다.
 - `board-tui.py` — 터미널판 보드(`claude-board-tui`).
 - `AppIcon.swift` — 앱 아이콘 PNG(iconset 이름 규칙)를 인자로 준 폴더에 그린다. 결과 `AppIcon.icns` 는 저장소에 커밋되어 있다.

@@ -17,6 +17,7 @@ import Foundation
 import Darwin
 import CryptoKit
 import SQLite3
+import AutopilotRules   // 자율주행 판정 규칙(Sources/AutopilotRules) — 보드와 함께 쓴다
 
 // MARK: - 공통 도구
 
@@ -719,14 +720,7 @@ func checkedOut(_ repo: String) -> [String: String] {
     return m
 }
 func repoName(_ r: String) -> String { (r as NSString).lastPathComponent }
-// run.json 의 branches.stories.<키> 를 저장소별로 읽는다(2026-10-28, 한 스토리가 여러 저장소에 걸침). 새 꼴은 {repos: {<저장소>: {branch, base, head,
-// merged, unmerged}}}, 옛 꼴(스토리 하나에 저장소 하나 {repo, branch, base, head, merged, unmerged}, 2026-10-22~28 실행)은 그 저장소 하나로 본다
-func storyRepos(_ s: [String: Any]) -> [String: [String: Any]] {
-    if let rs = s["repos"] as? [String: Any] { return rs.compactMapValues { $0 as? [String: Any] } }
-    guard let r = s["repo"] as? String, !r.isEmpty else { return [:] }
-    var o = s; o["repo"] = nil
-    return [r: o]
-}
+// run.json 의 branches.stories.<키> 를 저장소별로 읽는 apStoryRepos(새 꼴 repos·옛 꼴 repo)는 AutopilotRules(Sources/AutopilotRules/Branches.swift)에 있다 — 보드와 함께 쓴다
 // 작업 폴더가 든 저장소(branches.repos 의 키, 따로 작업 트리면 그 작업 트리 자리도 본다). 가장 긴 것
 func repoFor(_ path: String, _ info: [String: Any]) -> String? {
     info.keys.filter { r in
@@ -1890,10 +1884,10 @@ final class Engine {
         return true
     }
     // 스토리 기록은 저장소별(2026-10-28, 한 스토리가 여러 저장소에 걸침): stories.<키>.repos.<저장소> = {branch, base, head, merged, unmerged}
-    func storyRepo(_ k: String, _ r: String) -> [String: Any] { storyRepos((br["stories"] as? [String: Any])?[k] as? [String: Any] ?? [:])[r] ?? [:] }
+    func storyRepo(_ k: String, _ r: String) -> [String: Any] { apStoryRepos((br["stories"] as? [String: Any])?[k] as? [String: Any] ?? [:])[r] ?? [:] }
     func setStoryRepo(_ k: String, _ r: String, _ e: [String: Any]) {
         var b = br, ss = b["stories"] as? [String: Any] ?? [:]
-        var rs = storyRepos(ss[k] as? [String: Any] ?? [:])
+        var rs = apStoryRepos(ss[k] as? [String: Any] ?? [:])
         rs[r] = e
         ss[k] = ["repos": rs]; b["stories"] = ss; br = b
     }
@@ -3492,7 +3486,7 @@ func cmdStatus(_ args: [String]) -> Never {
                 + (restored == nil ? "" : restored! ? " · 출발 때 가지로 되돌림" : " · 되돌리지 않음(\(i["restore_note"] ?? ""))") + "\n"
         }
         for (k, v) in (b["stories"] as? [String: Any] ?? [:]).sorted(by: { $0.key < $1.key }) {
-            let rs = storyRepos(v as? [String: Any] ?? [:])
+            let rs = apStoryRepos(v as? [String: Any] ?? [:])
             let parts = rs.keys.sorted().map { r -> String in
                 let s = rs[r] ?? [:]
                 return "\(repoName(r)) \(s["branch"] ?? "?")\(s["head"] == nil ? "(가지 없음)" : "") · 합침 \((s["merged"] as? [Any])?.count ?? 0) · 합치지 않음 \((s["unmerged"] as? [Any])?.count ?? 0)"
@@ -3737,7 +3731,7 @@ func cmdFinish(_ args: [String]) -> Never {
     func refsOf(_ source: String) -> [(repo: String, branch: String)] {
         if source == "autopilot" { return info.keys.sorted().compactMap { r in ((info[r] as? [String: Any])?["work"] as? String).map { (r, $0) } } }
         guard source.hasPrefix("story:"), let sv = storiesRec[String(source.dropFirst(6))] as? [String: Any] else { return [] }
-        let rs = storyRepos(sv)
+        let rs = apStoryRepos(sv)
         return rs.keys.sorted().compactMap { r in
             guard rs[r]?["head"] != nil, let sb = rs[r]?["branch"] as? String, !sb.isEmpty else { return nil }
             return (r, sb)
@@ -3746,7 +3740,7 @@ func cmdFinish(_ args: [String]) -> Never {
     var label = "autopilot", storyEntries: [String: [String: Any]] = [:], noBranch: [String] = []
     if let k = storyKey {
         guard let sv = storiesRec[k] as? [String: Any] else { fail("이 실행에 스토리 \(k) 가 없습니다.") }
-        storyEntries = storyRepos(sv)
+        storyEntries = apStoryRepos(sv)
         label = "story:" + k
     }
     let refs = refsOf(label)

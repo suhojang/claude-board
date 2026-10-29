@@ -1,6 +1,7 @@
 // Claude Code 세션 보드 — 작업 경로별 카드로 세션 상태를 보여 주는 네이티브 창
 // 상태 파일: ~/.claude/notifier/sessions/*.json (state.py 가 hook 에서 기록)
 import AppKit
+import AutopilotRules
 import BoardRules
 import Carbon.HIToolbox
 import Combine
@@ -270,26 +271,9 @@ struct APRun: Equatable, Identifiable {
         if x.repos.isEmpty { x.repos = Array(Set(x.units.map(\.cwd).filter { !$0.isEmpty })).sorted() }
         x.wrapped = r["wrapped"] != nil
         if x.wrapped, !repos.isEmpty, !x.active {
-            x.mergeWaiting = APRun.mergeOpen(br, steps: apPromotion(x.project), stories: x.jira ? x.units.contains { $0.story == nil } : true)
+            x.mergeWaiting = apMergeOpen(br, steps: apPromotion(x.project), stories: x.jira ? x.units.contains { $0.story == nil } : true)
         }
         return x
-    }
-
-    // 합치기·승격에 남은 것이 있는가(설계 판단, 2단계 5-3) — 엔진 finish 의 promoted·discarded 로만 본다(git 은 부르지 않는다).
-    // 합칠 쪽(자율주행 가지, Jira 면 스토리마다)이 버려지지도 승격 차례의 마지막 자율주행 단계(예 live)에 합쳐지지도 않았거나,
-    // 하나라도 그 단계에 합쳤는데 기존 가지끼리의 마지막 단계(예 master ← live)를 아직 안 했으면 남았다
-    static func mergeOpen(_ br: [String: Any], steps: [APStep], stories withAutopilot: Bool) -> Bool {
-        let promoted = apPromotedRows(br), failed = apFailedRows(br)
-        let discarded = Set((br["discarded"] as? [[String: Any]] ?? []).compactMap { $0["source"] as? String })
-        // 일부 저장소만 합친 단계(엔진 branches.failed 가 남고 그 뒤 그 저장소를 합치지 않음)는 끝나지 않은 것으로 본다 — 엔진 finish 와 같은 규칙
-        func done(_ src: String?, _ into: String) -> Bool { apStepDone(promoted, failed, source: src, into: into) }
-        var sources = (br["stories"] as? [String: Any] ?? [:]).keys.sorted().map { "story:" + $0 }
-        if sources.isEmpty || withAutopilot { sources.insert("autopilot", at: 0) }
-        let lastAuto = steps.last { $0.from == "autopilot" }?.into
-        func reached(_ s: String) -> Bool { lastAuto.map { done(s, $0) } ?? promoted.contains { $0.source == s } }
-        if sources.contains(where: { !discarded.contains($0) && !reached($0) }) { return true }
-        if let last = steps.last, last.from != "autopilot", sources.contains(where: reached), !done(nil, last.into) { return true }
-        return false
     }
 }
 
@@ -299,46 +283,15 @@ func apPromotion(_ project: String?) -> [APStep] {
     return list.compactMap { s in (s["from"] as? String).flatMap { f in (s["into"] as? String).map { APStep(from: f, into: $0, after: s["after"] as? String) } } }
 }
 
-// 엔진 run.json 의 branches.stories.<키> 를 저장소별로 읽는다(2026-10-28, 한 스토리가 여러 저장소에 걸침) — 엔진 storyRepos 와 같다.
-// 새 꼴 {repos: {<저장소>: {branch, base, head, merged, unmerged}}}, 옛 꼴(스토리 하나에 저장소 하나 {repo, branch, …})은 그 저장소 하나로 본다
-func apStoryRepos(_ s: Any?) -> [String: [String: Any]] {
-    guard let s = s as? [String: Any] else { return [:] }
-    if let rs = s["repos"] as? [String: Any] { return rs.compactMapValues { $0 as? [String: Any] } }
-    guard let r = s["repo"] as? String, !r.isEmpty else { return [:] }
-    var o = s; o["repo"] = nil
-    return [r: o]
-}
+// 가지 기록 읽기·합치기 상태(APStep·APPromoted·APFailed·apStoryRepos·apPromotedRows·apFailedRows·apUnresolved·apStepDone·apMergeOpen·apMergeMark)는
+// 규칙 라이브러리 AutopilotRules(Sources/AutopilotRules/Branches.swift)로 옮겼다 — 엔진과 함께 쓰고 표 시험이 붙어 있다
+
 // 작업 폴더가 든 저장소(branches.repos 의 키, 따로 작업 트리면 그 작업 트리 자리도 본다) — 엔진 repoFor 와 같다
 func apRepoFor(_ path: String, _ repos: [String: Any]) -> String? {
     repos.keys.filter { r in
         let w = (repos[r] as? [String: Any])?["work_tree"] as? String
         return path == r || path.hasPrefix(r + "/") || (w.map { path == $0 || path.hasPrefix($0 + "/") } ?? false)
     }.max { $0.count < $1.count }
-}
-func apPromotedRows(_ br: [String: Any]) -> [APPromoted] {
-    (br["promoted"] as? [[String: Any]] ?? []).map {
-        APPromoted(source: $0["source"] as? String ?? "", repo: $0["repo"] as? String ?? "", branch: $0["branch"] as? String ?? "",
-                   into: $0["into"] as? String ?? "", how: $0["how"] as? String ?? "", to: $0["to"] as? String ?? "", at: apNum($0["at"]))
-    }
-}
-// 엔진 finish 가 저장소 하나에서 하지 못한 것(먼저 본 확인을 지난 뒤의 중간 실패, branches.failed)
-struct APFailed: Equatable { var op = "", source = "", repo = "", branch = "", into = "", why = ""; var at: Double? }
-func apFailedRows(_ br: [String: Any]) -> [APFailed] {
-    (br["failed"] as? [[String: Any]] ?? []).map {
-        APFailed(op: $0["op"] as? String ?? "", source: $0["source"] as? String ?? "", repo: $0["repo"] as? String ?? "", branch: $0["branch"] as? String ?? "",
-                 into: $0["into"] as? String ?? "", why: $0["why"] as? String ?? "", at: apNum($0["at"]))
-    }
-}
-// 합치기·올리기 가운데 하지 못하고 아직 다시 하지 않은 것 — 그 뒤 같은 합칠 쪽·받는 가지·저장소로 합친 줄이 없으면 남았다
-func apUnresolved(_ promoted: [APPromoted], _ failed: [APFailed], source: String?, into: String) -> [APFailed] {
-    failed.filter { f in
-        ["merge", "promote"].contains(f.op) && f.into == into && (source == nil || f.source == source)
-            && !promoted.contains { $0.source == f.source && $0.into == f.into && $0.repo == f.repo && ($0.at ?? 0) >= (f.at ?? 0) }
-    }
-}
-// 단계가 끝났는가 — 엔진 finish 의 차례 규칙: 그 합칠 쪽(source 가 없으면 무엇이든)을 into 에 합친 줄이 있고, 일부 저장소만 하고 남긴 것이 없다
-func apStepDone(_ promoted: [APPromoted], _ failed: [APFailed], source: String?, into: String) -> Bool {
-    promoted.contains { $0.into == into && (source == nil || $0.source == source) } && apUnresolved(promoted, failed, source: source, into: into).isEmpty
 }
 
 enum APScreen: Equatable {
@@ -581,8 +534,7 @@ struct APPastRun: Equatable, Identifiable {
     var harnessSame: Bool?
     var harnessFiles = 0
     var harnessChanged: [APChange] = []
-    var promotedInto: [String] = []
-    var discarded = false
+    var merge: APMergeMark?                             // 합치기 상태(규칙 apMergeMark). 가지 기록이 없는 실행은 nil
     var epic: String?
     var storyRepos: [String: [APPastStoryRepo]] = [:]   // 스토리 키 → 저장소마다 스토리 가지·합친 작업 수·마지막으로 받은 가지(기록 저장소 runs.branches)
     var jira: Bool { jiraUnits > 0 }
@@ -597,14 +549,14 @@ struct APPastRun: Equatable, Identifiable {
         guard let same = harnessSame else { return "하네스 기록 없음" }
         return same ? "하네스 같음" : "하네스 바뀜 \(harnessChanged.count)"
     }
-    // 합치기 상태(설계 판단): 버렸으면 버림, 합친 단계가 있으면 마지막으로 받은 가지, 아니면 합치기 기다림. 가지 기록이 없는 실행은 없음
+    // 합치기 상태 글자와 색 — 어느 상태인지는 규칙 apMergeMark(AutopilotRules)가 정한다
     var mergeLabel: (String, Color)? {
-        guard hasBranches else { return nil }
-        if discarded { return ("버림", APColor.muted) }
-        if let last = promotedInto.last {
-            return (["master", "main"].contains(last) ? "\(last) 까지 올림" : "\(last) 에 합침", APColor.ok)
+        guard let m = merge else { return nil }
+        switch m {
+        case .discarded: return (m.label, APColor.muted)
+        case .promoted: return (m.label, APColor.ok)
+        case .waiting: return (m.label, APColor.wait)
         }
-        return ("합치기 기다림", APColor.wait)
     }
     var stateLabel: (String, Color)? {
         switch state {
@@ -722,8 +674,7 @@ enum APRecords {
             r.mode = (json(c[16]) as? [String: Any])?["mode"] as? String ?? ""
             if let b = json(c[17]) as? [String: Any] {
                 r.hasBranches = !((b["repos"] as? [String: Any]) ?? [:]).isEmpty
-                r.promotedInto = (b["promoted"] as? [[String: Any]] ?? []).compactMap { $0["into"] as? String }
-                r.discarded = !(b["discarded"] as? [Any] ?? []).isEmpty
+                r.merge = apMergeMark(b)
                 let pro = apPromotedRows(b)
                 let gone = (b["discarded"] as? [[String: Any]] ?? []).map { (($0["source"] as? String) ?? "") + "|" + (($0["repo"] as? String) ?? "") }
                 for (k, v) in b["stories"] as? [String: Any] ?? [:] {
@@ -1829,7 +1780,7 @@ struct APHistoryScreen: View {
             APButton(title: "이 실행 이어 가기", primary: true, enabled: r.project != nil,
                      help: r.project == nil ? "프로젝트가 없는 실행이라 이어 갈 수 없습니다" : "남은 단위와 미룬 사람 몫을 불러와 출발 준비를 엽니다",
                      axid: "ap-continue-\(r.id)") { APStart.shared.open(continuing: r.id) }
-            APButton(title: "합치기·승격", icon: "arrow.triangle.merge", primary: r.mergeLabel?.0 == "합치기 기다림", enabled: r.hasBranches && FileManager.default.fileExists(atPath: r.runDir + "/run.json"),
+            APButton(title: "합치기·승격", icon: "arrow.triangle.merge", primary: r.merge == .waiting, enabled: r.hasBranches && FileManager.default.fileExists(atPath: r.runDir + "/run.json"),
                      help: r.hasBranches ? "바뀐 줄을 보고 승격 차례대로 합치거나 버립니다" : "엔진이 만든 가지가 없는 실행입니다(또는 실행 폴더를 지웠습니다)",
                      axid: "ap-merge-\(r.id)") { APMerge.shared.open(r.runDir) }
             APButton(title: "보고서 보기", enabled: false, help: "아직 만들지 않았습니다(보고서 틀과 함께)") {}
@@ -2236,9 +2187,6 @@ struct APStory: Equatable, Identifiable {
     var title = ""
     var isNew: Bool { key == nil }
 }
-
-// 승격 차례 한 단계(projects/<프로젝트>.json promotion: from 이 autopilot 이면 이 실행의 자율주행 가지)
-struct APStep: Equatable { let from: String; let into: String; var after: String? }
 
 extension APRecords {
     struct Sample { let project: String; let kind: String; let model: String; let est: Double; let min: Double; let usd: Double; let pp: Double }
@@ -4032,7 +3980,6 @@ func apGitRun(_ args: [String], _ cwd: String) -> (code: Int32, out: String) {
     return (p.terminationStatus, String(decoding: d, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines))
 }
 
-struct APPromoted: Equatable { var source = "", repo = "", branch = "", into = "", how = "", to = ""; var at: Double? }
 struct APDiffFile: Equatable { let path: String; let add: String; let del: String }
 
 // 한 단계의 저장소 하나(또는 바뀐 파일 한 범위) — 보드가 읽기만 하는 git 으로 미리 본 것. 범위는 받는 가지 머리(a)...합칠 가지 머리(b)
