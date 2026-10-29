@@ -1,4 +1,4 @@
-//! 세션 읽기 — `Store.reload` (`ClaudeBoard.swift:941-1207`, SPEC §5.1).
+//! 세션 읽기 — `Store.reload` (`ClaudeBoard.swift Store.reload`, SPEC §5.1).
 //! 1초마다 `sessions/*.json` 을 읽어 경로별 그룹으로 묶는다. 프로세스 확인(셸 수·콘솔에 붙을 수 있는지)은
 //! 느리므로 백그라운드에서 3초마다 센 값(`Probe`)을 받아 쓴다.
 
@@ -7,11 +7,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use claude_board_core::claude_live::{live_state, session_name, status_change};
 use claude_board_core::{fileio, Record};
 use serde_json::Value;
 
 use crate::model::{last_name, Group, Session, Sub};
-use crate::readers::{ContextReader, ModelReader};
+use crate::drive::can_drive;
+use crate::readers::{ClaudeNames, ContextReader, InterruptReader, ModelReader};
 use crate::settings::{set_in, Settings};
 use crate::util::{ms, num, obj};
 
@@ -27,6 +29,10 @@ pub struct Probe {
     pub shells: HashMap<u32, usize>,
     /// 콘솔에 붙을 수 있는 Claude 프로세스 pid
     pub drivable: HashSet<u32>,
+    /// pid → 보드 터미널 짝(W2). 지금 claude 가 도는 보드 터미널 id 들.
+    pub places: HashMap<u32, crate::model::PidPlace>,
+    pub runs_claude: Vec<String>,
+    pub at_prompt: Vec<String>,
 }
 
 pub struct Store {
@@ -36,6 +42,9 @@ pub struct Store {
     records: HashMap<PathBuf, (SystemTime, Record)>,
     models: ModelReader,
     contexts: ContextReader,
+    /// Esc 중단 표시(대화 기록 끝)와 Claude Code 의 `sessions\<pid>.json` — 둘 다 파일 수정 시각이 같으면 다시 읽지 않는다
+    interrupts: InterruptReader,
+    pub(crate) names: ClaudeNames,
     /// 직전 reload 때 승인 대기였던 세션 — 새로 승인 대기가 된 세션만 골라 그 그룹을 편다
     waiting_ids: HashSet<String>,
 }
@@ -81,7 +90,8 @@ fn text(rec: &Record, key: &str) -> String {
     rec.get(key).and_then(Value::as_str).unwrap_or("").to_string()
 }
 
-/// 세션 기록의 서브에이전트 — 끝난 지 10초 넘은 것은 뺀다. done 이 아닌 것 먼저, 시작 순.
+/// 세션 기록의 서브에이전트 — 끝난 지 10초 넘은 것과 시작 hook 을 보지 못한 것(`started_seen` 이 참이 아님)은 뺀다.
+/// done 이 아닌 것 먼저, 시작 순. 세션 상태에 반영되는 것도 이 목록뿐이다.
 fn parse_subs(j: Option<&Record>, alive: bool, now: f64) -> Vec<(Sub, f64)> {
     let Some(j) = j.filter(|_| alive) else { return Vec::new() };
     let mut out: Vec<(Sub, f64)> = j
@@ -90,6 +100,11 @@ fn parse_subs(j: Option<&Record>, alive: bool, now: f64) -> Vec<(Sub, f64)> {
             let v = v.as_object()?;
             let ended = num(v.get("ended"));
             if ended.is_some_and(|e| now - e > 10.0) {
+                return None;
+            }
+            // 시작 hook 없이 생긴 기록(끝 hook 이나 도구 hook 만 옴)은 실제 서브에이전트가 아니다 — 전사 파일도 종류도 없고,
+            // 끝 hook 이 끝내 안 오면 실행 중으로 남아 세션을 계속 작업 중으로 보이게 하므로 목록에서 뺀다
+            if v.get("started_seen").and_then(Value::as_bool) != Some(true) {
                 return None;
             }
             let started = num(v.get("started")).unwrap_or(0.0);
@@ -120,11 +135,13 @@ impl Store {
     pub fn new(sessions: PathBuf, notifier: &Path, claude_dir: PathBuf, home: String) -> Self {
         Store {
             dir: sessions,
+            names: ClaudeNames::new(claude_dir.clone()),
             claude_dir,
             home,
             records: HashMap::new(),
             models: ModelReader::default(),
             contexts: ContextReader::new(notifier.join("context"), notifier.join("context-windows.json")),
+            interrupts: InterruptReader::default(),
             waiting_ids: HashSet::new(),
         }
     }
@@ -137,6 +154,7 @@ impl Store {
     pub fn reload(&mut self, settings: &mut Settings, probe: &Probe, alive: &dyn Fn(&Record) -> bool, mute_all: bool, now: f64) -> Reloaded {
         let mut sessions: Vec<Session> = Vec::new();
         let mut brain_paths = HashSet::new();
+        let mut pids = HashSet::new();
         let mut seen = HashSet::new();
         let mut names: Vec<String> = fs::read_dir(&self.dir)
             .map(|rd| rd.flatten().filter_map(|e| e.file_name().into_string().ok()).filter(|n| n.ends_with(".json")).collect())
@@ -155,10 +173,13 @@ impl Store {
                 }
             };
             if let Some(s) = self.session(&j, &name, &path, probe, alive, now, &mut brain_paths) {
+                pids.insert(s.pid);
                 sessions.push(s);
             }
         }
         self.models.prune(&brain_paths);
+        self.interrupts.prune(&brain_paths);
+        self.names.prune(&pids);
         self.records.retain(|k, _| seen.contains(k));
 
         let mut changed = self.expand_newly_waiting(&sessions, settings);
@@ -221,6 +242,19 @@ impl Store {
             return None;
         }
         let pid = j.get("pid").and_then(Value::as_u64).filter(|&p| p <= u64::from(u32::MAX)).unwrap_or(0) as u32;
+        // Esc 로 끊은 세션은 입력을 기다리는 중이고, 승인한 도구가 도는 세션은 작업 중이다(SPEC §3.9).
+        // 끊은 뒤에도 서브에이전트·셸이 돌면 아래에서 다시 작업 중이 된다
+        let mut since = num(j.get("since")).unwrap_or(0.0);
+        let (interrupts, names) = (&mut self.interrupts, &mut self.names);
+        let live = live_state(
+            &state,
+            || interrupts.read(&transcript),
+            || status_change(&names.get(pid)?, &sid, since),
+        );
+        if let Some((s, at)) = live {
+            state = s.to_string();
+            since = at;
+        }
         // 응답은 끝났어도 서브에이전트나 백그라운드 셸이 돌고 있으면 작업 중으로 보인다
         let base = transcript.to_string_lossy();
         let sub_dir = PathBuf::from(base.strip_suffix(".jsonl").unwrap_or(&base)).join("subagents");
@@ -263,8 +297,8 @@ impl Store {
         } else {
             "요청 전".to_string()
         };
-        let headless = j.get("headless").and_then(Value::as_bool).unwrap_or(false);
-        let since = num(j.get("since")).unwrap_or(0.0);
+        let place = probe.places.get(&pid).cloned().unwrap_or_default();
+        let headless = j.get("headless").and_then(Value::as_bool).unwrap_or(false) && place.tty.is_none();
         let limit_s = obj(j.get("limit_hit")).and_then(|l| num(l.get("at")));
         let resume_args = j
             .get("resume_args")
@@ -272,7 +306,8 @@ impl Store {
             .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect::<Vec<_>>())
             .filter(|a| !a.is_empty())
             .unwrap_or_else(|| vec!["--resume".to_string(), sid.clone()]);
-        let can_drive = !headless && state != "ended" && pid > 0 && probe.drivable.contains(&pid);
+        let name = if state == "ended" { None } else { self.names.get(pid).as_ref().and_then(session_name).map(str::to_string) };
+        let can_drive = can_drive(&state, pid, headless, &place, &probe.runs_claude, probe.drivable.contains(&pid));
         Some(Session {
             id: sid,
             cwd,
@@ -284,12 +319,14 @@ impl Store {
             message,
             ctx,
             brain,
+            name,
             subagents: subs,
             shells,
             paused,
             muted,
             limit_at: limit_s.map(ms),
             can_drive,
+            place,
             pid,
             pid_ctime: num(j.get("pid_ctime")),
             file: path.to_path_buf(),
@@ -346,6 +383,7 @@ fn fold_quiet(groups: &[Group], settings: &mut Settings, now: f64) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::io::Write;
 
     struct Fake {
         root: PathBuf,
@@ -380,6 +418,176 @@ mod tests {
             fs::write(&p, serde_json::to_vec(&rec).unwrap()).unwrap();
             p
         }
+    }
+
+    impl Fake {
+        /// Claude Code 의 `sessions\<pid>.json` 을 쓴다.
+        fn claude_session(&self, pid: u32, body: serde_json::Value) -> PathBuf {
+            let d = self.claude.join("sessions");
+            fs::create_dir_all(&d).unwrap();
+            let p = d.join(format!("{pid}.json"));
+            fs::write(&p, serde_json::to_vec(&body).unwrap()).unwrap();
+            p
+        }
+
+        fn transcript(&self, sid: &str) -> PathBuf {
+            self.root.join("t").join(format!("{sid}.jsonl"))
+        }
+
+        /// 대화 기록 끝에 Esc 중단 표시 줄을 붙인다.
+        fn interrupt(&self, sid: &str) {
+            let line = json!({"type": "user", "timestamp": STAMP, "message": {"content": "[Request interrupted by user]"}});
+            let mut f = fs::OpenOptions::new().append(true).open(self.transcript(sid)).unwrap();
+            writeln!(f).unwrap();
+            writeln!(f, "{line}").unwrap();
+        }
+    }
+
+    /// Windows 는 수정 시각이 타이머 틱 단위라 방금 쓴 파일과 같은 값이 될 수 있다 — 바뀐 것으로 보이게 확실히 옮긴다.
+    fn bump(path: &Path, secs: u64) {
+        let f = fs::OpenOptions::new().append(true).open(path).unwrap();
+        f.set_modified(SystemTime::now() + std::time::Duration::from_secs(secs)).unwrap();
+    }
+
+    /// 2026-10-16T19:24:08.5Z — 중단 표시 줄의 시각
+    const STAMP: &str = "2026-10-16T19:24:08.5Z";
+    const STAMP_S: f64 = 1_792_178_648.5;
+    const LIVE_NOW: f64 = STAMP_S + 60.0;
+
+    fn session_of<'a>(groups: &'a [Group], id: &str) -> &'a Session {
+        groups.iter().flat_map(|g| g.sessions.iter()).find(|s| s.id == id).unwrap()
+    }
+
+    #[test]
+    fn interrupt_turns_working_into_idle() {
+        let f = Fake::new();
+        for (sid, state, pid) in [("w", "working", 10), ("q", "waiting", 11), ("i", "idle", 12)] {
+            f.session(sid, json!({"state": state, "pid": pid, "cwd": "/w/a", "updated": LIVE_NOW, "since": LIVE_NOW - 100.0}), true);
+            f.interrupt(sid);
+        }
+        let mut st = f.store();
+        let mut s = Settings::default();
+        let r = st.reload(&mut s, &Probe::default(), &|_| true, false, LIVE_NOW);
+        // working·waiting 은 대기로, 끊은 시각이 since. idle 은 그대로
+        for sid in ["w", "q"] {
+            let x = session_of(&r.groups, sid);
+            assert_eq!((x.state.as_str(), x.since), ("idle", ms(STAMP_S)), "{sid}");
+        }
+        assert_eq!(session_of(&r.groups, "i").since, ms(LIVE_NOW - 100.0));
+    }
+
+    #[test]
+    fn claude_status_overrides_by_session_id() {
+        let f = Fake::new();
+        let at = |s: f64| json!((s * 1000.0) as i64);
+        let rec = |state: &str, pid: u32| json!({"state": state, "pid": pid, "cwd": "/w", "updated": LIVE_NOW, "since": LIVE_NOW - 50.0});
+        // 승인 뒤 도구가 도는 중 — waiting 인데 Claude Code 는 busy
+        f.session("a", rec("waiting", 10), true);
+        f.claude_session(10, json!({"sessionId": "a", "status": "busy", "statusUpdatedAt": at(LIVE_NOW - 1.0)}));
+        // 첫 응답 전에 끊음 — 대화 기록에 표시가 없어도 status 가 idle
+        f.session("b", rec("working", 11), true);
+        f.claude_session(11, json!({"sessionId": "b", "status": "idle", "statusUpdatedAt": at(LIVE_NOW - 2.0)}));
+        // 다른 세션의 파일이거나(/clear 뒤 새 id) 이미 반영된 시각이면 기록 그대로
+        f.session("c", rec("waiting", 12), true);
+        f.claude_session(12, json!({"sessionId": "other", "status": "busy", "statusUpdatedAt": at(LIVE_NOW - 1.0)}));
+        f.session("d", rec("waiting", 13), true);
+        f.claude_session(13, json!({"sessionId": "d", "status": "busy", "statusUpdatedAt": at(LIVE_NOW - 60.0)}));
+        // working 인데 busy 는 덮을 것이 없다
+        f.session("e", rec("working", 14), true);
+        f.claude_session(14, json!({"sessionId": "e", "status": "busy", "statusUpdatedAt": at(LIVE_NOW - 1.0)}));
+        let mut st = f.store();
+        let mut s = Settings::default();
+        let r = st.reload(&mut s, &Probe::default(), &|_| true, false, LIVE_NOW);
+        let get = |id: &str| {
+            let x = session_of(&r.groups, id);
+            (x.state.clone(), x.since)
+        };
+        assert_eq!(get("a"), ("working".to_string(), ms(LIVE_NOW - 1.0)));
+        assert_eq!(get("b"), ("idle".to_string(), ms(LIVE_NOW - 2.0)));
+        assert_eq!(get("c"), ("waiting".to_string(), ms(LIVE_NOW - 50.0)));
+        assert_eq!(get("d"), ("waiting".to_string(), ms(LIVE_NOW - 50.0)));
+        assert_eq!(get("e"), ("working".to_string(), ms(LIVE_NOW - 50.0)));
+    }
+
+    #[test]
+    fn running_subagent_and_paused_after_interrupt() {
+        let f = Fake::new();
+        let run = json!({"r": {"type": "general", "state": "running", "started": LIVE_NOW - 30.0, "started_seen": true}});
+        f.session("sub", json!({"state": "working", "pid": 10, "cwd": "/w", "updated": LIVE_NOW, "since": LIVE_NOW - 100.0, "subagents": run}), true);
+        f.session("pz", json!({"state": "working", "pid": 11, "cwd": "/w", "updated": LIVE_NOW, "since": LIVE_NOW - 100.0}), true);
+        f.interrupt("sub");
+        f.interrupt("pz");
+        fs::write(f.sessions.join("pz.paused"), b"{}").unwrap();
+        let mut st = f.store();
+        let mut s = Settings::default();
+        let r = st.reload(&mut s, &Probe::default(), &|_| true, false, LIVE_NOW);
+        // 끊은 뒤에도 서브에이전트가 돌면 작업 중, since 는 끊은 시각
+        let x = session_of(&r.groups, "sub");
+        assert_eq!((x.state.as_str(), x.since), ("working", ms(STAMP_S)));
+        // 일시중지 표지가 덮은 결과보다 우선한다
+        assert_eq!(session_of(&r.groups, "pz").state, "paused");
+    }
+
+    #[test]
+    fn name_label_hidden_when_ended_and_cache_follows_mtime() {
+        let f = Fake::new();
+        f.session("n", json!({"state": "idle", "pid": 10, "cwd": "/w", "updated": NOW, "since": NOW}), true);
+        let p = f.claude_session(10, json!({"sessionId": "n", "name": "빌드-1a"}));
+        f.session("x", json!({"state": "idle", "pid": 666, "cwd": "/w", "updated": NOW, "since": NOW}), true);
+        f.claude_session(666, json!({"sessionId": "x", "name": "죽은-세션"}));
+        f.session("e", json!({"state": "idle", "pid": 12, "cwd": "/w", "updated": NOW, "since": NOW}), true);
+        f.claude_session(12, json!({"sessionId": "e", "name": ""}));
+        f.session("z", json!({"state": "idle", "cwd": "/w", "updated": NOW, "since": NOW}), true);
+        let mut st = f.store();
+        let mut s = Settings::default();
+        let r = st.reload(&mut s, &Probe::default(), &dead_pid, false, NOW);
+        assert_eq!(session_of(&r.groups, "n").name.as_deref(), Some("빌드-1a"));
+        // 종료된 세션·빈 이름·pid 없음은 이름이 없다
+        assert_eq!(session_of(&r.groups, "x").state, "ended");
+        for sid in ["x", "e", "z"] {
+            assert_eq!(session_of(&r.groups, sid).name, None, "{sid}");
+        }
+        // 파일이 바뀌면 다시 읽는다
+        fs::write(&p, r#"{"sessionId":"n","name":"새-이름"}"#).unwrap();
+        bump(&p, 2);
+        let r = st.reload(&mut s, &Probe::default(), &|_| true, false, NOW + 1.0);
+        assert_eq!(session_of(&r.groups, "n").name.as_deref(), Some("새-이름"));
+        // 파일이 사라지면 이름도 사라진다
+        fs::remove_file(&p).unwrap();
+        let r = st.reload(&mut s, &Probe::default(), &|_| true, false, NOW + 2.0);
+        assert_eq!(session_of(&r.groups, "n").name, None);
+    }
+
+    #[test]
+    fn interrupt_cache_follows_transcript_mtime_and_prunes() {
+        let f = Fake::new();
+        f.session("w", json!({"state": "working", "pid": 10, "cwd": "/w", "updated": LIVE_NOW, "since": LIVE_NOW - 100.0}), true);
+        f.claude_session(10, json!({"sessionId": "w", "status": "busy", "statusUpdatedAt": 1000}));
+        let t = f.transcript("w");
+        let mut st = f.store();
+        let mut s = Settings::default();
+        let r = st.reload(&mut s, &Probe::default(), &|_| true, false, LIVE_NOW);
+        assert_eq!(session_of(&r.groups, "w").state, "working");
+        // 대화 기록이 바뀌면(수정 시각이 달라지면) 다시 읽는다
+        f.interrupt("w");
+        bump(&t, 2);
+        let r = st.reload(&mut s, &Probe::default(), &|_| true, false, LIVE_NOW + 1.0);
+        assert_eq!(session_of(&r.groups, "w").state, "idle");
+        // 수정 시각과 크기가 같으면 파일을 다시 읽지 않는다 — 같은 길이의 다른 내용으로 바꿔도 같은 값을 돌려준다
+        let md = fs::metadata(&t).unwrap();
+        let mtime = md.modified().unwrap();
+        fs::write(&t, " ".repeat(md.len() as usize)).unwrap();
+        fs::File::options().append(true).open(&t).unwrap().set_modified(mtime).unwrap();
+        assert_eq!(st.interrupts.read(&t), Some(STAMP_S));
+        // 수정 시각이 그대로여도 크기가 달라지면 다시 읽는다(Windows 는 같은 틱 안의 쓰기가 같은 시각으로 보인다)
+        fs::write(&t, "").unwrap();
+        fs::File::options().append(true).open(&t).unwrap().set_modified(mtime).unwrap();
+        assert_eq!(st.interrupts.read(&t), None);
+        // 목록에서 사라진 세션의 캐시는 버린다
+        assert_eq!((st.interrupts.len(), st.names.len()), (1, 1));
+        fs::remove_file(f.sessions.join("w.json")).unwrap();
+        st.reload(&mut s, &Probe::default(), &|_| true, false, LIVE_NOW + 3.0);
+        assert_eq!((st.interrupts.len(), st.names.len()), (0, 0));
     }
 
     impl Drop for Fake {
@@ -433,9 +641,9 @@ mod tests {
         f.session(
             "s1",
             json!({"state": "idle", "pid": 10, "cwd": cwd, "updated": NOW, "since": NOW, "subagents": {
-                "old": {"type": "Explore", "state": "done", "started": NOW - 100.0, "ended": NOW - 11.0},
-                "fresh": {"type": "Plan", "state": "done", "started": NOW - 50.0, "ended": NOW - 3.0},
-                "run": {"type": "general", "description": "찾기", "state": "running", "started": NOW - 60.0, "tool": "Grep", "background": true}
+                "old": {"type": "Explore", "state": "done", "started": NOW - 100.0, "ended": NOW - 11.0, "started_seen": true},
+                "fresh": {"type": "Plan", "state": "done", "started": NOW - 50.0, "ended": NOW - 3.0, "started_seen": true},
+                "run": {"type": "general", "description": "찾기", "state": "running", "started": NOW - 60.0, "tool": "Grep", "background": true, "started_seen": true}
             }, "resume_args": ["--model", "claude-opus-5-5", "--resume", "s1"], "limit_hit": {"at": NOW - 30.0, "message": "x"}}),
             true,
         );
@@ -443,7 +651,7 @@ mod tests {
         f.session("s3", json!({"state": "working", "pid": 30, "cwd": cwd, "updated": NOW, "since": NOW - 20.0}), true);
         fs::write(f.sessions.join("s3.paused"), b"{}").unwrap();
         fs::write(f.sessions.join("s2.mute"), b"").unwrap();
-        let probe = Probe { shells: HashMap::from([(20, 2), (30, 5)]), drivable: HashSet::from([10, 30]) };
+        let probe = Probe { shells: HashMap::from([(20, 2), (30, 5)]), drivable: HashSet::from([10, 30]), ..Probe::default() };
         let mut st = f.store();
         let mut s = Settings::default();
         let r = st.reload(&mut s, &probe, &|_| true, true, NOW);
@@ -456,6 +664,8 @@ mod tests {
         assert_eq!(s1.subagents.iter().map(|x| x.id.as_str()).collect::<Vec<_>>(), ["run", "fresh"]);
         assert!(s1.subagents[0].background && s1.subagents[0].tool == "Grep" && s1.subagents[0].desc == "찾기");
         assert_eq!(s1.resume_args, ["--model", "claude-opus-5-5", "--resume", "s1"]);
+        // 보드(프런트엔드)에도 간다 — 탭을 되살릴 때 원래 플래그를 살리는 데 쓴다
+        assert_eq!(serde_json::to_value(s1).unwrap()["resumeArgs"], serde_json::json!(["--model", "claude-opus-5-5", "--resume", "s1"]));
         assert_eq!(s1.limit_at, Some(ms(NOW - 30.0)));
         assert!(s1.can_drive);
         assert_eq!(s1.brain.as_ref().map(|b| b.effort.as_str()), Some("high"));
@@ -464,6 +674,57 @@ mod tests {
         assert_eq!((s2.state.as_str(), s2.shells, s2.muted, s2.can_drive), ("working", 2, true, false));
         let s3 = by("s3");
         assert_eq!((s3.state.as_str(), s3.shells, s3.paused), ("paused", 0, true));
+    }
+
+    #[test]
+    fn subagents_without_start_record_are_hidden() {
+        let f = Fake::new();
+        // 시작 hook 을 본 기록(started_seen 참)은 끝났든 아니든 보이고, 표지가 없거나 거짓이면 끝났든 아니든 숨긴다
+        let subs = json!({
+            "seen_run": {"type": "Plan", "state": "running", "started": NOW - 40.0, "started_seen": true},
+            "seen_done": {"type": "Plan", "state": "done", "started": NOW - 50.0, "ended": NOW - 3.0, "started_seen": true},
+            "orphan_run": {"type": "", "state": "running", "started": NOW - 5.0, "started_seen": false},
+            "orphan_done": {"type": "", "state": "done", "started": NOW - 2.0, "ended": NOW - 2.0, "started_seen": false},
+            "legacy_run": {"type": "Plan", "state": "running", "started": NOW - 60.0},
+            "legacy_done": {"type": "Plan", "state": "done", "started": NOW - 60.0, "ended": NOW - 3.0},
+            "wrong_type": {"type": "Plan", "state": "running", "started": NOW - 60.0, "started_seen": "yes"}
+        });
+        f.session("a", json!({"state": "idle", "pid": 10, "cwd": "/w", "updated": NOW, "since": NOW, "subagents": subs}), true);
+        let mut st = f.store();
+        let mut s = Settings::default();
+        let r = st.reload(&mut s, &Probe::default(), &|_| true, false, NOW);
+        let a = session_of(&r.groups, "a");
+        assert_eq!(a.subagents.iter().map(|x| x.id.as_str()).collect::<Vec<_>>(), ["seen_run", "seen_done"]);
+        assert_eq!(a.state, "working");
+    }
+
+    #[test]
+    fn subagents_without_start_record_do_not_raise_state() {
+        let f = Fake::new();
+        let orphan = |state: &str| json!({"x": {"type": "", "state": state, "started": NOW - 5.0, "started_seen": false}});
+        // 끝 hook 이 끝내 안 오는 시작 없는 기록이 끝나지 않은 채 남아도 응답이 끝난 세션은 쉬는 상태다
+        f.session("run", json!({"state": "idle", "pid": 10, "cwd": "/w", "updated": NOW, "since": NOW, "subagents": orphan("running")}), true);
+        f.session("wait", json!({"state": "idle", "pid": 11, "cwd": "/w", "updated": NOW, "since": NOW, "subagents": orphan("waiting")}), true);
+        // 표지 없는 예전 기록도 같다
+        f.session("old", json!({"state": "idle", "pid": 12, "cwd": "/w", "updated": NOW, "since": NOW,
+                                "subagents": {"x": {"type": "", "state": "running", "started": NOW - 5.0}}}), true);
+        // 시작을 본 서브에이전트는 그대로 작업 중으로 올린다
+        f.session("seen", json!({"state": "idle", "pid": 13, "cwd": "/w", "updated": NOW, "since": NOW,
+                                 "subagents": {"x": {"type": "", "state": "running", "started": NOW - 5.0, "started_seen": true}}}), true);
+        // 시작 없는 기록은 보이는 서브에이전트를 가리지 않는다
+        f.session("mixed", json!({"state": "idle", "pid": 14, "cwd": "/w", "updated": NOW, "since": NOW, "subagents": {
+            "o": {"type": "", "state": "running", "started": NOW - 5.0, "started_seen": false},
+            "s": {"type": "", "state": "done", "started": NOW - 9.0, "ended": NOW - 1.0, "started_seen": true}}}), true);
+        let mut st = f.store();
+        let mut s = Settings::default();
+        let r = st.reload(&mut s, &Probe::default(), &|_| true, false, NOW);
+        for sid in ["run", "wait", "old", "mixed"] {
+            let x = session_of(&r.groups, sid);
+            assert_eq!(x.state, "idle", "{sid}");
+        }
+        assert!(session_of(&r.groups, "run").subagents.is_empty());
+        assert_eq!(session_of(&r.groups, "mixed").subagents.iter().map(|x| x.id.as_str()).collect::<Vec<_>>(), ["s"]);
+        assert_eq!(session_of(&r.groups, "seen").state, "working");
     }
 
     #[test]

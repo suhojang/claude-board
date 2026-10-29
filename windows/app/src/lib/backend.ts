@@ -1,9 +1,12 @@
 // 백엔드(src-tauri)와 주고받는 곳 — windows/docs/SPEC.md §6.
 // Tauri 안에서는 invoke·이벤트를 쓰고, 브라우저(npm run dev)에서는 mock.ts 의 가짜 상태로 화면을 끝까지 눌러 볼 수 있게 한다.
 // 명령 인자 이름은 Rust 명령의 매개변수 이름과 같아야 한다(Tauri 가 camelCase ↔ snake_case 로 맞춘다)
-import { invoke, isTauri } from "@tauri-apps/api/core";
+import { Channel, invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { MascotKind, NotifyOptions, NotifyPosition, SessionAction, Snapshot, State } from "./types";
+import type {
+  BoardSide, ConfirmShutdownPayload, DriveStep, MascotKind, NotifyOptions, NotifyPosition, OpenSessionPayload, PidTarget, RenameCheck, SessionAction, Snapshot, State, TabEntry,
+  TermFrame, TermId, TermInfo, TermSpec,
+} from "./types";
 
 export const inTauri = isTauri();
 
@@ -219,10 +222,52 @@ export function setBoardMini(on: boolean) {
 
 // ── 세션·계정·업데이트 ─────────────────────────────────────────
 
-// activate = 그 세션의 터미널 앱만 앞으로, focus = 그 세션 창(탭)으로 이동, resume = 종료 세션 이어 열기,
-// pause·resume_paused·stop = 일시중지·재개·중단(중단 확인 대화상자는 백엔드가 띄운다)
-export function sessionAction(action: SessionAction, id: string) {
-  fire("session_action", { action, id });
+// activate = 그 세션의 터미널 앱만 앞으로, focus = 그 세션 창(탭)으로 이동, reopen = 꺼진 세션 이어 열기(carryOn 이면 "이어서 진행" 문구 포함),
+// pause·resume·stop = 일시중지·일시중지한 세션 재개·중단(중단 확인 대화상자는 백엔드가 띄운다)
+export function sessionAction(action: SessionAction, id: string, carryOn?: boolean) {
+  fire("session_action", { action, id, carryOn });
+}
+
+// 보드가 안 떠 있던 동안 쌓인 "세션 열기" 요청을 모두 꺼낸다(오래된 것부터) — 처음 부르면 프런트엔드가 준비됐다는 표시도 된다.
+// onOpenSession 의 듣기가 끝난 뒤에 불러야 그 사이에 오는 요청을 놓치지 않는다 (W3)
+export function takeOpenSession(): Promise<OpenSessionPayload[]> {
+  return call<OpenSessionPayload[]>("take_open_session");
+}
+
+// 이어 열기를 마쳤다고 알린다 — 백엔드가 그제서야 일시중지 표시를 지운다
+export function reopenDone(id: string): Promise<void> {
+  return call<void>("reopen_done", { id });
+}
+
+// 백엔드가 보내는 "세션 열기" 요청(끝난 세션 이어 열기·창으로 이동). 듣기가 시작되면 풀린다
+export async function onOpenSession(fn: (p: OpenSessionPayload) => void): Promise<() => void> {
+  if (!inTauri) return () => {};
+  return listen<OpenSessionPayload>("board://open-session", (e) => fn(e.payload));
+}
+
+// 보드 탭이나 콘솔에 단계별 입력을 넣는다(일시중지 Esc, 재개 문구, /rename). 넣을 곳이 없으면 false
+export function driveSession(id: string, steps: DriveStep[]): Promise<boolean> {
+  return call<boolean>("drive_session", { id, steps });
+}
+
+// /rename 을 보내도 되는 세션인가 — 신선한 세션 상태와 대화 기록 유무 (mac renameSafe·hasTranscript)
+export function renameCheck(id: string): Promise<RenameCheck> {
+  return call<RenameCheck>("rename_check", { id });
+}
+
+// 시스템 더블 클릭 시간(ms) — 다른 터미널 줄의 한 번 클릭을 이만큼 미룬다. 읽지 못하면(브라우저 개발 화면 포함) 500
+export async function doubleClickTime(): Promise<number> {
+  try {
+    const ms = await call<number>("double_click_time");
+    return typeof ms === "number" && ms > 0 ? ms : 500;
+  } catch {
+    return 500;
+  }
+}
+
+// 보드 창을 펼쳐 앞으로 가져온다 (mac showBoard)
+export function showBoard() {
+  fire("show_board");
 }
 
 export function switchAccount(id: string) {
@@ -294,6 +339,198 @@ export function minimizeBoard() {
 
 export function log(text: string) {
   fire("log", { text });
+}
+
+// ── 터미널 칸·보드 칸 배치 ─────────────────────────────────────
+
+// 터미널을 펼치거나 접는다. 창 크기·위치는 백엔드가 바꾸고, 화면은 누른 즉시 따라간다
+export function setTerminalExpanded(on: boolean) {
+  optimistic((s) => {
+    s.settings.terminalExpanded = on;
+  });
+  fire("set_terminal_expanded", { on });
+}
+
+export function setBoardSide(side: BoardSide) {
+  optimistic((s) => {
+    s.settings.boardSide = side;
+  });
+  fire("set_board_side", { side });
+}
+
+// 경계를 놓을 때 한 번 저장한다(논리 px)
+export function setBoardWidth(width: number) {
+  optimistic((s) => {
+    s.settings.boardPaneWidth = width;
+  });
+  fire("set_board_width", { width });
+}
+
+// 백엔드가 Ctrl+Alt+T 등으로 터미널을 앞에 불렀을 때 — 활성 터미널에 포커스를 준다
+export function onTerminalFocus(fn: () => void): () => void {
+  if (!inTauri) return () => {};
+  let off: (() => void) | undefined;
+  let closed = false;
+  listen("board://terminal-focus", fn).then((unlisten) => (closed ? unlisten() : (off = unlisten)));
+  return () => {
+    closed = true;
+    off?.();
+  };
+}
+
+// ── 내장 터미널 명령 — 계약은 SPEC 터미널 절 ─────────────────────
+
+export function termSpawn(spec: TermSpec): Promise<TermInfo> {
+  return call<TermInfo>("term_spawn", { spec });
+}
+
+export function termList(): Promise<TermInfo[]> {
+  return call<TermInfo[]>("term_list");
+}
+
+export function termAck(id: TermId, seq: number) {
+  fire("term_ack", { id, seq });
+}
+
+/** 적용했으면 ConPTY 크기 변경 직전의 스트림 위치, 적용 안 했으면(같은 크기·끝난 셸) null */
+export function termResize(id: TermId, cols: number, rows: number): Promise<number | null> {
+  return call<number | null>("term_resize", { id, cols, rows });
+}
+
+export function termKill(id: TermId) {
+  fire("term_kill", { id });
+}
+
+// 채널 메시지 하나를 푼다. 원시 데이터는 8바이트 little-endian seq + 출력, JSON 제어는 {t:"gap"|"exit"}.
+// 작은 원시 메시지는 숫자 배열로, 큰 것은 ArrayBuffer 로 올 수 있어 둘 다 받는다
+export function decodeFrame(message: unknown): TermFrame {
+  let bytes: Uint8Array | null = null;
+  if (message instanceof ArrayBuffer) bytes = new Uint8Array(message);
+  else if (message instanceof Uint8Array) bytes = message;
+  else if (Array.isArray(message)) bytes = Uint8Array.from(message as number[]);
+  if (bytes) {
+    if (bytes.length < 8) throw new Error(`터미널 프레임이 8바이트보다 짧음: ${bytes.length}`);
+    const seq = Number(new DataView(bytes.buffer, bytes.byteOffset, 8).getBigUint64(0, true));
+    return { kind: "data", seq, bytes: bytes.subarray(8) };
+  }
+  const control = message as { t?: string; seq?: number; code?: number | null } | null;
+  if (control?.t === "gap") return { kind: "gap", seq: Number(control.seq) };
+  if (control?.t === "exit") return { kind: "exit", code: control.code ?? null };
+  throw new Error(`알 수 없는 터미널 프레임: ${JSON.stringify(message)}`);
+}
+
+// fromSeq 부터 다시 받기 시작하고, 이후 프레임을 onFrame 으로 보낸다. 같은 id 의 이전 채널은 백엔드가 대체한다
+export async function termAttach(id: TermId, fromSeq: number, onFrame: (frame: TermFrame) => void): Promise<TermInfo> {
+  const onMessage = (message: unknown) => onFrame(decodeFrame(message));
+  if (inTauri) {
+    const channel = new Channel<unknown>();
+    channel.onmessage = onMessage;
+    return invoke<TermInfo>("term_attach", { id, fromSeq, onData: channel });
+  }
+  const mock = await import("./mock");
+  return mock.attachTerm(id, fromSeq, onMessage);
+}
+
+// 입력은 터미널마다 줄을 세워 앞 명령이 끝난 뒤에 보낸다 — 비동기 명령은 도착 순서가 보장되지 않아 빠르게 치면 글자가 뒤섞인다.
+// 기다리는 동안 쌓인 같은 종류의 입력은 한 번에 보낸다
+type Input = { text: string } | { bin: number[] };
+const inputs = new Map<TermId, { queue: Input[]; busy: boolean }>();
+
+function enqueueInput(id: TermId, item: Input) {
+  let state = inputs.get(id);
+  if (!state) inputs.set(id, (state = { queue: [], busy: false }));
+  const last = state.queue.at(-1);
+  if (last && "text" in last && "text" in item) last.text += item.text;
+  else if (last && "bin" in last && "bin" in item) last.bin.push(...item.bin);
+  else state.queue.push(item);
+  if (!state.busy) void drainInput(id, state);
+}
+
+async function drainInput(id: TermId, state: { queue: Input[]; busy: boolean }) {
+  state.busy = true;
+  try {
+    for (let item = state.queue.shift(); item; item = state.queue.shift()) {
+      await ("text" in item ? call("term_write", { id, data: item.text }) : call("term_write_bin", { id, data: item.bin })).catch(() => {});
+    }
+  } finally {
+    state.busy = false;
+  }
+}
+
+export function termWrite(id: TermId, data: string) {
+  enqueueInput(id, { text: data });
+}
+
+export function termWriteBin(id: TermId, data: number[]) {
+  enqueueInput(id, { bin: data });
+}
+
+// ── 수명 주기·md-render·시험 장치(1단계) — 규칙은 terminal/{restore,shutdownList,mdRender,testClaude}.ts ──
+
+// 다시 뜰 때 이어 열 탭 목록을 통째로 바꿔 저장한다 / 읽는다 (mac saveTabs·restoreTabs)
+// 저장이 끝나면 풀린다 — 끄기 직전에는 이것을 기다린 뒤 답해야 마지막 저장이 사라지지 않는다
+export function saveTabs(entries: TabEntry[]): Promise<void> {
+  return call<void>("save_tabs", { entries });
+}
+
+export function loadTabs(): Promise<TabEntry[]> {
+  return call<TabEntry[]>("load_tabs");
+}
+
+// 주어진 프로세스 가운데 아직 산 것의 pid — 앞 보드가 남긴 터미널이 끝났는지 볼 때. 생성 시각(ctime)이 다르면 재사용된 pid 라 산 것으로 치지 않는다
+export function pidsAlive(targets: PidTarget[]): Promise<number[]> {
+  return call<number[]>("pids_alive", { targets });
+}
+
+// 그 프로세스가 timeoutMs 안에 끝나기를 기다린다 — 끝났으면 true (보드 밖 터미널의 세션을 /exit 로 끝낸 뒤). pid 0(모름)은 늘 false
+export function waitExit(pid: number, pidCtime: number | null, timeoutMs: number): Promise<boolean> {
+  return call<boolean>("wait_exit", { pid, pidCtime, timeoutMs });
+}
+
+// 끌 때 확인 창의 답 — pause 는 .paused 를 남길 세션 id. 백엔드가 받은 뒤 풀린다
+export function answerShutdown(ok: boolean, pause: string[]): Promise<void> {
+  return call<void>("answer_shutdown", { ok, pause });
+}
+
+// 화면이 (다시) 시작했다 — 그 전에 보낸 끌 때 확인 요청은 화면이 사라졌으므로 백엔드가 기다리던 요청을 취소한다
+export function lifecycleStarted(): Promise<void> {
+  return call<void>("lifecycle_started");
+}
+
+// 주어진 경로 가운데 실제로 있는 폴더 — 탭을 되살릴 때 작업 폴더가 아직 있는지(없는 폴더에서는 셸이 홈 폴더로 뜬다)
+export function existingDirs(paths: string[]): Promise<string[]> {
+  return call<string[]>("existing_dirs", { paths });
+}
+
+// 답변 꾸미기를 끈 세션 id 가운데 세션 파일이 없어진 것을 치운다 — 보드를 켤 때 한 번(mac pruneMdRenderOff)
+export function pruneMdRenderOff(): Promise<void> {
+  return call<void>("prune_md_render_off");
+}
+
+// 끌 때 확인 창을 띄웠다고 알린다 — 이 뒤로 백엔드는 사용자가 고를 때까지 기다린다(안 알리면 10초 뒤 그대로 진행한다)
+export function shutdownDialogShown() {
+  fire("shutdown_dialog_shown");
+}
+
+// 백엔드가 끌 때 확인을 요청했을 때(트레이 종료·업데이트) — 듣기가 시작된 뒤에 풀리고, 듣기를 끄는 함수를 돌려준다
+export async function onConfirmShutdown(fn: (p: ConfirmShutdownPayload) => void): Promise<() => void> {
+  if (!inTauri) return () => {};
+  return listen<ConfirmShutdownPayload>("board://confirm-shutdown", (e) => fn(e.payload));
+}
+
+// 옮겨 둔 md-render 플러그인 폴더, 못 옮겼으면 null(그러면 --plugin-dir 을 붙이지 않는다)
+export function mdRenderDir(): Promise<string | null> {
+  return call<string | null>("md_render_dir");
+}
+
+// 답변 꾸미기를 끄고 띄운 세션 id 를 기억한다
+export function rememberMdRenderOff(id: string) {
+  fire("remember_md_render_off", { id });
+}
+
+// 시험 모드에서 맨 앞 claude 를 바꿔칠 프로그램·앞쪽 인자, 시험 모드가 아니면 null
+export function testClaudePrefix(): Promise<string[] | null> {
+  return call<string[] | null>("test_claude_prefix");
 }
 
 // ── 알림 패널(/notify) — §6.3 ──────────────────────────────────

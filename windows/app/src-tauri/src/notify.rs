@@ -41,6 +41,8 @@ pub struct Options {
     pub sound: String,
     pub duration: f64,
     pub position: String,
+    /// 이 알림이 속한 세션 id(`--session`) — 비어 있으면 세션 없는 알림. 누르면 보드가 그 세션으로 이동한다
+    pub session: String,
 }
 
 /// 프론트에 주는 모양 — types.ts 의 NotifyOptions.
@@ -66,6 +68,7 @@ pub fn parse(argv: &[String]) -> Options {
         sound: "done".into(),
         duration: 10.0,
         position: "center".into(),
+        session: String::new(),
     };
     let mut it = argv.iter().skip(1);
     while let Some(key) = it.next() {
@@ -80,6 +83,7 @@ pub fn parse(argv: &[String]) -> Options {
             "--kind" => o.kind = if value == "wait" { "wait".into() } else { "done".into() },
             "--sound" => o.sound = value.clone(),
             "--duration" => o.duration = value.parse().ok().filter(|d: &f64| d.is_finite() && *d > 0.0).unwrap_or(o.duration),
+            "--session" => o.session = value.clone(),
             "--position" => o.position = if POSITIONS.contains(&value.as_str()) { value.clone() } else { "center".into() },
             "--summary" => {
                 for pair in value.split(',') {
@@ -286,12 +290,19 @@ fn notify_hover(state: State<'_, PanelState>, inside: bool) {
     p.since = clock::now();
 }
 
-/// 누르면 보드를 띄운다(`ClaudeBoard.exe --show` — 떠 있으면 단일 실행 플러그인이 앞으로 가져온다). 닫기는 프론트가 notify_finish 로.
+/// 누를 때 보드에 거는 인자 — 세션 알림이면 `--action focus <sid>`(보드 탭 세션은 그 탭으로, 다른 터미널은 그 창으로),
+/// 세션이 없으면 `--show`. 둘 다 떠 있는 보드에는 단일 실행 플러그인이 넘기고, 안 떠 있으면 새 보드가 처리한다.
+fn click_args(session: &str) -> Vec<&str> {
+    if session.is_empty() { vec!["--show"] } else { vec!["--action", "focus", session] }
+}
+
+/// 누르면 보드를 띄우고 세션 알림이면 그 세션으로 이동시킨다. 닫기는 프론트가 notify_finish 로.
 #[tauri::command(async)]
-fn notify_clicked() {
+fn notify_clicked(state: State<'_, PanelState>) {
+    let session = state.lock().unwrap().opts.session.clone();
     let Ok(exe) = std::env::current_exe() else { return };
     let mut cmd = Command::new(exe);
-    cmd.arg("--show");
+    cmd.args(click_args(&session));
     if let Err(e) = crate::util::spawn_detached(cmd) {
         board_log(&format!("알림 패널에서 보드를 띄우지 못했습니다: {e}"));
     }
@@ -386,8 +397,22 @@ mod tests {
         assert_eq!(o.kind, "wait");
         assert_eq!(o.summary, BTreeMap::from([("waiting".into(), 1), ("working".into(), 2), ("idle".into(), 0)]));
         assert_eq!((o.duration, o.position.as_str(), o.sound.as_str()), (3.0, "top-right", "done"));
+        assert_eq!(o.session, "");
         let d = parse(&args(&["--notify", "--kind", "odd", "--position", "middle", "--duration", "-1", "--sound"]));
         assert_eq!((d.kind.as_str(), d.position.as_str(), d.duration), ("done", "center", 10.0));
+    }
+
+    #[test]
+    fn session_argument_decides_what_a_click_runs() {
+        let o = parse(&args(&["--notify", "--title", "t", "--session", "abc-123"]));
+        assert_eq!(o.session, "abc-123");
+        assert_eq!(click_args(&o.session), ["--action", "focus", "abc-123"]);
+        // 맥 notify.py 는 세션 id 가 없으면 빈 값을 넘긴다 — 세션 없는 알림으로 본다
+        let empty = parse(&args(&["--notify", "--session", ""]));
+        assert_eq!(click_args(&empty.session), ["--show"]);
+        assert_eq!(click_args(&parse(&args(&["--notify"])).session), ["--show"]);
+        // 뒤의 값이 이긴다
+        assert_eq!(parse(&args(&["--session", "a", "--session", "b"])).session, "b");
     }
 
     const WORK: Frame = Frame { x: 0.0, y: 0.0, w: 1920.0, h: 1040.0 };

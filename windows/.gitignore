@@ -9,3 +9,10 @@
 /app/src-tauri/binaries/
 /dist/
 .DS_Store
+
+# Jev 시험 도구: 보드 창만 담은 스크린샷, 자른 사본, 판정 캐시(로컬 전용, ci/jev/README.md)
+/e2e/out/
+/e2e/artifacts/
+
+# 화면 대조용 시나리오(로컬 전용)
+app/src/lib/mock-scenarios.ts

@@ -14,6 +14,8 @@ import sys
 BIN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "claude-notifier")
 MAX_BODY = 140
 SESSIONS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sessions")
+# 승인 대기로 알릴 Notification 종류 — state.py 의 WAIT_NOTIFICATIONS 와 같다
+WAIT_NOTIFICATIONS = {"permission_prompt", "worker_permission_prompt", "elicitation_dialog", "elicitation_url_dialog"}
 
 
 def last_assistant_text(transcript_path):
@@ -170,8 +172,10 @@ def main():
     if sid and os.path.exists(os.path.join(SESSIONS, f"{sid}.mute")):
         return
 
-    # 응답을 마친 뒤 입력이 없을 때 오는 알림은 이미 '작업 완료' 로 알렸으므로 띄우지 않는다
-    if kind == "notification" and data.get("notification_type") == "idle_prompt":
+    # 응답을 마친 뒤 입력이 없을 때 오는 알림(idle_prompt)은 이미 '작업 완료' 로 알렸고, 다른 백그라운드 작업이 끝남
+    # 같은 승인과 상관없는 알림은 승인 대기가 아니므로 띄우지 않는다(종류가 없는 예전 Claude Code 의 알림은 띄운다)
+    noti = data.get("notification_type")
+    if kind == "notification" and noti and noti not in WAIT_NOTIFICATIONS:
         return
 
     if kind == "notification":

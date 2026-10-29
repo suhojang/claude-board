@@ -1,20 +1,26 @@
 <script lang="ts">
-  // 세션 한 줄(ClaudeBoard.swift:1743-1913): 서브에이전트 접기 화살표·상태 아이콘·제목·알림 스위치·… 메뉴(종료면 ⓧ),
-  // 둘째 줄에 경과 시간·하위 작업·셸·모델·컨텍스트(좁으면 3단계로 줄임), 승인 대기면 ✋ 요청 내용
+  // 세션 한 줄(ClaudeBoard.swift SessionRow): 서브에이전트 접기 화살표·상태 아이콘·제목·알림 스위치·… 메뉴(종료면 ⓧ),
+  // 둘째 줄에 경과 시간·하위 작업·셸·세션 이름·모델·컨텍스트(좁으면 3단계로 줄이고 세션 이름은 앞 두 단계에만 보임), 승인 대기면 ✋ 요청 내용
   import { cubicOut } from "svelte/easing";
   import { fly, fade } from "svelte/transition";
   import type { Session } from "$lib/types";
+  import { onDestroy } from "svelte";
   import { removeSession, sessionAction, toggleSubCollapsed } from "$lib/backend";
+  import { place } from "$lib/terminal/hub.svelte";
+  import { createRowClick, moveSessionToBoard } from "$lib/terminal/sessionFlow.svelte";
   import ContextLabel from "./ContextLabel.svelte";
   import Fit from "./Fit.svelte";
   import Icon from "./Icon.svelte";
   import ModelLabel from "./ModelLabel.svelte";
+  import NameLabel from "./NameLabel.svelte";
   import MuteSwitch from "./MuteSwitch.svelte";
+  import PlaceChip from "./PlaceChip.svelte";
   import StateIcon from "./StateIcon.svelte";
   import SubagentRow from "./SubagentRow.svelte";
   import { clock, elapsed, stateName, stateRgb } from "./format";
   import { hint } from "./hint.svelte";
   import { openMenu, type MenuItem } from "./menu.svelte";
+  import { sessionMenuEntries } from "./sessionActions";
 
   let { s, now, locked, subCollapsed }: { s: Session; now: number; locked: boolean; subCollapsed: boolean } = $props();
 
@@ -27,31 +33,26 @@
     toggleSubCollapsed(s.id);
   }
 
-  // 한 번 클릭 = 그 세션의 터미널 앱만 앞으로, 두 번 클릭 = 종료 세션은 다시 열기, 아니면 그 세션 창으로 이동.
-  // 클릭 횟수로 나눈다 — 한 번·두 번 클릭을 따로 기다리면 줄 안의 스위치·단추까지 늦게 반응한다
-  function click(e: MouseEvent) {
-    if (e.detail >= 2) sessionAction(ended ? "resume" : "focus", s.id);
-    else sessionAction("activate", s.id);
-  }
+  // 클릭 횟수로 나눈다(동작은 openSession.ts 표) — 다른 터미널의 줄만 한 번 클릭을 더블 클릭 시간만큼 미룬다(clickGate)
+  const rowClick = createRowClick(() => s);
+  onDestroy(rowClick.dispose);
+
+  // 터미널 없이 도는 살아 있는 세션은 신호를 보내지 않으므로 메뉴가 없다(mac SessionRow)
+  const where = $derived(place(s));
+  const hasMenu = $derived(sessionMenuEntries(s, where).length > 0);
 
   function showMenu(e: MouseEvent) {
     e.stopPropagation();
-    let items: MenuItem[];
-    if (s.state === "ended") {
-      items = [{ label: s.paused ? "세션 재개 (이어서 진행)" : "세션 다시 열기", action: () => sessionAction("resume", s.id) }];
-    } else if (s.state === "paused") {
-      items = [
-        { label: "세션 재개", action: () => sessionAction("resume_paused", s.id) },
-        { separator: true },
-        { label: "세션 중단", action: () => sessionAction("stop", s.id) },
-      ];
-    } else {
-      items = [
-        { label: "일시중지", enabled: s.state !== "idle" && s.canDrive, action: () => sessionAction("pause", s.id) },
-        { separator: true },
-        { label: "세션 중단", action: () => sessionAction("stop", s.id) },
-      ];
-    }
+    const items: MenuItem[] = sessionMenuEntries(s, where).map((entry) =>
+      "separator" in entry
+        ? entry
+        : {
+            label: entry.label,
+            enabled: entry.enabled,
+            // 보드로 옮기기만 프론트가 흐름을 짠다(확인 → 키 → 끝나기 대기 → 이어 열기). 나머지는 백엔드 동작 이름 그대로
+            action: () => (entry.action === "moveToBoard" ? void moveSessionToBoard(s) : sessionAction(entry.action, s.id, entry.carryOn)),
+          },
+    );
     openMenu(items, e);
   }
 
@@ -60,7 +61,7 @@
 
 <div class="session">
   <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <div class="row" role="button" tabindex="-1" style:--c={stateRgb(s.state)} onclick={click}>
+  <div class="row" role="button" tabindex="-1" style:--c={stateRgb(s.state)} onclick={rowClick.click}>
     <div class="lead">
       {#if s.subagents.length === 0}
         <span class="slot"></span>
@@ -81,9 +82,11 @@
       <div class="top">
         <span class="title" class:dim={ended}>{s.title}</span>
         {#if !ended}<MuteSwitch {s} {locked} />{/if}
-        <button class="more" onclick={showMenu} ondblclick={stop} use:hint={"세션 일시중지·재개·중단"}>
-          <Icon name="ellipsis" size={12} />
-        </button>
+        {#if hasMenu}
+          <button class="more" onclick={showMenu} ondblclick={stop} use:hint={"세션 일시중지·재개·중단"}>
+            <Icon name="ellipsis" size={12} />
+          </button>
+        {/if}
         {#if ended}
           <button
             class="remove"
@@ -102,7 +105,8 @@
       <Fit count={3} class="meta">
         {#snippet content(level)}
           <span class="items">
-            <span class="num">{ended ? `${clock(s.updated)} 종료` : s.state === "idle" ? `${elapsed(s.since, now)} 전` : elapsed(s.since, now)}</span>
+            <span class="num el">{ended ? `${clock(s.updated)} 종료` : s.state === "idle" ? `${elapsed(s.since, now)} 전` : elapsed(s.since, now)}</span>
+            <PlaceChip place={where} headless={s.headless} appName={s.appName} mode={s.state === "ended" ? null : s.mode} />
             {#if s.subagents.length || s.shells > 0 || s.ctx || s.brain}<span>·</span>{/if}
             {#if s.subagents.length}
               {@const n = running > 0 && running < s.subagents.length ? `${running}/${s.subagents.length}` : `${s.subagents.length}`}
@@ -112,7 +116,7 @@
                 ondblclick={stop}
                 use:hint={`하위 작업 ${s.subagents.length}개 — ` + (subOpen ? "서브에이전트 목록 접기" : "서브에이전트 목록 펼치기")}
               >
-                <Icon name="people" size={10} />
+                <Icon name="people" size={12.6} pad={1.45} />
                 {level > 0 ? n : `하위 작업 ${n}`}
                 {#if level === 0}<span class="fold">{subOpen ? "· 접기" : "· 펼치기"}</span>{/if}
               </button>
@@ -122,6 +126,7 @@
                 <Icon name="shells" size={11} />{level > 0 ? `${s.shells}` : `셸 ${s.shells}개 실행 중`}
               </span>
             {/if}
+            {#if s.name && !ended && level < 2}<NameLabel name={s.name} />{/if}
             {#if s.brain}<ModelLabel brain={s.brain} {level} />{/if}
             {#if s.ctx}<ContextLabel ctx={s.ctx} {level} />{/if}
           </span>
@@ -208,9 +213,11 @@
     gap: 8px;
     min-height: 20px;
   }
+  /* SwiftUI 는 제목과 스위치 사이에 Spacer(최소 4)와 간격 둘이 끼어 제목이 스위치에서 12px 더 떨어져 잘린다 */
   .title {
     flex: 1;
     min-width: 0;
+    margin-right: 12px;
     font-size: 13px;
     font-weight: 500;
     white-space: nowrap;
@@ -258,6 +265,9 @@
     align-items: center;
     gap: 5px;
     white-space: nowrap;
+  }
+  .el {
+    margin-right: 2px;
   }
   .subtoggle {
     --s: 242 140 191;

@@ -72,7 +72,8 @@ fn mask(rec: &Record) -> Record {
     }
     if let Some(Value::Object(subs)) = r.get_mut("subagents") {
         for sub in subs.values_mut().filter_map(Value::as_object_mut) {
-            for k in ["started", "updated", "ended"] {
+            // started_seen 은 캡처 뒤 state.py 에 더한 필드(시작 hook 을 본 표지)라 캡처에 없다
+            for k in ["started", "updated", "ended", "started_seen"] {
                 sub.shift_remove(k);
             }
         }
@@ -145,6 +146,12 @@ fn replay_with_captured_clock_and_process_is_exact() {
         // project_dir 은 캡처 뒤 state.py 에 더한 필드(캡처에 없다) — 환경 변수가 없으면 첫 hook 의 cwd 를 지킨다
         let dir = got.shift_remove("project_dir").expect("project_dir");
         assert_eq!(dir, first_cwd, "project_dir — 단계 {}", step.name);
+        // started_seen 도 캡처 뒤에 더한 필드 — 이 시나리오의 서브에이전트는 시작 hook 을 거쳤으므로 참이다
+        if let Some(Value::Object(subs)) = got.get_mut("subagents") {
+            for sub in subs.values_mut().filter_map(Value::as_object_mut) {
+                assert_eq!(sub.shift_remove("started_seen"), Some(Value::Bool(true)), "started_seen — 단계 {}", step.name);
+            }
+        }
         assert_eq!(Value::Object(got.clone()), Value::Object(step.expected.clone()), "단계 {}", step.name);
         assert_eq!(out.title, titles[i], "제목 — 단계 {}", step.name);
         assert_eq!(out.remove_paused, step.input["hook_event_name"] == "UserPromptSubmit", "단계 {}", step.name);
@@ -152,6 +159,30 @@ fn replay_with_captured_clock_and_process_is_exact() {
         let keys: Vec<&String> = got.keys().collect();
         let want: Vec<&String> = step.expected.keys().collect();
         assert_eq!(keys, want, "키 순서 — 단계 {}", step.name);
+        rec = out.record;
+    }
+}
+
+#[test]
+fn subagent_started_seen_matches_state_py() {
+    // state.py 3.2.0 의 track_subagent 로 만든 기대값(gen-started-seen.py) — 필드 이름·값·키 순서가 같다
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/subagent-started-seen.json");
+    let fixture: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+    let env = Fake(ClaudeProcess { pid: 4242, ctime: Some(1_700_000_000.25), tty: None, headless: false, argv: vec!["claude".into()] });
+    let mut rec = Map::new();
+    let steps = fixture["steps"].as_array().unwrap();
+    assert!(steps.len() >= 7, "단계가 비었다");
+    for (i, step) in steps.iter().enumerate() {
+        let input = step["input"].as_object().unwrap();
+        let out = state::apply(rec, step["state"].as_str().unwrap(), input, step["now"].as_f64().unwrap(), &env);
+        let got = &out.record["subagents"];
+        let want = &step["subagents"];
+        assert_eq!(got, want, "단계 {i}");
+        for (id, sub) in want.as_object().unwrap() {
+            let got_keys: Vec<&String> = got[id].as_object().unwrap().keys().collect();
+            let want_keys: Vec<&String> = sub.as_object().unwrap().keys().collect();
+            assert_eq!(got_keys, want_keys, "키 순서 — 단계 {i} {id}");
+        }
         rec = out.record;
     }
 }

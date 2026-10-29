@@ -3,6 +3,7 @@
 //! [`apply`] 는 순수 함수다: 세션 기록 + 상태 인자 + hook 입력 + 시각 + 주입한 프로세스 정보([`Env`])
 //! → 새 기록 + 바꿀 터미널 제목. 파일 잠금·읽기·쓰기·prune·`.paused` 삭제는 [`run`] 이 맡는다.
 
+use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 
@@ -73,18 +74,26 @@ const CARRY_FLAG: &[&str] = &[
 ];
 
 /// 다시 열 때 넘길 실행 인자만 고른다(argv[0] 은 건너뛴다) — `state.py:carry_args`.
+/// 같은 플래그·같은 `(이름, 값)` 쌍·같은 `--x=v` 형은 한 번만 넘긴다. Claude Code 는 bypass 권한 모드로 이어 열 때
+/// `--allow-dangerously-skip-permissions` 를 스스로 하나 더 붙여 띄우므로, 그대로 넘기면 이어 열 때마다 하나씩 늘어난다.
+/// 값을 여러 개 받는 `--add-dir x` 꼴은 중복을 걸러내지 않는다.
 pub fn carry_args<S: AsRef<str>>(argv: &[S]) -> Vec<String> {
     let argv: Vec<&str> = argv.iter().map(AsRef::as_ref).collect();
     let mut out = Vec::new();
+    let mut seen: HashSet<(&str, Option<&str>)> = HashSet::new();
     let mut i = 1;
     while i < argv.len() {
         let a = argv[i];
         let name = a.split('=').next().unwrap_or(a);
         if (a.contains('=') && (CARRY_ONE.contains(&name) || CARRY_MANY.contains(&name))) || CARRY_FLAG.contains(&a) {
-            out.push(a.to_string());
+            if seen.insert((a, None)) {
+                out.push(a.to_string());
+            }
         } else if CARRY_ONE.contains(&a) && i + 1 < argv.len() {
-            out.push(a.to_string());
-            out.push(argv[i + 1].to_string());
+            if seen.insert((a, Some(argv[i + 1]))) {
+                out.push(a.to_string());
+                out.push(argv[i + 1].to_string());
+            }
             i += 1;
         } else if CARRY_MANY.contains(&a) {
             out.push(a.to_string());
@@ -136,6 +145,18 @@ pub fn resume_cmd(rec: &Record) -> String {
     resume_cmd_with(rec, quote::join)
 }
 
+/// 사람의 답을 기다리게 하는 Notification(`notification_type`) — 승인 창(서브에이전트·팀원 것 포함)과 MCP 의 입력 요청.
+/// 다른 백그라운드 작업이 끝남(`agent_completed`)·입력 필요(`agent_needs_input`), 로그인 성공 같은 알림도 같은 hook 으로 오므로
+/// 이 밖의 알림은 이 세션의 상태가 아니다. 알림 패널([`crate::notify::prepare`])도 이 목록만 띄운다.
+pub const WAIT_NOTIFICATIONS: [&str; 4] =
+    ["permission_prompt", "worker_permission_prompt", "elicitation_dialog", "elicitation_url_dialog"];
+
+/// 승인과 상관없는 Notification 이면 참 — 세션 기록을 건드리지 않는다. 종류가 없는 예전 Claude Code 의 알림은 승인으로 본다.
+pub fn unrelated_notification(state: &str, data: &Record) -> bool {
+    state == "waiting"
+        && non_empty_str(data.get("notification_type")).is_some_and(|k| k != "idle_prompt" && !WAIT_NOTIFICATIONS.contains(&k))
+}
+
 /// 응답을 마친 뒤 입력을 오래 기다릴 때 오는 Notification 은 승인 대기가 아니라 (입력) 대기다.
 pub fn effective_state(state: &str, data: &Record) -> String {
     if state == "waiting" && data.get("notification_type").and_then(Value::as_str) == Some("idle_prompt") {
@@ -146,7 +167,7 @@ pub fn effective_state(state: &str, data: &Record) -> String {
 }
 
 /// 기록의 pid 가 양의 정수면 그 값. Python 은 pid 가 None·문자열이면 `alive()` 가 참이다.
-fn record_pid(rec: &Record) -> Option<u32> {
+pub(crate) fn record_pid(rec: &Record) -> Option<u32> {
     rec.get("pid").and_then(Value::as_u64).filter(|&p| p > 0).and_then(|p| u32::try_from(p).ok())
 }
 
@@ -176,9 +197,15 @@ fn track_subagent(rec: &mut Record, data: &Record, state: &str, now: f64, env: &
         set(&mut fresh, "type", kind);
         set(&mut fresh, "started", now);
         set(&mut fresh, "state", "running");
+        set(&mut fresh, "started_seen", false);
         subs.insert(aid.clone(), Value::Object(fresh));
     }
     let Some(Value::Object(sub)) = subs.get_mut(&aid) else { return };
+    // 시작 hook 을 본 서브에이전트만 시작 시각을 믿는다 — 시작 없이 끝 hook 만 왔으면 시작 시각은 끝 시각을 흉내 낸 값이다
+    if event == Some("SubagentStart") && !truthy(sub.get("started_seen")) {
+        set(sub, "started", now);
+        set(sub, "started_seen", true);
+    }
     if !truthy(sub.get("description")) {
         let transcript = data.get("transcript_path").and_then(Value::as_str).unwrap_or("");
         let meta = if transcript.is_empty() { Map::new() } else { env.subagent_meta(transcript, &aid) };
@@ -334,7 +361,8 @@ pub fn apply(mut rec: Record, state_arg: &str, data: &Record, now: f64, env: &dy
         rec.shift_remove("limit_hit");
     }
     let changed = rec.get("state").and_then(Value::as_str) != Some(state.as_str());
-    if changed {
+    // Esc 로 끊으면 hook 이 오지 않아 다음 요청은 작업 중 → 작업 중이다 — 새 요청이면 시작 시각을 새로 잡는다
+    if changed || event == Some("UserPromptSubmit") {
         set(&mut rec, "state", state.as_str());
         set(&mut rec, "since", now);
     }
@@ -446,6 +474,9 @@ pub fn prune(sessions: &Path, now: f64, alive: impl Fn(&Record) -> bool) {
 /// 어떤 오류도 Claude Code 를 막으면 안 되므로 실패는 조용히 버린다(부르는 쪽이 패닉도 잡는다).
 pub fn run(sessions: &Path, state_arg: &str, input: &[u8], env: &dyn Env) {
     let Ok(Value::Object(data)) = serde_json::from_slice::<Value>(input) else { return };
+    if unrelated_notification(state_arg, &data) {
+        return;
+    }
     let state = effective_state(state_arg, &data);
     // 경로 구분자가 든 id 는 sessions 밖에 쓰게 되므로 받지 않는다
     let Some(sid) = non_empty_str(data.get("session_id")).filter(|s| !s.contains(['/', '\\']) && *s != "..") else {
@@ -565,6 +596,48 @@ mod tests {
     }
 
     #[test]
+    fn carry_args_dedups_same_args() {
+        let run = |a: &[&str]| {
+            let mut argv = vec!["claude"];
+            argv.extend_from_slice(a);
+            carry_args(&argv)
+        };
+        assert_eq!(run(&["--chrome", "--chrome"]), ["--chrome"]);
+        assert_eq!(
+            run(&["--allow-dangerously-skip-permissions", "--allow-dangerously-skip-permissions"]),
+            ["--allow-dangerously-skip-permissions"]
+        );
+        assert_eq!(run(&["--model", "a", "--model", "a"]), ["--model", "a"]);
+        assert_eq!(run(&["--model", "a", "--model", "b"]), ["--model", "a", "--model", "b"]);
+        assert_eq!(run(&["--model=a", "--model=a"]), ["--model=a"]);
+        assert_eq!(run(&["--model", "a", "--model=a"]), ["--model", "a", "--model=a"]);
+        assert_eq!(run(&["--add-dir=x", "--add-dir=x"]), ["--add-dir=x"]);
+        // 띄운 형은 값이 여러 개일 수 있어 중복을 거르지 않는다
+        assert_eq!(run(&["--add-dir", "x", "--add-dir", "x"]), ["--add-dir", "x", "--add-dir", "x"]);
+    }
+
+    #[test]
+    fn since_restarts_on_new_prompt_only() {
+        let env = fake();
+        let rec = obj(json!({"pid": 42, "args": [], "state": "working", "since": 100.0}));
+        let hook = |name: &str| obj(json!({"session_id": "s", "hook_event_name": name, "cwd": "/w/p"}));
+        // 새 요청은 같은 working 이어도 시작 시각을 새로 잡는다
+        let out = apply(rec.clone(), "working", &hook("UserPromptSubmit"), 500.0, &env);
+        assert_eq!(out.record["state"], "working");
+        assert_eq!(out.record["since"], 500.0);
+        // 도구 호출은 그대로
+        let out = apply(rec.clone(), "working", &hook("PreToolUse"), 500.0, &env);
+        assert_eq!(out.record["since"], 100.0);
+        // 제목은 상태나 주제가 바뀔 때만 — 같은 working 의 새 요청은 제목을 다시 쓰지 않는다
+        let tty_rec = obj(json!({"pid": 42, "args": [], "state": "working", "since": 100.0, "headless": false}));
+        let out = apply(tty_rec.clone(), "working", &hook("UserPromptSubmit"), 500.0, &env);
+        assert_eq!(out.title, None);
+        let out = apply(tty_rec, "idle", &hook("Stop"), 500.0, &env);
+        assert_eq!(out.title.as_deref(), Some("🟢 p"));
+        assert_eq!(out.record["since"], 500.0);
+    }
+
+    #[test]
     fn resume_cmd_replaces_mode_and_model() {
         let rec = obj(json!({
             "session_id": "sid-1",
@@ -666,6 +739,40 @@ mod tests {
         assert_eq!(out.record["state"], "working");
         assert!(!out.record.contains_key("model"));
         assert_eq!(out.title, None);
+    }
+
+    #[test]
+    fn subagent_started_seen_only_on_start_hook() {
+        let env = fake();
+        let ev = |name: &str, aid: &str| obj(json!({"session_id": "s", "hook_event_name": name, "agent_id": aid, "agent_type": "Explore", "tool_name": "Bash"}));
+        let mut rec = obj(json!({"pid": 42, "args": [], "state": "working"}));
+        // 시작 hook 을 본 서브에이전트: 시작 시각을 믿는다
+        rec = apply(rec, "subagent", &ev("SubagentStart", "seen"), 100.0, &env).record;
+        assert_eq!(rec["subagents"]["seen"]["started_seen"], true);
+        assert_eq!(rec["subagents"]["seen"]["started"], 100.0);
+        // 시작 뒤 도구·종료 hook 은 시작 시각과 표지를 그대로 둔다
+        rec = apply(rec, "subagent", &ev("PreToolUse", "seen"), 110.0, &env).record;
+        rec = apply(rec, "subagent", &ev("SubagentStop", "seen"), 120.0, &env).record;
+        assert_eq!(rec["subagents"]["seen"]["started_seen"], true);
+        assert_eq!(rec["subagents"]["seen"]["started"], 100.0);
+        assert_eq!(rec["subagents"]["seen"]["ended"], 120.0);
+        // 시작 없이 끝·도구 hook 만 온 기록: 표지는 거짓이다
+        rec = apply(rec, "subagent", &ev("SubagentStop", "orphan_stop"), 130.0, &env).record;
+        rec = apply(rec, "subagent", &ev("PreToolUse", "orphan_tool"), 131.0, &env).record;
+        assert_eq!(rec["subagents"]["orphan_stop"]["started_seen"], false);
+        assert_eq!(rec["subagents"]["orphan_tool"]["started_seen"], false);
+        assert_eq!(rec["subagents"]["orphan_tool"]["started"], 131.0);
+        // 시작 없이 만들어진 기록에 시작 hook 이 뒤늦게 오면 그때부터 믿는다
+        rec = apply(rec, "subagent", &ev("SubagentStart", "orphan_tool"), 140.0, &env).record;
+        assert_eq!(rec["subagents"]["orphan_tool"]["started_seen"], true);
+        assert_eq!(rec["subagents"]["orphan_tool"]["started"], 140.0);
+        // 표지 이전에 쓰인 기록(started_seen 키 없음)에 도구 hook 이 와도 키를 만들지 않는다
+        let old = obj(json!({"pid": 42, "args": [], "state": "working", "subagents": {"x": {"type": "", "started": 1.0, "state": "running"}}}));
+        let out = apply(old, "subagent", &ev("PreToolUse", "x"), 5.0, &env).record;
+        assert!(!out["subagents"]["x"].as_object().unwrap().contains_key("started_seen"));
+        // 키 순서는 state.py 와 같다: type, started, state, started_seen
+        let keys: Vec<&String> = rec["subagents"]["seen"].as_object().unwrap().keys().collect();
+        assert_eq!(&keys[..4], ["type", "started", "state", "started_seen"]);
     }
 
     #[test]
@@ -782,6 +889,38 @@ mod tests {
         run(&dir, "working", br#"{"cwd":"/a"}"#, &fake());
         let n = fs::read_dir(&dir).unwrap().count();
         assert_eq!(n, 2);
+        // BOM 은 hook 입력을 받는 쪽(crates/hook main.rs read_input)이 뗀다 — 여기서는 받지 않는다
+        run(&dir, "working", b"\xEF\xBB\xBF{\"session_id\":\"bom\"}", &fake());
+        assert!(!dir.join("bom.json").exists());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn run_ignores_unrelated_notifications() {
+        let dir = std::env::temp_dir().join(format!("cb-noti-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let env = Fake { found: None, alive: true, meta: Map::new(), project_dir: None };
+        let noti = |kind: &str| {
+            format!(r#"{{"session_id":"s1","hook_event_name":"Notification","message":"m","notification_type":"{kind}"}}"#)
+        };
+        run(&dir, "working", br#"{"session_id":"s1","hook_event_name":"UserPromptSubmit","prompt":"hi"}"#, &env);
+        let before = fs::read(dir.join("s1.json")).unwrap();
+        // 다른 백그라운드 작업이 끝남·입력 필요, 로그인 성공 같은 알림은 기록을 그대로 둔다
+        for kind in ["agent_completed", "agent_needs_input", "auth_success", "push_notification"] {
+            run(&dir, "waiting", noti(kind).as_bytes(), &env);
+            assert_eq!(fs::read(dir.join("s1.json")).unwrap(), before, "{kind}");
+        }
+        for kind in WAIT_NOTIFICATIONS {
+            assert!(!unrelated_notification("waiting", &obj(serde_json::from_str(&noti(kind)).unwrap())), "{kind}");
+        }
+        run(&dir, "waiting", noti("permission_prompt").as_bytes(), &env);
+        assert_eq!(fileio::read_record(&dir.join("s1.json")).unwrap()["state"], "waiting");
+        // 종류가 없는 예전 알림·idle_prompt 는 지금처럼
+        let old = obj(json!({"session_id": "s1", "hook_event_name": "Notification", "message": "m"}));
+        assert!(!unrelated_notification("waiting", &old));
+        run(&dir, "waiting", noti("idle_prompt").as_bytes(), &env);
+        assert_eq!(fileio::read_record(&dir.join("s1.json")).unwrap()["state"], "idle");
         fs::remove_dir_all(&dir).unwrap();
     }
 

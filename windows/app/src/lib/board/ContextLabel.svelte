@@ -10,7 +10,7 @@
 </script>
 
 <span class="cap num" style:--c={ctxRgb(ctx.pct)} use:hint={`컨텍스트 ${grouped(ctx.used)} / ${grouped(ctx.size)} 토큰`}>
-  <Icon name="brain" size={10} />
+  <Icon name="brain" size={10} pad={2} />
   {#if level === 0}
     <span class="track"><span class="fill" style:width="{Math.max(2, (26 * ctx.pct) / 100)}px"></span></span>
   {/if}

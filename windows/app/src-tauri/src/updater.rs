@@ -1,4 +1,4 @@
-//! 업데이트 — `Updater` (`ClaudeBoard.swift:4097-4224`, SPEC §5.8).
+//! 업데이트 — `Updater` (`ClaudeBoard.swift Updater`, SPEC §5.8).
 //!
 //! **`/releases/latest` 를 쓰지 않는다** — 그 자리는 macOS 판 릴리스가 쓴다. 릴리스 목록 API 에서
 //! `windows-v` 로 시작하는 첫 정식 릴리스를 고른다. 업데이트는 그 태그의 install.ps1 을 받아 창 없이 분리 실행한다.
@@ -145,20 +145,41 @@ pub fn check(board: &Arc<Board>, manual: bool) {
     });
 }
 
+/// 업데이트할 것이 있고 이미 도는 중이 아닌가 — 확인 창을 띄우기 전에 거른다.
+fn can_start(u: &Updater) -> bool {
+    u.latest.is_some() && !u.running
+}
+
 /// 업데이트 실행 — 성공하면 스크립트가 보드를 끄고 새 보드를 띄우므로 돌아오지 않는다. 돌아오면 실패다.
+/// 업데이트할 것이 없거나 이미 도는 중이면 확인 창도 띄우지 않는다. 확인에서 남긴 `.paused` 표지는 스크립트가 보드를 끄지 못하고
+/// 돌아왔을 때 지운다(세션은 그대로 도는 중이므로 일시중지로 남으면 안 된다, mac Updater.run).
 pub fn run(board: &Arc<Board>) {
+    if !can_start(&board.updater.lock().unwrap()) {
+        return;
+    }
+    let Some(marks) = crate::shutdown::confirm_update(board) else { return };
     let version = {
         let mut u = board.updater.lock().unwrap();
-        let Some(v) = u.latest.clone().filter(|_| !u.running) else { return };
-        u.running = true;
-        u.failed = false;
-        v
+        // 확인을 기다리는 사이 다른 업데이트가 시작됐을 수 있다
+        match u.latest.clone().filter(|_| can_start(&u)) {
+            Some(v) => {
+                u.running = true;
+                u.failed = false;
+                v
+            }
+            None => {
+                drop(u);
+                crate::shutdown::remove_marks(&marks);
+                return;
+            }
+        }
     };
     board.publish();
     let log = paths::notifier_dir().join("update.log");
     let board = board.clone();
     std::thread::spawn(move || {
         let ok = launch(&log, &version);
+        crate::shutdown::remove_marks(&marks);
         let mut u = board.updater.lock().unwrap();
         u.running = false;
         u.failed = !ok;
@@ -225,6 +246,16 @@ mod tests {
         assert_eq!(latest_windows(br#"{"message": "API rate limit exceeded"}"#), None);
         assert!(is_newer("2.13", "2.12") && is_newer("2.12.1", "2.12") && is_newer("2.100", "2.12"));
         assert!(!is_newer("2.12", "2.12") && !is_newer("2.9", "2.12"));
+    }
+
+    #[test]
+    fn starts_only_with_something_to_install_and_nothing_running() {
+        let mut u = Updater::new();
+        assert!(!can_start(&u), "새 버전이 없으면 시작하지 않는다(확인 창도 띄우지 않는다)");
+        u.latest = Some("2.13".into());
+        assert!(can_start(&u));
+        u.running = true;
+        assert!(!can_start(&u), "이미 도는 중이면 시작하지 않는다");
     }
 
     #[test]

@@ -11,6 +11,12 @@ pub fn unprotect(sealed: &[u8]) -> Option<Vec<u8>> {
     sys::unprotect(sealed)
 }
 
+/// 시스템 더블 클릭 시간(ms) — 다른 터미널 줄의 한 번 클릭을 이만큼 미룬다. 읽지 못하면 500.
+#[tauri::command]
+pub fn double_click_time() -> u32 {
+    sys::double_click_time()
+}
+
 pub use sys::{bring_to_front, play_sound, process_window, select_wt_tab, window_pid};
 // 패널 스타일·비활성 표시는 Windows 에서만 부른다
 #[cfg(windows)]
@@ -124,6 +130,14 @@ mod sys {
         }
     }
 
+    pub fn double_click_time() -> u32 {
+        // SAFETY: 인자 없는 시스템 설정 조회
+        match unsafe { windows_sys::Win32::UI::Input::KeyboardAndMouse::GetDoubleClickTime() } {
+            0 => 500,
+            ms => ms,
+        }
+    }
+
     pub fn window_pid(hwnd: isize) -> u32 {
         let mut pid = 0u32;
         // SAFETY: 창 핸들 조회
@@ -203,6 +217,9 @@ mod sys {
     }
     pub fn bring_to_front(_hwnd: isize) {}
     pub fn play_sound(_kind: &str) {}
+    pub fn double_click_time() -> u32 {
+        500
+    }
     pub fn window_pid(_hwnd: isize) -> u32 {
         0
     }

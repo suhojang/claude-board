@@ -1,5 +1,5 @@
 <script lang="ts">
-  // 서브에이전트 한 줄(ClaudeBoard.swift:2144-2201) — 트리 연결선, 작은 상태 아이콘, 설명(없으면 종류),
+  // 서브에이전트 한 줄(ClaudeBoard.swift SubagentRow) — 트리 연결선, 작은 상태 아이콘, 설명(없으면 종류),
   // 아래 줄에 라벨 "서브에이전트"·종류·경과·모델·🔧도구. 좁으면 라벨을 아이콘만, 더 좁으면 종류·도구 이름을 뺀다
   import type { Sub } from "$lib/types";
   import Fit from "./Fit.svelte";
@@ -20,7 +20,8 @@
   use:hint={sub.background ? "백그라운드로 실행된 서브에이전트" : "세션이 결과를 기다리는 서브에이전트"}
 >
   <span class="branch" class:last></span>
-  <StateIcon state={subState(sub)} scale={0.8} />
+  <!-- SwiftUI scaleEffect 는 칸 크기를 그대로 두고 그림만 줄인다 — 18 칸 안에서 0.8 배 -->
+  <span class="ico"><StateIcon state={subState(sub)} scale={0.8} /></span>
   <div class="col">
     <div class="desc">{sub.desc || sub.type}</div>
     <Fit count={3} class="meta">
@@ -35,7 +36,7 @@
           {#if sub.brain}<ModelLabel brain={sub.brain} {level} />{/if}
           {#if !done && sub.tool}
             <span>·</span>
-            <span class="tool" use:hint={sub.tool}><Icon name="wrench" size={10} />{#if level < 2}{sub.tool}{/if}</span>
+            <span class="tool" use:hint={sub.tool}><Icon name="wrench" size={15} pad={-1.25} />{#if level < 2}{sub.tool}{/if}</span>
           {/if}
         </span>
       {/snippet}
@@ -85,6 +86,13 @@
   }
   .branch.last::after {
     display: none;
+  }
+  .ico {
+    flex: none;
+    display: grid;
+    place-items: center;
+    width: 18px;
+    height: 18px;
   }
   .col {
     flex: 1;

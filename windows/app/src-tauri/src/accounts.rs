@@ -1,4 +1,4 @@
-//! 계정 전환 — `AccountStore` (`ClaudeBoard.swift:369-789`, SPEC §5.5).
+//! 계정 전환 — `AccountStore` (`ClaudeBoard.swift AccountStore`, SPEC §5.5).
 //!
 //! macOS 키체인 대신 지금 로그인은 `~/.claude/.credentials.json`, 저장한 계정 토큰은
 //! `notifier/accounts/vault/<계정 id 의 sha256 앞 16자>.bin`(Windows 는 DPAPI 로 암호화)에 둔다.
@@ -441,10 +441,11 @@ pub fn begin_add(board: &Arc<Board>, email: Option<String>) {
         if acc.login.is_some() {
             return Ok(false);
         }
-        let claude = crate::terminal::find_claude().ok_or("claude 명령을 찾지 못했습니다")?;
+        // 시험 모드(CLAUDE_BOARD_CLAUDE)면 가짜로, 설정이 어긋났으면 진짜 claude 를 찾지도 않고 거절한다
+        let (claude, mut args) = crate::test_claude::login_program(crate::test_claude::decision_from_process(), crate::terminal::find_claude)?;
         let slot = board.account_paths.root.join(format!("login-{}", short_id()));
         fs::create_dir_all(&slot).map_err(|e| format!("로그인 자리를 만들지 못했습니다 — {e}"))?;
-        let mut args = vec!["auth".to_string(), "login".into(), "--claudeai".into()];
+        args.extend(["auth".to_string(), "login".into(), "--claudeai".into()]);
         if let Some(e) = email.filter(|e| !e.trim().is_empty()) {
             args.push("--email".into());
             args.push(e.trim().to_string());

@@ -1,0 +1,5 @@
+{
+  "schemaVersion": "1.0",
+  "swiftCompiler": { "extraCLIOptions": ["-F", "/Library/Developer/CommandLineTools/Library/Developer/Frameworks"] },
+  "linker": { "extraCLIOptions": ["-F", "/Library/Developer/CommandLineTools/Library/Developer/Frameworks", "-rpath", "/Library/Developer/CommandLineTools/Library/Developer/Frameworks", "-rpath", "/Library/Developer/CommandLineTools/Library/Developer/usr/lib"] }
+}

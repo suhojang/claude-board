@@ -7,6 +7,34 @@
 ; Tauri 가 만드는 NSIS 파일처럼 UTF-8(BOM) 으로 저장한다 — 한글 문구가 깨지지 않게.
 
 !include LogicLib.nsh
+!include WinVer.nsh
+
+; ClaudeBoard.exe 는 CreatePseudoConsole(ConPTY)을 정적으로 가져다 쓴다. Windows 10 1809(빌드 17763) 미만에서는
+; 실행할 때 진입점 오류만 나므로 설치를 시작하기 전에 막는다. 빌드는 레지스트리 CurrentBuildNumber 를 먼저 본다
+; (WinVer 의 GetVersionEx 는 호환 매니페스트가 없으면 거짓 버전을 준다). 못 읽을 때만 WinVer 로 대신한다.
+; 조용한 설치(/S)에서도 멈추지 않게 MessageBox 에 /SD IDOK 를 주고 Abort 로 끝낸다.
+!macro ClaudeBoardRequireBuild BUILD
+  ${If} ${BUILD} < 17763
+    MessageBox MB_ICONSTOP|MB_OK "Claude Board 는 Windows 10 1809(빌드 17763) 이상에서만 설치할 수 있습니다.$\r$\n이 PC 의 빌드는 ${BUILD} 입니다. Windows 업데이트 후 다시 실행하세요." /SD IDOK
+    Abort
+  ${EndIf}
+!macroend
+
+!macro ClaudeBoardCheckOsBuild
+  Push $0
+  ReadRegStr $0 HKLM "SOFTWARE\Microsoft\Windows NT\CurrentVersion" CurrentBuildNumber
+  ${If} $0 == ""
+    ${WinVerGetBuild} $0
+  ${EndIf}
+  !insertmacro ClaudeBoardRequireBuild $0
+  Pop $0
+!macroend
+
+; Tauri 템플릿은 Section WebView2(부트스트래퍼 내려받기) 다음에 Section Install 을 돌리고, NSIS_HOOK_PREINSTALL 은 그 Install 맨 앞에서 불린다.
+; 그러면 지원하지 않는 Windows 에서도 WebView2 를 먼저 내려받으므로, 가장 먼저 도는 숨은 Section 에서 검사한다.
+Section "-ClaudeBoardOsBuild"
+  !insertmacro ClaudeBoardCheckOsBuild
+SectionEnd
 
 !macro NSIS_HOOK_POSTINSTALL
   DetailPrint "Claude Board 사용자 설정(hook 등록·명령·자동 실행)"

@@ -1,0 +1,181 @@
+{
+ "about": "hook-table/gen.py 가 만든 표. 손으로 고치지 않는다. macOS hook 의 main() 을 끝까지 돌려 얻은 결과이고 Windows 판 Rust 코어가 같은 표로 견준다(windows/crates/core/tests/hook_table.rs). 자세한 규칙은 hook-table/README.md",
+ "env": {
+  "CLAUDE_CODE_DISABLE_TERMINAL_TITLE": "1"
+ },
+ "hooks": {
+  "Notification": [
+   {
+    "hooks": [
+     {
+      "run": [
+       "notify",
+       "notification"
+      ],
+      "timeout": 5,
+      "type": "command"
+     },
+     {
+      "run": [
+       "state",
+       "waiting"
+      ],
+      "timeout": 5,
+      "type": "command"
+     }
+    ]
+   }
+  ],
+  "PermissionRequest": [
+   {
+    "hooks": [
+     {
+      "run": [
+       "state",
+       "waiting"
+      ],
+      "timeout": 5,
+      "type": "command"
+     }
+    ],
+    "matcher": "*"
+   }
+  ],
+  "PostToolUse": [
+   {
+    "hooks": [
+     {
+      "run": [
+       "state",
+       "working"
+      ],
+      "timeout": 5,
+      "type": "command"
+     }
+    ],
+    "matcher": "*"
+   }
+  ],
+  "PreToolUse": [
+   {
+    "hooks": [
+     {
+      "run": [
+       "state",
+       "working"
+      ],
+      "timeout": 5,
+      "type": "command"
+     }
+    ],
+    "matcher": "*"
+   }
+  ],
+  "SessionEnd": [
+   {
+    "hooks": [
+     {
+      "run": [
+       "state",
+       "ended"
+      ],
+      "timeout": 5,
+      "type": "command"
+     }
+    ]
+   }
+  ],
+  "SessionStart": [
+   {
+    "hooks": [
+     {
+      "run": [
+       "state",
+       "idle"
+      ],
+      "timeout": 5,
+      "type": "command"
+     }
+    ]
+   }
+  ],
+  "Stop": [
+   {
+    "hooks": [
+     {
+      "run": [
+       "notify",
+       "stop"
+      ],
+      "timeout": 5,
+      "type": "command"
+     },
+     {
+      "run": [
+       "state",
+       "idle"
+      ],
+      "timeout": 5,
+      "type": "command"
+     }
+    ]
+   }
+  ],
+  "StopFailure": [
+   {
+    "hooks": [
+     {
+      "run": [
+       "state",
+       "idle"
+      ],
+      "timeout": 5,
+      "type": "command"
+     }
+    ]
+   }
+  ],
+  "SubagentStart": [
+   {
+    "hooks": [
+     {
+      "run": [
+       "state",
+       "subagent"
+      ],
+      "timeout": 5,
+      "type": "command"
+     }
+    ]
+   }
+  ],
+  "SubagentStop": [
+   {
+    "hooks": [
+     {
+      "run": [
+       "state",
+       "subagent"
+      ],
+      "timeout": 5,
+      "type": "command"
+     }
+    ]
+   }
+  ],
+  "UserPromptSubmit": [
+   {
+    "hooks": [
+     {
+      "run": [
+       "state",
+       "working"
+      ],
+      "timeout": 5,
+      "type": "command"
+     }
+    ]
+   }
+  ]
+ }
+}

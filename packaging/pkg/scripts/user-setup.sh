@@ -57,7 +57,14 @@ open(p, "w").write(s)
 PY
 fi
 
-# 6) 로그인할 때 자동 실행 (LaunchAgent) — 등록하면서 지금 바로 한 번 띄운다. open -a 는 로그인 직후 LaunchServices 준비 전에 실패할 수 있어 실행 파일을 직접 띄운다
+# 6) 로그인할 때 자동 실행 (LaunchAgent) — 등록하면서 지금 바로 한 번 띄운다. open -a 는 로그인 직후 LaunchServices 준비 전에 실패할 수 있어 실행 파일을 직접 띄운다.
+#    보드 설정(설정 > 일반 > 로그인할 때 열기)에서 끈 사람(표지 파일 login-launch-off)은 등록하지 않고 지금 한 번만 띄운다
+if [ -e "$N/login-launch-off" ]; then
+  launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
+  rm -f "$AGENT"
+  open -a "$APP"
+  exit 0
+fi
 mkdir -p "$(dirname "$AGENT")"
 cat > "$AGENT" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

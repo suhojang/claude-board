@@ -90,6 +90,21 @@ pub struct Sub {
     pub brain: Option<Brain>,
 }
 
+/// 세션 pid 가 어느 보드 터미널에서 어떻게 도는지(W2 설계 §2) — `terms/pairing.rs` 가 3초마다 채우고
+/// 세션 JSON 에 펴서(`flatten`) 실린다. 모르면 모두 None.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PidPlace {
+    /// 이 pid 의 콘솔(또는 조상)이 보드 터미널 `TermId` 인 세션이다.
+    pub tty: Option<String>,
+    /// headless 세션이 그 터미널 셸 조상 아래에서 돈다(탭이 닫히면 함께 끝난다).
+    pub tab_ancestor: Option<String>,
+    /// 시작 방식 `-p` · `--bg`.
+    pub mode: Option<&'static str>,
+    /// 보드 밖 터미널 창의 앱 이름(Windows Terminal 등).
+    pub app_name: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Session {
@@ -102,6 +117,8 @@ pub struct Session {
     pub title: String,
     pub topic: String,
     pub message: String,
+    /// Claude Code 세션 이름(`~/.claude/sessions/<pid>.json` 의 `name`, SPEC §2.3) — 없거나 종료된 세션이면 None
+    pub name: Option<String>,
     pub ctx: Option<Ctx>,
     pub brain: Option<Brain>,
     pub subagents: Vec<Sub>,
@@ -110,19 +127,19 @@ pub struct Session {
     pub muted: bool,
     pub limit_at: Option<i64>,
     pub can_drive: bool,
-    // ── 백엔드만 쓰는 값 ──
-    #[serde(skip)]
+    #[serde(flatten)]
+    pub place: PidPlace,
+    /// claude 프로세스 id — 보드 밖 터미널에서 세션이 끝나기를 기다릴 때(`wait_exit`) 프론트가 쓴다
     pub pid: u32,
-    /// pid 재사용을 가려내는 생성 시각(Windows hook 이 기록)
-    #[serde(skip)]
+    /// pid 재사용을 가려내는 생성 시각(Windows hook 이 기록) — 프론트가 생사를 물을 때(`pids_alive`·`wait_exit`) pid 와 함께 보낸다
     pub pid_ctime: Option<f64>,
+    // ── 백엔드만 쓰는 값 ──
     #[serde(skip)]
     pub file: PathBuf,
     /// claude 를 띄운 폴더(hook 의 `project_dir`, 없으면 cwd) — cd·워크트리에도 그대로라 카드는 이것으로 묶는다
     #[serde(skip)]
     pub project_dir: String,
-    /// `claude` 뒤에 붙일 이어 열기 인자(hook 이 기록한 `resume_args`, 없으면 `--resume <id>`)
-    #[serde(skip)]
+    /// `claude` 뒤에 붙일 이어 열기 인자(hook 이 기록한 `resume_args`, 없으면 `--resume <id>`) — 탭을 되살릴 때 원래 플래그를 살리려고 보드에도 보낸다
     pub resume_args: Vec<String>,
     /// since·updated 의 유닉스 초 — 숨김·자동 접기 비교에 쓴다
     #[serde(skip)]
@@ -281,6 +298,11 @@ pub struct SettingsView {
     pub opacity: f64,
     pub auto_switch: bool,
     pub board_mini: bool,
+    pub terminal_expanded: bool,
+    pub board_side: String,
+    pub board_pane_width: f64,
+    /// 답변 꾸미기를 끄고 띄운 세션 id
+    pub md_render_off: Vec<String>,
     pub notify_position: String,
 }
 
@@ -305,6 +327,10 @@ pub struct Snapshot {
     pub settings: SettingsView,
     pub claude_version: Option<String>,
     pub terminals: Vec<TerminalApp>,
+    /// 지금 claude 가 도는 보드 터미널 `TermId`들.
+    pub runs_claude: Vec<String>,
+    /// 셸이 프롬프트에 있는 보드 터미널 `TermId`들.
+    pub at_prompt: Vec<String>,
 }
 
 #[cfg(test)]

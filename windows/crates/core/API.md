@@ -51,13 +51,23 @@ UI 스레드에서 부르지 말고 백그라운드에서 부른다(`Pause` 동�
   `Command::new(exe).args(resume_args)` + `CREATE_NEW_CONSOLE` + `current_dir(cwd)` 로 직접 띄운다 — cmd.exe·PowerShell·wt.exe 명령줄을 거치지 않는다.
   모델 이름 같은 값은 저장소의 `.claude/settings.json` 에서 올 수 있어(예: `x" & calc & "`) 셸 문자열로 실행하면 명령 주입이 된다.
 - `resume_cmd` 는 **표시용** 문자열(플랫폼 인용)이다 — 실행하지 않는다.
-- `resume_cmd(&Record)`(플랫폼 인용), `resume_cmd_with(&Record, quote::join_windows)`, `carry_args(&argv)`, `title_text(state, &Record)`, `prune(sessions, now, alive)`, `lock_path(sessions, sid)`.
+- `resume_cmd(&Record)`(플랫폼 인용), `resume_cmd_with(&Record, quote::join_windows)`, `carry_args(&argv)`(같은 플래그·`(이름, 값)` 쌍·`--x=v` 는 한 번만, `--add-dir x` 꼴은 거르지 않음), `title_text(state, &Record)`, `prune(sessions, now, alive)`, `lock_path(sessions, sid)`.
 - hook 은 세션 파일을 `.<sid>.lock` 배타 잠금 아래에서 읽고 고쳐 쓴다(Windows `LockFileEx`, 그 밖 `flock` — std `File::lock`).
 
 ## 알림 — `notify`
 
-`plain`, `first_sentence`, `last_assistant_text(path)`, `session_summary(sessions, current_id, current_state, alive)`, `prepare(kind, input, notifier, cwd) -> Option<Panel { app, args }>`, `panel_args(…)`.
+`plain`, `first_sentence`, `last_assistant_text(path)`, `session_summary(sessions, current_id, current_state, alive, live)`(`live` 는 다른 세션의 working·waiting 을 겹쳐 보는 클로저, 보통 `claude_live::live_override`), `prepare(kind, input, notifier, cwd) -> Option<Panel { app, args }>`, `panel_args(…)`.
 패널 인자 모양: `--notify --title … --subtitle … --body … --summary waiting=n,working=n,idle=n --sound done|wait --kind done|wait --duration 10 --position …`.
+
+## Claude Code 신호 겹쳐 보기 — `claude_live`
+
+hook 이 오지 않는 때(Esc 중단, 승인한 도구가 도는 동안)를 메운다. 규칙은 `live_state` 한 곳이다.
+
+- `interrupted_at_in(tail, mtime) -> Option<f64>` — 대화 기록 끝 256_000 바이트(`INTERRUPT_TAIL`)의 마지막 대화 줄이 `[Request interrupted by user…` 이면 그 `timestamp`(없으면 `mtime`). 순수 함수. `interrupted_at(path)` 는 파일을 읽는 포장(없으면 None).
+- `ClaudeSession { session_id, name, status, status_at }` — `~/.claude/sessions/<pid>.json`(Claude Code 가 씀, 읽기만)에서 읽는 값. `parse_claude_session(bytes)`, `claude_session_path(claude_dir, pid)`, `read_claude_session(claude_dir, pid)`(pid 0 이면 None).
+- `status_change(&cs, sid, since) -> Option<(status, at)>` — sid 가 비어 있지 않고 파일의 sessionId 와 같으며 `status_at > since` 일 때. `session_name(&cs)` — 비어 있지 않은 name.
+- `live_state(state, interrupted, status) -> Option<(&'static str, f64)>` — working·waiting 일 때만 클로저를 부른다. 중단 또는 status idle → `("idle", at)`, waiting 인데 busy → `("working", at)`. 중단이 먼저다.
+- `live_override(&Record, claude_dir)` — 세션 기록의 state·pid·session_id·since·transcript_path 로 `live_state` 를 돌리는 편의 함수(hook 알림 요약과 `tui` 가 쓴다).
 
 ## hook 등록 — `hooks`
 
@@ -68,7 +78,7 @@ UI 스레드에서 부르지 말고 백그라운드에서 부른다(`Pause` 동�
 
 - `fileio::write_atomic(dst, prefix, bytes)` — 같은 폴더 임시 파일 후 바꿔 넣기(Windows 공유 위반이면 50ms×5 다시). `fileio::read_record(path)`, `fileio::replace(tmp, dst)`.
 - `quote::{windows, posix, join, join_windows, join_posix}` — 명령줄 인용(이어 열기 명령을 만들 때 Windows 규칙).
-- `clock::now()`(유닉스 초), `clock::local(ts)` → `LocalTime { … }.hm()/.hms()/.stamp()`.
+- `clock::now()`(유닉스 초), `clock::local(ts)` → `LocalTime { … }.hm()/.hms()/.stamp()`, `clock::iso_date(&str) -> Option<f64>`(ISO8601 → 유닉스 초, 시간대 필수).
 - `text::{collapse_ws, take_chars, truthy, is_py_space}` — Python 문자열 규칙.
 
 ## 실행 파일 `claude-board-hook`

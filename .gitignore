@@ -9,6 +9,9 @@
 !/ClaudeBoard.swift
 !/Package.swift
 !/Package.resolved
+!/Sources/
+!/Tests/
+!/clt-testing.json
 !/ClaudeNotifier.swift
 !/ClaudeAutopilot.swift
 !/ClaudeStatus.swift
@@ -18,6 +21,7 @@
 !/state.py
 !/board-tui.py
 !/hooks.py
+!/hook-table/
 !/build-board.sh
 !/packaging/
 !/plugins/

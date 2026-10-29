@@ -7,6 +7,7 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 
+use crate::place::Host;
 use crate::state::ClaudeProcess;
 use crate::Record;
 
@@ -107,13 +108,15 @@ impl ProcessTable {
     }
 }
 
-/// Windows 의 Claude Code 프로세스 판별 — `claude.exe`, 또는 명령줄에 `claude` 가 든 `node.exe`·`bun.exe`.
-#[cfg_attr(not(windows), allow(dead_code))]
-fn is_claude_exe(name: &str, cmdline: impl FnOnce() -> Option<Vec<String>>) -> bool {
+const CLAUDE_PACKAGE: &str = "@anthropic-ai/claude-code";
+
+/// Windows 의 Claude Code 프로세스 판별 — `claude.exe`, 또는 명령줄에 Claude Code 패키지(`@anthropic-ai/claude-code`)가 든 `node.exe`·`bun.exe`.
+/// 폴더 이름에 `claude` 가 든 것만으로는 세지 않는다(예: `claude-board` 아래의 node 도구).
+pub fn is_claude_exe(name: &str, cmdline: impl FnOnce() -> Option<Vec<String>>) -> bool {
     let name = name.to_ascii_lowercase();
     match name.as_str() {
         "claude.exe" => true,
-        "node.exe" | "bun.exe" => cmdline().is_some_and(|a| a.iter().any(|s| s.to_lowercase().contains("claude"))),
+        "node.exe" | "bun.exe" => cmdline().is_some_and(|a| a.iter().any(|s| s.to_lowercase().replace('\\', "/").contains(CLAUDE_PACKAGE))),
         _ => false,
     }
 }
@@ -171,6 +174,17 @@ pub fn command_line(pid: u32) -> Option<Vec<String>> {
     sys::command_line(pid)
 }
 
+/// 그 프로세스가 쓰는 콘솔의 호스트 프로세스 — Windows 에 tty 가 없어 같은 터미널인지의 자료로 쓴다
+/// (W2 설계 (a) 방안). 같은 ConPTY 의 클라이언트들은 같은 콘솔 호스트(conhost/OpenConsole)를 본다.
+/// 콘솔이 없는 프로세스(분리로 뜬 `--bg`)는 `Host::Detached`, 읽지 못하면 `Host::Unknown` 이다.
+pub fn console_host(pid: u32) -> Host {
+    match sys::console_host(pid) {
+        Some(0) => Host::Detached,
+        Some(host_pid) => Host::Console(host_pid),
+        None => Host::Unknown,
+    }
+}
+
 /// 그 Claude 프로세스의 백그라운드 셸 수 — 자식 가운데 명령줄에 `shell-snapshots` 가 든 프로세스 (SPEC §5.1).
 pub fn shell_count(table: &ProcessTable, pid: u32) -> usize {
     table
@@ -205,6 +219,9 @@ mod sys {
 
     /// ProcessCommandLineInformation — windows-sys 에 상수가 없어 직접 둔다.
     const PROCESS_COMMAND_LINE_INFORMATION: i32 = 60;
+
+    /// ProcessConsoleHostProcess — windows-sys 에 상수가 없어 직접 둔다.
+    const PROCESS_CONSOLE_HOST_PROCESS: i32 = 49;
 
     pub(crate) struct Handle(pub HANDLE);
 
@@ -321,6 +338,25 @@ mod sys {
         None
     }
 
+    /// 콘솔 호스트 프로세스 pid(class 49). 못 읽으면 None(콘솔이 없다면 0 을 준다).
+    /// 하위 2 비트는 플래그라 가린다(System Informer 도 같이 본다).
+    pub fn console_host(pid: u32) -> Option<u32> {
+        let h = open(pid, PROCESS_QUERY_LIMITED_INFORMATION).ok()?;
+        let mut raw = 0usize;
+        let mut need = 0u32;
+        // SAFETY: 포인터 크기 버퍼(usize) 를 정확히 넘긴다
+        let status = unsafe {
+            NtQueryInformationProcess(
+                h.0,
+                PROCESS_CONSOLE_HOST_PROCESS,
+                (&mut raw as *mut usize).cast(),
+                size_of::<usize>() as u32,
+                &mut need,
+            )
+        };
+        (status >= 0).then_some((raw & !3) as u32)
+    }
+
     /// `CommandLineToArgvW` 로 나눈다(빈 문자열이면 그 함수가 자기 경로를 돌려주므로 먼저 거른다).
     pub(crate) fn split_command_line(units: &[u16]) -> Vec<String> {
         if units.is_empty() {
@@ -420,6 +456,10 @@ mod sys {
         None
     }
 
+    pub fn console_host(_pid: u32) -> Option<u32> {
+        None
+    }
+
     /// macOS: sysctl KERN_PROCARGS2 로 실행 인자를 공백 손실 없이 읽는다(`state.py:proc_args`).
     #[cfg(target_os = "macos")]
     pub fn command_line(pid: u32) -> Option<Vec<String>> {
@@ -480,6 +520,9 @@ mod sys {
     pub fn creation_time(_pid: u32) -> Option<f64> {
         None
     }
+    pub fn console_host(_pid: u32) -> Option<u32> {
+        None
+    }
     pub fn command_line(_pid: u32) -> Option<Vec<String>> {
         None
     }
@@ -528,6 +571,19 @@ mod tests {
         assert!(!is_claude_exe("node.exe", || Some(vec!["node".into(), "server.js".into()])));
         assert!(!is_claude_exe("bun.exe", || None));
         assert!(!is_claude_exe("claude", || None));
+        // 폴더 이름에만 claude 가 든 node 도구는 아니다
+        let board = || Some(vec!["node.exe".to_string(), r"C:\Users\me\work\claude-board\tools\build.js".to_string()]);
+        assert!(!is_claude_exe("node.exe", board));
+        assert!(!is_claude_exe("bun.exe", || Some(vec!["bun.exe".into(), "/home/me/claude/app.ts".into()])));
+        // 실제 npm 전역 설치 모양
+        let npm = || {
+            Some(vec![
+                r"C:\Program Files\nodejs\node.exe".to_string(),
+                r"C:\Users\me\AppData\Roaming\npm\node_modules\@anthropic-ai\claude-code\cli.js".to_string(),
+                "--dangerously-skip-permissions".to_string(),
+            ])
+        };
+        assert!(is_claude_exe("node.exe", npm));
     }
 
     #[test]
@@ -546,6 +602,13 @@ mod tests {
         assert!(record_alive(&rec(serde_json::json!({"pid": null}))));
         assert!(record_alive(&rec(serde_json::json!({"pid": 0}))));
         assert!(record_alive(&rec(serde_json::json!({"pid": std::process::id()}))));
+    }
+
+    #[test]
+    fn console_host_of_unknown_pids() {
+        // pid 0 · 존재하지 않는 pid — 어느 플랫폼에서나 모름으로 본다
+        assert_eq!(console_host(0), Host::Unknown);
+        assert_eq!(console_host(u32::MAX), Host::Unknown);
     }
 
     #[cfg(unix)]

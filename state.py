@@ -19,10 +19,19 @@ import time
 
 SESSIONS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sessions")
 ICONS = {"working": "🔵", "waiting": "🟠", "idle": "🟢", "ended": "⚫"}
+# 사람의 답을 기다리게 하는 Notification(notification_type) — 승인 창(서브에이전트·팀원 것 포함)과 MCP 의 입력 요청.
+# 다른 백그라운드 작업이 끝남(agent_completed)·입력 필요(agent_needs_input), 로그인 성공 같은 알림도 같은 hook 으로 오므로
+# (2.1.312 에 17가지) 이 밖의 알림은 이 세션의 상태가 아니다. notify.py 에 같은 목록이 있다
+WAIT_NOTIFICATIONS = {"permission_prompt", "worker_permission_prompt", "elicitation_dialog", "elicitation_url_dialog"}
 
 
 def find_claude():
-    """hook 프로세스의 조상 가운데 claude 프로세스의 pid 와 tty 를 찾는다."""
+    """hook 프로세스의 조상 가운데 claude 세션 프로세스의 pid 와 tty 를 찾는다.
+
+    Claude Code 의 백그라운드 작업은 데몬(claude daemon run) → pty 호스트(--bg-pty-host) → 세션 프로세스로 뜨고,
+    세션 프로세스는 이름을 "claude bg-spare" 로 바꿔 쓰거나 버전 경로(…/claude/versions/2.1.312)로 뜬다(2.1.312 실측).
+    이름이 claude 인 것만 찾으면 그 위의 pty 호스트나 데몬을 세션으로 잡는다.
+    """
     pid = os.getppid()
     for _ in range(6):
         try:
@@ -33,8 +42,16 @@ def find_claude():
         if len(out) < 3:
             return None, None
         ppid, tty, comm = out
-        if os.path.basename(comm.strip()) == "claude":
-            return pid, (None if tty.startswith("?") else tty)
+        comm = comm.strip()
+        words = os.path.basename(comm).split()
+        if "/claude/versions/" in comm or words[:1] == ["claude"]:
+            argv = proc_args(pid)
+            if "--bg-pty-host" in argv or argv[1:2] == ["daemon"] or words[1:] == ["bg-pty-host"]:
+                return None, None
+            # 백그라운드 작업의 tty 는 pty 호스트가 만든 것이라 사람이 보는 터미널이 아니다
+            if tty.startswith("?") or "--bg-pty-host" in proc_args(int(ppid)):
+                tty = None
+            return pid, tty
         pid = int(ppid)
     return None, None
 
@@ -192,8 +209,12 @@ def main():
     data = json.load(sys.stdin)
     sub_event = bool(data.get("agent_id"))
     # 응답을 마친 뒤 입력을 오래 기다릴 때 오는 Notification 은 승인 대기가 아니라 (입력) 대기다
-    if state == "waiting" and data.get("notification_type") == "idle_prompt":
+    kind = data.get("notification_type")
+    if state == "waiting" and kind == "idle_prompt":
         state = "idle"
+    # 승인과 상관없는 알림은 세션 기록을 건드리지 않는다(종류가 없는 예전 Claude Code 의 알림은 승인으로 본다)
+    elif state == "waiting" and kind and kind not in WAIT_NOTIFICATIONS:
+        return
     sid = data.get("session_id")
     if not sid:
         return

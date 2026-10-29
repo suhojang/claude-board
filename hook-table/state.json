@@ -1,0 +1,6729 @@
+{
+ "about": "hook-table/gen.py 가 만든 표. 손으로 고치지 않는다. macOS hook 의 main() 을 끝까지 돌려 얻은 결과이고 Windows 판 Rust 코어가 같은 표로 견준다(windows/crates/core/tests/hook_table.rs). 자세한 규칙은 hook-table/README.md",
+ "claude": {
+  "pid": 4242,
+  "tty": "hook-table-tty"
+ },
+ "excluded": [
+  "프로세스 찾기·headless 판정·터미널 제목 쓰기: 플랫폼마다 다르게 구현한다. 표는 가짜 claude 를 넣고 그 값이 기록에 실리는 길만 본다",
+  "resume_cmd 의 인용 방식: macOS 는 POSIX 셸(shlex.join), Windows 는 명령줄 규칙. 표에는 인용을 풀어 토큰 목록으로 적는다",
+  "Rust 에만 있는 resume_args·pid_ctime: Windows 판이 더한 필드라 견주기 전에 뺀다(resume_args 는 resume_cmd 토큰과 같아야 한다)",
+  "패널 인자의 순서·--sound 이름·--activate·--notify·실행 파일 경로: 패널 프로그램이 다르다. 표에는 이름별 값만 적는다",
+  "패널의 --session 이 빈 값: macOS 는 빈 문자열로 늘 넘기고 Windows 는 빼지만, 패널은 둘 다 '세션 없음'으로 본다. 표에는 null",
+  "경로 구분자가 든 session_id: Windows 판만 받지 않는다(sessions 밖에 쓰지 않게). 표에 넣지 않는다",
+  "세션 파일의 키 순서: 표는 키를 정렬해 적는다(키 순서는 windows/crates/core/tests/state_sequence.rs 가 본다)",
+  "hook 입력 앞의 UTF-8 BOM·notify 의 깨진 입력: Windows 는 hook 실행 파일(crates/hook main.rs)이 코어를 부르기 전에 다룬다. 표는 코어만 본다"
+ ],
+ "fallback_cwd": "/hook-table/cwd",
+ "markers": {
+  "4242": "가짜 claude 프로세스 pid(가짜 생사 판정에서 늘 산 것)",
+  "@<k>": "k 번째 단계(0부터)에서 hook 이 쓴 시각",
+  "@DEAD_PID": "띄웠다가 거둔 자식의 pid(죽은 것)",
+  "@DIR": "표를 돌리는 쪽의 임시 폴더(경로 앞부분)",
+  "@LIVE_PID": "표를 돌리는 프로세스 자신의 pid(산 것)",
+  "@PARENT_PID": "그 부모의 pid(산 것)",
+  "@seed": "심어 둔 시각 = 시나리오 시작 시각 - 1000초. '@seed-<n>' 은 시작 시각 - n초, '@ms:seed-<n>' 은 그 밀리초",
+  "age": "심은 파일의 수정 시각 = 시작 시각 - age초"
+ },
+ "scenarios": [
+  {
+   "name": "보통 흐름: 시작 → 요청 → 도구 → 응답 끝 → 세션 끝",
+   "steps": [
+    {
+     "arg": "idle",
+     "claude": [
+      "claude",
+      "--model",
+      "opus"
+     ],
+     "env": {
+      "CLAUDE_PROJECT_DIR": "/w/repo"
+     },
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [
+         "--model",
+         "opus"
+        ],
+        "cwd": "/w/repo",
+        "headless": false,
+        "model": "claude-opus-5-5",
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--model",
+         "claude-opus-5-5",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@0",
+        "started": "@0",
+        "state": "idle",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@0"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "SessionStart",
+      "model": "claude-opus-5-5",
+      "session_id": "sess-1",
+      "source": "startup",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "working",
+     "claude": [
+      "claude",
+      "--model",
+      "opus"
+     ],
+     "env": {
+      "CLAUDE_PROJECT_DIR": "/w/repo"
+     },
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [
+         "--model",
+         "opus"
+        ],
+        "cwd": "/w/repo",
+        "headless": false,
+        "model": "claude-opus-5-5",
+        "permission_mode": "default",
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--permission-mode",
+         "default",
+         "--model",
+         "claude-opus-5-5",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@1",
+        "started": "@0",
+        "state": "working",
+        "topic": "로그인 화면을 고쳐 주세요",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@1"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "UserPromptSubmit",
+      "permission_mode": "default",
+      "prompt": "로그인 화면을 고쳐 주세요",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "working",
+     "claude": [
+      "claude",
+      "--model",
+      "opus"
+     ],
+     "env": {
+      "CLAUDE_PROJECT_DIR": "/w/repo"
+     },
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [
+         "--model",
+         "opus"
+        ],
+        "cwd": "/w/repo",
+        "headless": false,
+        "model": "claude-opus-5-5",
+        "permission_mode": "default",
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--permission-mode",
+         "default",
+         "--model",
+         "claude-opus-5-5",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@1",
+        "started": "@0",
+        "state": "working",
+        "topic": "로그인 화면을 고쳐 주세요",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@2"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "PreToolUse",
+      "permission_mode": "default",
+      "session_id": "sess-1",
+      "tool_input": {
+       "command": "ls"
+      },
+      "tool_name": "Bash",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "working",
+     "claude": [
+      "claude",
+      "--model",
+      "opus"
+     ],
+     "env": {
+      "CLAUDE_PROJECT_DIR": "/w/repo"
+     },
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [
+         "--model",
+         "opus"
+        ],
+        "cwd": "/w/repo",
+        "headless": false,
+        "model": "claude-opus-5-5",
+        "permission_mode": "default",
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--permission-mode",
+         "default",
+         "--model",
+         "claude-opus-5-5",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@1",
+        "started": "@0",
+        "state": "working",
+        "topic": "로그인 화면을 고쳐 주세요",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@3"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "PostToolUse",
+      "permission_mode": "default",
+      "session_id": "sess-1",
+      "tool_name": "Bash",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "idle",
+     "claude": [
+      "claude",
+      "--model",
+      "opus"
+     ],
+     "env": {
+      "CLAUDE_PROJECT_DIR": "/w/repo"
+     },
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [
+         "--model",
+         "opus"
+        ],
+        "cwd": "/w/repo",
+        "headless": false,
+        "last_message": "로그인 화면을 고쳤습니다. 시험도 통과합니다.",
+        "model": "claude-opus-5-5",
+        "permission_mode": "default",
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--permission-mode",
+         "default",
+         "--model",
+         "claude-opus-5-5",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@4",
+        "started": "@0",
+        "state": "idle",
+        "topic": "로그인 화면을 고쳐 주세요",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@4"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "Stop",
+      "last_assistant_message": "로그인 화면을 고쳤습니다.\n\n시험도   통과합니다.",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "ended",
+     "claude": [
+      "claude",
+      "--model",
+      "opus"
+     ],
+     "env": {
+      "CLAUDE_PROJECT_DIR": "/w/repo"
+     },
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [
+         "--model",
+         "opus"
+        ],
+        "cwd": "/w/repo",
+        "headless": false,
+        "last_message": "로그인 화면을 고쳤습니다. 시험도 통과합니다.",
+        "model": "claude-opus-5-5",
+        "permission_mode": "default",
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--permission-mode",
+         "default",
+         "--model",
+         "claude-opus-5-5",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@5",
+        "started": "@0",
+        "state": "ended",
+        "topic": "로그인 화면을 고쳐 주세요",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@5"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "SessionEnd",
+      "reason": "exit",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    }
+   ]
+  },
+  {
+   "name": "승인 대기: PermissionRequest·승인 알림 뒤 PostToolUse 로 작업 중",
+   "steps": [
+    {
+     "arg": "working",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@0",
+        "started": "@0",
+        "state": "working",
+        "topic": "배포 스크립트 돌려 줘",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@0"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "UserPromptSubmit",
+      "prompt": "배포 스크립트 돌려 줘",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "working",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@0",
+        "started": "@0",
+        "state": "working",
+        "topic": "배포 스크립트 돌려 줘",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@1"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "PreToolUse",
+      "session_id": "sess-1",
+      "tool_name": "Bash",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "waiting",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@2",
+        "started": "@0",
+        "state": "waiting",
+        "topic": "배포 스크립트 돌려 줘",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@2"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "PermissionRequest",
+      "session_id": "sess-1",
+      "tool_name": "Bash",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "waiting",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "last_message": "Claude needs your permission to use Bash",
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@2",
+        "started": "@0",
+        "state": "waiting",
+        "topic": "배포 스크립트 돌려 줘",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@3"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "Notification",
+      "message": "Claude needs your permission to use Bash",
+      "notification_type": "permission_prompt",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "working",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "last_message": "Claude needs your permission to use Bash",
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@4",
+        "started": "@0",
+        "state": "working",
+        "topic": "배포 스크립트 돌려 줘",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@4"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "PostToolUse",
+      "session_id": "sess-1",
+      "tool_name": "Bash",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "idle",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "last_message": "돌렸습니다.",
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@5",
+        "started": "@0",
+        "state": "idle",
+        "topic": "배포 스크립트 돌려 줘",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@5"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "Stop",
+      "last_assistant_message": "돌렸습니다.",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    }
+   ]
+  },
+  {
+   "name": "승인과 상관없는 Notification 은 기록을 그대로 둔다(223401d)",
+   "steps": [
+    {
+     "arg": "working",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@0",
+        "started": "@0",
+        "state": "working",
+        "topic": "긴 작업",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@0"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "UserPromptSubmit",
+      "prompt": "긴 작업",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "waiting",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@0",
+        "started": "@0",
+        "state": "working",
+        "topic": "긴 작업",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@0"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "Notification",
+      "message": "Background task finished",
+      "notification_type": "agent_completed",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "waiting",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@0",
+        "started": "@0",
+        "state": "working",
+        "topic": "긴 작업",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@0"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "Notification",
+      "message": "Agent needs input",
+      "notification_type": "agent_needs_input",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "waiting",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@0",
+        "started": "@0",
+        "state": "working",
+        "topic": "긴 작업",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@0"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "Notification",
+      "message": "Login successful",
+      "notification_type": "auth_success",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "waiting",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@0",
+        "started": "@0",
+        "state": "working",
+        "topic": "긴 작업",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@0"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "Notification",
+      "message": "push",
+      "notification_type": "push_notification",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    }
+   ]
+  },
+  {
+   "name": "기록이 없을 때 온 승인과 상관없는 Notification 은 파일을 만들지 않는다",
+   "steps": [
+    {
+     "arg": "waiting",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {}
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "Notification",
+      "message": "Background task finished",
+      "notification_type": "agent_completed",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    }
+   ]
+  },
+  {
+   "name": "승인 계열 알림 네 가지는 모두 승인 대기",
+   "steps": [
+    {
+     "arg": "working",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@0",
+        "started": "@0",
+        "state": "working",
+        "topic": "여러 승인",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@0"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "UserPromptSubmit",
+      "prompt": "여러 승인",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "waiting",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "last_message": "팀원 승인",
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@1",
+        "started": "@0",
+        "state": "waiting",
+        "topic": "여러 승인",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@1"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "Notification",
+      "message": "팀원 승인",
+      "notification_type": "worker_permission_prompt",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "working",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "last_message": "팀원 승인",
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@2",
+        "started": "@0",
+        "state": "working",
+        "topic": "여러 승인",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@2"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "PostToolUse",
+      "session_id": "sess-1",
+      "tool_name": "Bash",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "waiting",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "last_message": "MCP 입력",
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@3",
+        "started": "@0",
+        "state": "waiting",
+        "topic": "여러 승인",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@3"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "Notification",
+      "message": "MCP 입력",
+      "notification_type": "elicitation_dialog",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "working",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "last_message": "MCP 입력",
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@4",
+        "started": "@0",
+        "state": "working",
+        "topic": "여러 승인",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@4"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "PostToolUse",
+      "session_id": "sess-1",
+      "tool_name": "Bash",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "waiting",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "last_message": "MCP 주소",
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@5",
+        "started": "@0",
+        "state": "waiting",
+        "topic": "여러 승인",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@5"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "Notification",
+      "message": "MCP 주소",
+      "notification_type": "elicitation_url_dialog",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "working",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "last_message": "MCP 주소",
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@6",
+        "started": "@0",
+        "state": "working",
+        "topic": "여러 승인",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@6"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "PostToolUse",
+      "session_id": "sess-1",
+      "tool_name": "Bash",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "waiting",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "last_message": "Claude needs your permission to use Bash",
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@7",
+        "started": "@0",
+        "state": "waiting",
+        "topic": "여러 승인",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@7"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "Notification",
+      "message": "Claude needs your permission to use Bash",
+      "notification_type": "permission_prompt",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    }
+   ]
+  },
+  {
+   "name": "idle_prompt 알림은 입력 대기(idle) — 응답 끝 뒤에는 since 그대로, Esc 뒤에는 idle 로",
+   "steps": [
+    {
+     "arg": "working",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@0",
+        "started": "@0",
+        "state": "working",
+        "topic": "질문",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@0"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "UserPromptSubmit",
+      "prompt": "질문",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "idle",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "last_message": "답했습니다.",
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@1",
+        "started": "@0",
+        "state": "idle",
+        "topic": "질문",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@1"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "Stop",
+      "last_assistant_message": "답했습니다.",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "waiting",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "last_message": "답했습니다.",
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@1",
+        "started": "@0",
+        "state": "idle",
+        "topic": "질문",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@2"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "Notification",
+      "message": "Claude is waiting for your input",
+      "notification_type": "idle_prompt",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "working",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "last_message": "답했습니다.",
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@3",
+        "started": "@0",
+        "state": "working",
+        "topic": "다음 질문",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@3"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "UserPromptSubmit",
+      "prompt": "다음 질문",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "waiting",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "last_message": "답했습니다.",
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@4",
+        "started": "@0",
+        "state": "idle",
+        "topic": "다음 질문",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@4"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "Notification",
+      "message": "Claude is waiting for your input",
+      "notification_type": "idle_prompt",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     },
+     "note": "Esc 로 끊겨 working 으로 남은 세션"
+    }
+   ]
+  },
+  {
+   "name": "종류 없는 예전 Notification 은 승인 대기 — message 앞 200자(공백 정리 없음)",
+   "steps": [
+    {
+     "arg": "working",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@0",
+        "started": "@0",
+        "state": "working",
+        "topic": "옛 Claude Code",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@0"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "UserPromptSubmit",
+      "prompt": "옛 Claude Code",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "waiting",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "last_message": "  허락이   필요합니다  가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마",
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@1",
+        "started": "@0",
+        "state": "waiting",
+        "topic": "옛 Claude Code",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@1"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "Notification",
+      "message": "  허락이   필요합니다  가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 ",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    }
+   ]
+  },
+  {
+   "name": "서브에이전트 한 살이: 시작·도구·끝, 세션 상태는 그대로, 메타 파일의 설명·백그라운드",
+   "seed": [
+    {
+     "json": {
+      "description": "코드 찾기",
+      "requestShape": "background"
+     },
+     "path": "t/main/subagents/agent-a1.meta.json"
+    }
+   ],
+   "steps": [
+    {
+     "arg": "working",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "model": "claude-opus-5-5",
+        "permission_mode": "default",
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--permission-mode",
+         "default",
+         "--model",
+         "claude-opus-5-5",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@0",
+        "started": "@0",
+        "state": "working",
+        "topic": "코드 찾아 줘",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@0"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "UserPromptSubmit",
+      "model": "claude-opus-5-5",
+      "permission_mode": "default",
+      "prompt": "코드 찾아 줘",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "subagent",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "model": "claude-opus-5-5",
+        "permission_mode": "default",
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--permission-mode",
+         "default",
+         "--model",
+         "claude-opus-5-5",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@0",
+        "started": "@0",
+        "state": "working",
+        "subagents": {
+         "a1": {
+          "background": true,
+          "description": "코드 찾기",
+          "started": "@1",
+          "started_seen": true,
+          "state": "running",
+          "type": "Explore",
+          "updated": "@1"
+         }
+        },
+        "topic": "코드 찾아 줘",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@1"
+       }
+      }
+     },
+     "input": {
+      "agent_id": "a1",
+      "agent_type": "Explore",
+      "cwd": "/w/repo",
+      "hook_event_name": "SubagentStart",
+      "model": "sub-model",
+      "permission_mode": "plan",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "working",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "model": "claude-opus-5-5",
+        "permission_mode": "default",
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--permission-mode",
+         "default",
+         "--model",
+         "claude-opus-5-5",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@0",
+        "started": "@0",
+        "state": "working",
+        "subagents": {
+         "a1": {
+          "background": true,
+          "description": "코드 찾기",
+          "started": "@1",
+          "started_seen": true,
+          "state": "running",
+          "tool": "Grep",
+          "type": "Explore",
+          "updated": "@2"
+         }
+        },
+        "topic": "코드 찾아 줘",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@2"
+       }
+      }
+     },
+     "input": {
+      "agent_id": "a1",
+      "agent_type": "Explore",
+      "cwd": "/w/repo",
+      "hook_event_name": "PreToolUse",
+      "session_id": "sess-1",
+      "tool_name": "Grep",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "working",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "model": "claude-opus-5-5",
+        "permission_mode": "default",
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--permission-mode",
+         "default",
+         "--model",
+         "claude-opus-5-5",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@0",
+        "started": "@0",
+        "state": "working",
+        "subagents": {
+         "a1": {
+          "background": true,
+          "description": "코드 찾기",
+          "started": "@1",
+          "started_seen": true,
+          "state": "running",
+          "tool": "Grep",
+          "type": "Explore",
+          "updated": "@3"
+         }
+        },
+        "topic": "코드 찾아 줘",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@3"
+       }
+      }
+     },
+     "input": {
+      "agent_id": "a1",
+      "agent_type": "Explore",
+      "cwd": "/w/repo",
+      "hook_event_name": "PostToolUse",
+      "session_id": "sess-1",
+      "tool_name": "Grep",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "subagent",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "model": "claude-opus-5-5",
+        "permission_mode": "default",
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--permission-mode",
+         "default",
+         "--model",
+         "claude-opus-5-5",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@0",
+        "started": "@0",
+        "state": "working",
+        "subagents": {
+         "a1": {
+          "background": true,
+          "description": "코드 찾기",
+          "started": "@1",
+          "started_seen": true,
+          "state": "running",
+          "tool": "Grep",
+          "type": "Explore",
+          "updated": "@3"
+         },
+         "a2": {
+          "started": "@4",
+          "started_seen": true,
+          "state": "running",
+          "type": "Plan",
+          "updated": "@4"
+         }
+        },
+        "topic": "코드 찾아 줘",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@4"
+       }
+      }
+     },
+     "input": {
+      "agent_id": "a2",
+      "agent_type": "Plan",
+      "cwd": "/w/repo",
+      "hook_event_name": "SubagentStart",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "subagent",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "model": "claude-opus-5-5",
+        "permission_mode": "default",
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--permission-mode",
+         "default",
+         "--model",
+         "claude-opus-5-5",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@0",
+        "started": "@0",
+        "state": "working",
+        "subagents": {
+         "a1": {
+          "background": true,
+          "description": "코드 찾기",
+          "ended": "@5",
+          "last_message": "찾았습니다. 세 곳입니다.",
+          "started": "@1",
+          "started_seen": true,
+          "state": "done",
+          "tool": "Grep",
+          "type": "Explore",
+          "updated": "@5"
+         },
+         "a2": {
+          "started": "@4",
+          "started_seen": true,
+          "state": "running",
+          "type": "Plan",
+          "updated": "@4"
+         }
+        },
+        "topic": "코드 찾아 줘",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@5"
+       }
+      }
+     },
+     "input": {
+      "agent_id": "a1",
+      "agent_type": "Explore",
+      "cwd": "/w/repo",
+      "hook_event_name": "SubagentStop",
+      "last_assistant_message": "  찾았습니다.\n  세 곳입니다.  ",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "idle",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "last_message": "찾았습니다.",
+        "model": "claude-opus-5-5",
+        "permission_mode": "default",
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--permission-mode",
+         "default",
+         "--model",
+         "claude-opus-5-5",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@6",
+        "started": "@0",
+        "state": "idle",
+        "subagents": {
+         "a1": {
+          "background": true,
+          "description": "코드 찾기",
+          "ended": "@5",
+          "last_message": "찾았습니다. 세 곳입니다.",
+          "started": "@1",
+          "started_seen": true,
+          "state": "done",
+          "tool": "Grep",
+          "type": "Explore",
+          "updated": "@5"
+         },
+         "a2": {
+          "started": "@4",
+          "started_seen": true,
+          "state": "running",
+          "type": "Plan",
+          "updated": "@4"
+         }
+        },
+        "topic": "코드 찾아 줘",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@6"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "Stop",
+      "last_assistant_message": "찾았습니다.",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    }
+   ]
+  },
+  {
+   "name": "started_seen: 시작 hook 없이 생긴 기록은 거짓, 뒤늦은 시작 hook 부터 참",
+   "steps": [
+    {
+     "arg": "working",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@0",
+        "started": "@0",
+        "state": "working",
+        "topic": "여럿 띄우기",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@0"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "UserPromptSubmit",
+      "prompt": "여럿 띄우기",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "subagent",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@0",
+        "started": "@0",
+        "state": "working",
+        "subagents": {
+         "orphan_stop": {
+          "ended": "@1",
+          "started": "@1",
+          "started_seen": false,
+          "state": "done",
+          "type": "Explore",
+          "updated": "@1"
+         }
+        },
+        "topic": "여럿 띄우기",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@1"
+       }
+      }
+     },
+     "input": {
+      "agent_id": "orphan_stop",
+      "agent_type": "Explore",
+      "cwd": "/w/repo",
+      "hook_event_name": "SubagentStop",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "working",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@0",
+        "started": "@0",
+        "state": "working",
+        "subagents": {
+         "orphan_stop": {
+          "ended": "@1",
+          "started": "@1",
+          "started_seen": false,
+          "state": "done",
+          "type": "Explore",
+          "updated": "@1"
+         },
+         "orphan_tool": {
+          "started": "@2",
+          "started_seen": false,
+          "state": "running",
+          "tool": "Read",
+          "type": "Explore",
+          "updated": "@2"
+         }
+        },
+        "topic": "여럿 띄우기",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@2"
+       }
+      }
+     },
+     "input": {
+      "agent_id": "orphan_tool",
+      "agent_type": "Explore",
+      "cwd": "/w/repo",
+      "hook_event_name": "PreToolUse",
+      "session_id": "sess-1",
+      "tool_name": "Read",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "waiting",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@3",
+        "started": "@0",
+        "state": "waiting",
+        "state_before_sub_wait": "working",
+        "subagents": {
+         "orphan_perm": {
+          "started": "@3",
+          "started_seen": false,
+          "state": "waiting",
+          "tool": "Bash",
+          "type": "Explore",
+          "updated": "@3"
+         },
+         "orphan_stop": {
+          "ended": "@1",
+          "started": "@1",
+          "started_seen": false,
+          "state": "done",
+          "type": "Explore",
+          "updated": "@1"
+         },
+         "orphan_tool": {
+          "started": "@2",
+          "started_seen": false,
+          "state": "running",
+          "tool": "Read",
+          "type": "Explore",
+          "updated": "@2"
+         }
+        },
+        "topic": "여럿 띄우기",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@3"
+       }
+      }
+     },
+     "input": {
+      "agent_id": "orphan_perm",
+      "agent_type": "Explore",
+      "cwd": "/w/repo",
+      "hook_event_name": "PermissionRequest",
+      "session_id": "sess-1",
+      "tool_name": "Bash",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "working",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@4",
+        "started": "@0",
+        "state": "working",
+        "subagents": {
+         "orphan_perm": {
+          "started": "@3",
+          "started_seen": false,
+          "state": "running",
+          "tool": "Bash",
+          "type": "Explore",
+          "updated": "@4"
+         },
+         "orphan_stop": {
+          "ended": "@1",
+          "started": "@1",
+          "started_seen": false,
+          "state": "done",
+          "type": "Explore",
+          "updated": "@1"
+         },
+         "orphan_tool": {
+          "started": "@2",
+          "started_seen": false,
+          "state": "running",
+          "tool": "Read",
+          "type": "Explore",
+          "updated": "@2"
+         }
+        },
+        "topic": "여럿 띄우기",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@4"
+       }
+      }
+     },
+     "input": {
+      "agent_id": "orphan_perm",
+      "agent_type": "Explore",
+      "cwd": "/w/repo",
+      "hook_event_name": "PostToolUse",
+      "session_id": "sess-1",
+      "tool_name": "Bash",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "subagent",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@4",
+        "started": "@0",
+        "state": "working",
+        "subagents": {
+         "orphan_perm": {
+          "started": "@3",
+          "started_seen": false,
+          "state": "running",
+          "tool": "Bash",
+          "type": "Explore",
+          "updated": "@4"
+         },
+         "orphan_stop": {
+          "ended": "@1",
+          "started": "@1",
+          "started_seen": false,
+          "state": "done",
+          "type": "Explore",
+          "updated": "@1"
+         },
+         "orphan_tool": {
+          "started": "@5",
+          "started_seen": true,
+          "state": "running",
+          "tool": "Read",
+          "type": "Explore",
+          "updated": "@5"
+         }
+        },
+        "topic": "여럿 띄우기",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@5"
+       }
+      }
+     },
+     "input": {
+      "agent_id": "orphan_tool",
+      "agent_type": "Explore",
+      "cwd": "/w/repo",
+      "hook_event_name": "SubagentStart",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "subagent",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@4",
+        "started": "@0",
+        "state": "working",
+        "subagents": {
+         "orphan_perm": {
+          "started": "@3",
+          "started_seen": false,
+          "state": "running",
+          "tool": "Bash",
+          "type": "Explore",
+          "updated": "@4"
+         },
+         "orphan_stop": {
+          "ended": "@1",
+          "started": "@1",
+          "started_seen": false,
+          "state": "done",
+          "type": "Explore",
+          "updated": "@1"
+         },
+         "orphan_tool": {
+          "started": "@5",
+          "started_seen": true,
+          "state": "running",
+          "tool": "Read",
+          "type": "Explore",
+          "updated": "@6"
+         }
+        },
+        "topic": "여럿 띄우기",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@6"
+       }
+      }
+     },
+     "input": {
+      "agent_id": "orphan_tool",
+      "agent_type": "Explore",
+      "cwd": "/w/repo",
+      "hook_event_name": "SubagentStart",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     },
+     "note": "두 번째 시작 hook 은 시작 시각을 바꾸지 않는다"
+    }
+   ]
+  },
+  {
+   "name": "서브에이전트 승인: 작업 중 → 승인 대기 → 승인 알림 → 승인 끝나면 작업 중",
+   "steps": [
+    {
+     "arg": "working",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@0",
+        "started": "@0",
+        "state": "working",
+        "topic": "서브에이전트에게 맡기기",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@0"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "UserPromptSubmit",
+      "prompt": "서브에이전트에게 맡기기",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "subagent",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@0",
+        "started": "@0",
+        "state": "working",
+        "subagents": {
+         "a1": {
+          "started": "@1",
+          "started_seen": true,
+          "state": "running",
+          "type": "Explore",
+          "updated": "@1"
+         }
+        },
+        "topic": "서브에이전트에게 맡기기",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@1"
+       }
+      }
+     },
+     "input": {
+      "agent_id": "a1",
+      "agent_type": "Explore",
+      "cwd": "/w/repo",
+      "hook_event_name": "SubagentStart",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "waiting",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@2",
+        "started": "@0",
+        "state": "waiting",
+        "state_before_sub_wait": "working",
+        "subagents": {
+         "a1": {
+          "started": "@1",
+          "started_seen": true,
+          "state": "waiting",
+          "tool": "Bash",
+          "type": "Explore",
+          "updated": "@2"
+         }
+        },
+        "topic": "서브에이전트에게 맡기기",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@2"
+       }
+      }
+     },
+     "input": {
+      "agent_id": "a1",
+      "agent_type": "Explore",
+      "cwd": "/w/repo",
+      "hook_event_name": "PermissionRequest",
+      "session_id": "sess-1",
+      "tool_name": "Bash",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "waiting",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "last_message": "Claude needs your permission to use Bash",
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@2",
+        "started": "@0",
+        "state": "waiting",
+        "state_before_sub_wait": "working",
+        "subagents": {
+         "a1": {
+          "started": "@1",
+          "started_seen": true,
+          "state": "waiting",
+          "tool": "Bash",
+          "type": "Explore",
+          "updated": "@2"
+         }
+        },
+        "topic": "서브에이전트에게 맡기기",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@3"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "Notification",
+      "message": "Claude needs your permission to use Bash",
+      "notification_type": "permission_prompt",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "working",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "last_message": "Claude needs your permission to use Bash",
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@4",
+        "started": "@0",
+        "state": "working",
+        "subagents": {
+         "a1": {
+          "started": "@1",
+          "started_seen": true,
+          "state": "running",
+          "tool": "Bash",
+          "type": "Explore",
+          "updated": "@4"
+         }
+        },
+        "topic": "서브에이전트에게 맡기기",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@4"
+       }
+      }
+     },
+     "input": {
+      "agent_id": "a1",
+      "agent_type": "Explore",
+      "cwd": "/w/repo",
+      "hook_event_name": "PostToolUse",
+      "session_id": "sess-1",
+      "tool_name": "Bash",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "working",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "last_message": "Claude needs your permission to use Bash",
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@4",
+        "started": "@0",
+        "state": "working",
+        "subagents": {
+         "a1": {
+          "started": "@1",
+          "started_seen": true,
+          "state": "running",
+          "tool": "Bash",
+          "type": "Explore",
+          "updated": "@4"
+         }
+        },
+        "topic": "서브에이전트에게 맡기기",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@5"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "PreToolUse",
+      "session_id": "sess-1",
+      "tool_name": "Read",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    }
+   ]
+  },
+  {
+   "name": "쉬는 세션의 승인 알림은 서브에이전트 것 — 서브에이전트가 움직이면 대기로",
+   "steps": [
+    {
+     "arg": "idle",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@0",
+        "started": "@0",
+        "state": "idle",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@0"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "SessionStart",
+      "session_id": "sess-1",
+      "source": "startup",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "waiting",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "last_message": "Claude needs your permission to use Bash",
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@1",
+        "started": "@0",
+        "state": "waiting",
+        "state_before_sub_wait": "idle",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@1"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "Notification",
+      "message": "Claude needs your permission to use Bash",
+      "notification_type": "permission_prompt",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "working",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "last_message": "Claude needs your permission to use Bash",
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@2",
+        "started": "@0",
+        "state": "idle",
+        "subagents": {
+         "bg": {
+          "started": "@2",
+          "started_seen": false,
+          "state": "running",
+          "tool": "Bash",
+          "type": "Explore",
+          "updated": "@2"
+         }
+        },
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@2"
+       }
+      }
+     },
+     "input": {
+      "agent_id": "bg",
+      "agent_type": "Explore",
+      "cwd": "/w/repo",
+      "hook_event_name": "PostToolUse",
+      "session_id": "sess-1",
+      "tool_name": "Bash",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "waiting",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "last_message": "Claude needs your permission to use Bash",
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@3",
+        "started": "@0",
+        "state": "waiting",
+        "state_before_sub_wait": "idle",
+        "subagents": {
+         "bg": {
+          "started": "@2",
+          "started_seen": false,
+          "state": "waiting",
+          "tool": "Bash",
+          "type": "Explore",
+          "updated": "@3"
+         }
+        },
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@3"
+       }
+      }
+     },
+     "input": {
+      "agent_id": "bg",
+      "agent_type": "Explore",
+      "cwd": "/w/repo",
+      "hook_event_name": "PermissionRequest",
+      "session_id": "sess-1",
+      "tool_name": "Bash",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "subagent",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "last_message": "끝",
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@4",
+        "started": "@0",
+        "state": "idle",
+        "subagents": {
+         "bg": {
+          "ended": "@4",
+          "last_message": "끝",
+          "started": "@2",
+          "started_seen": false,
+          "state": "done",
+          "tool": "Bash",
+          "type": "Explore",
+          "updated": "@4"
+         }
+        },
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@4"
+       }
+      }
+     },
+     "input": {
+      "agent_id": "bg",
+      "agent_type": "Explore",
+      "cwd": "/w/repo",
+      "hook_event_name": "SubagentStop",
+      "last_assistant_message": "끝",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    }
+   ]
+  },
+  {
+   "name": "메인의 승인은 서브에이전트가 움직여도 풀리지 않는다",
+   "steps": [
+    {
+     "arg": "working",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@0",
+        "started": "@0",
+        "state": "working",
+        "topic": "메인 승인",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@0"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "UserPromptSubmit",
+      "prompt": "메인 승인",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "waiting",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@1",
+        "started": "@0",
+        "state": "waiting",
+        "topic": "메인 승인",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@1"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "PermissionRequest",
+      "session_id": "sess-1",
+      "tool_name": "Bash",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "waiting",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "last_message": "Claude needs your permission to use Bash",
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@1",
+        "started": "@0",
+        "state": "waiting",
+        "topic": "메인 승인",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@2"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "Notification",
+      "message": "Claude needs your permission to use Bash",
+      "notification_type": "permission_prompt",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "working",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "last_message": "Claude needs your permission to use Bash",
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@1",
+        "started": "@0",
+        "state": "waiting",
+        "subagents": {
+         "a1": {
+          "started": "@3",
+          "started_seen": false,
+          "state": "running",
+          "tool": "Read",
+          "type": "Explore",
+          "updated": "@3"
+         }
+        },
+        "topic": "메인 승인",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@3"
+       }
+      }
+     },
+     "input": {
+      "agent_id": "a1",
+      "agent_type": "Explore",
+      "cwd": "/w/repo",
+      "hook_event_name": "PostToolUse",
+      "session_id": "sess-1",
+      "tool_name": "Read",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "working",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "last_message": "Claude needs your permission to use Bash",
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@4",
+        "started": "@0",
+        "state": "working",
+        "subagents": {
+         "a1": {
+          "started": "@3",
+          "started_seen": false,
+          "state": "running",
+          "tool": "Read",
+          "type": "Explore",
+          "updated": "@3"
+         }
+        },
+        "topic": "메인 승인",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@4"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "PostToolUse",
+      "session_id": "sess-1",
+      "tool_name": "Bash",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    }
+   ]
+  },
+  {
+   "name": "세션이 끝나면 도는 서브에이전트를 모두 닫는다",
+   "steps": [
+    {
+     "arg": "working",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@0",
+        "started": "@0",
+        "state": "working",
+        "topic": "둘 띄우기",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@0"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "UserPromptSubmit",
+      "prompt": "둘 띄우기",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "subagent",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@0",
+        "started": "@0",
+        "state": "working",
+        "subagents": {
+         "a1": {
+          "started": "@1",
+          "started_seen": true,
+          "state": "running",
+          "type": "Explore",
+          "updated": "@1"
+         }
+        },
+        "topic": "둘 띄우기",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@1"
+       }
+      }
+     },
+     "input": {
+      "agent_id": "a1",
+      "agent_type": "Explore",
+      "cwd": "/w/repo",
+      "hook_event_name": "SubagentStart",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "subagent",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@0",
+        "started": "@0",
+        "state": "working",
+        "subagents": {
+         "a1": {
+          "started": "@1",
+          "started_seen": true,
+          "state": "running",
+          "type": "Explore",
+          "updated": "@1"
+         },
+         "a2": {
+          "started": "@2",
+          "started_seen": true,
+          "state": "running",
+          "type": "Explore",
+          "updated": "@2"
+         }
+        },
+        "topic": "둘 띄우기",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@2"
+       }
+      }
+     },
+     "input": {
+      "agent_id": "a2",
+      "agent_type": "Explore",
+      "cwd": "/w/repo",
+      "hook_event_name": "SubagentStart",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "subagent",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@0",
+        "started": "@0",
+        "state": "working",
+        "subagents": {
+         "a1": {
+          "started": "@1",
+          "started_seen": true,
+          "state": "running",
+          "type": "Explore",
+          "updated": "@1"
+         },
+         "a2": {
+          "ended": "@3",
+          "started": "@2",
+          "started_seen": true,
+          "state": "done",
+          "type": "Explore",
+          "updated": "@3"
+         }
+        },
+        "topic": "둘 띄우기",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@3"
+       }
+      }
+     },
+     "input": {
+      "agent_id": "a2",
+      "agent_type": "Explore",
+      "cwd": "/w/repo",
+      "hook_event_name": "SubagentStop",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "ended",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@4",
+        "started": "@0",
+        "state": "ended",
+        "subagents": {
+         "a1": {
+          "ended": "@4",
+          "started": "@1",
+          "started_seen": true,
+          "state": "done",
+          "type": "Explore",
+          "updated": "@1"
+         },
+         "a2": {
+          "ended": "@3",
+          "started": "@2",
+          "started_seen": true,
+          "state": "done",
+          "type": "Explore",
+          "updated": "@3"
+         }
+        },
+        "topic": "둘 띄우기",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@4"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "SessionEnd",
+      "reason": "exit",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    }
+   ]
+  },
+  {
+   "name": "끝난 서브에이전트가 다시 깨어나면 ended 를 지우고 running",
+   "steps": [
+    {
+     "arg": "working",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@0",
+        "started": "@0",
+        "state": "working",
+        "topic": "백그라운드",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@0"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "UserPromptSubmit",
+      "prompt": "백그라운드",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "subagent",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@0",
+        "started": "@0",
+        "state": "working",
+        "subagents": {
+         "a1": {
+          "started": "@1",
+          "started_seen": true,
+          "state": "running",
+          "type": "Explore",
+          "updated": "@1"
+         }
+        },
+        "topic": "백그라운드",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@1"
+       }
+      }
+     },
+     "input": {
+      "agent_id": "a1",
+      "agent_type": "Explore",
+      "cwd": "/w/repo",
+      "hook_event_name": "SubagentStart",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "subagent",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@0",
+        "started": "@0",
+        "state": "working",
+        "subagents": {
+         "a1": {
+          "ended": "@2",
+          "last_message": "일단 끝",
+          "started": "@1",
+          "started_seen": true,
+          "state": "done",
+          "type": "Explore",
+          "updated": "@2"
+         }
+        },
+        "topic": "백그라운드",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@2"
+       }
+      }
+     },
+     "input": {
+      "agent_id": "a1",
+      "agent_type": "Explore",
+      "cwd": "/w/repo",
+      "hook_event_name": "SubagentStop",
+      "last_assistant_message": "일단 끝",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "working",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@0",
+        "started": "@0",
+        "state": "working",
+        "subagents": {
+         "a1": {
+          "last_message": "일단 끝",
+          "started": "@1",
+          "started_seen": true,
+          "state": "running",
+          "tool": "Bash",
+          "type": "Explore",
+          "updated": "@3"
+         }
+        },
+        "topic": "백그라운드",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@3"
+       }
+      }
+     },
+     "input": {
+      "agent_id": "a1",
+      "agent_type": "Explore",
+      "cwd": "/w/repo",
+      "hook_event_name": "PreToolUse",
+      "session_id": "sess-1",
+      "tool_name": "Bash",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "waiting",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@4",
+        "started": "@0",
+        "state": "waiting",
+        "state_before_sub_wait": "working",
+        "subagents": {
+         "a1": {
+          "last_message": "일단 끝",
+          "started": "@1",
+          "started_seen": true,
+          "state": "waiting",
+          "tool": "Bash",
+          "type": "Explore",
+          "updated": "@4"
+         }
+        },
+        "topic": "백그라운드",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@4"
+       }
+      }
+     },
+     "input": {
+      "agent_id": "a1",
+      "agent_type": "Explore",
+      "cwd": "/w/repo",
+      "hook_event_name": "PermissionRequest",
+      "session_id": "sess-1",
+      "tool_name": "Bash",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    }
+   ]
+  },
+  {
+   "name": "끝난 지 1시간 넘은 서브에이전트는 지운다",
+   "seed": [
+    {
+     "json": {
+      "args": [],
+      "cwd": "/w/repo",
+      "headless": false,
+      "pid": 4242,
+      "project": "repo",
+      "project_dir": "/w/repo",
+      "session_id": "sess-1",
+      "since": "@seed",
+      "started": "@seed",
+      "state": "working",
+      "subagents": {
+       "old": {
+        "ended": "@seed-7200",
+        "started": "@seed-9000",
+        "started_seen": true,
+        "state": "done",
+        "type": "Explore",
+        "updated": "@seed-7200"
+       },
+       "recent": {
+        "ended": "@seed-1800",
+        "started": "@seed-3000",
+        "started_seen": true,
+        "state": "done",
+        "type": "Explore",
+        "updated": "@seed-1800"
+       },
+       "running": {
+        "started": "@seed-9000",
+        "started_seen": true,
+        "state": "running",
+        "type": "Plan",
+        "updated": "@seed-9000"
+       }
+      },
+      "transcript_path": "@DIR/t/main.jsonl",
+      "tty": "hook-table-tty",
+      "updated": "@seed"
+     },
+     "path": "notifier/sessions/sess-1.json"
+    }
+   ],
+   "steps": [
+    {
+     "arg": "subagent",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@seed",
+        "started": "@seed",
+        "state": "working",
+        "subagents": {
+         "new": {
+          "started": "@0",
+          "started_seen": true,
+          "state": "running",
+          "type": "Explore",
+          "updated": "@0"
+         },
+         "recent": {
+          "ended": "@seed-1800",
+          "started": "@seed-3000",
+          "started_seen": true,
+          "state": "done",
+          "type": "Explore",
+          "updated": "@seed-1800"
+         },
+         "running": {
+          "started": "@seed-9000",
+          "started_seen": true,
+          "state": "running",
+          "type": "Plan",
+          "updated": "@seed-9000"
+         }
+        },
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@0"
+       }
+      }
+     },
+     "input": {
+      "agent_id": "new",
+      "agent_type": "Explore",
+      "cwd": "/w/repo",
+      "hook_event_name": "SubagentStart",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    }
+   ]
+  },
+  {
+   "name": "서브에이전트 이벤트가 먼저 온 세션은 작업 중으로 시작",
+   "steps": [
+    {
+     "arg": "subagent",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@0",
+        "started": "@0",
+        "state": "working",
+        "subagents": {
+         "a1": {
+          "started": "@0",
+          "started_seen": true,
+          "state": "running",
+          "type": "Explore",
+          "updated": "@0"
+         }
+        },
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@0"
+       }
+      }
+     },
+     "input": {
+      "agent_id": "a1",
+      "agent_type": "Explore",
+      "cwd": "/w/repo",
+      "hook_event_name": "SubagentStart",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "working",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@0",
+        "started": "@0",
+        "state": "working",
+        "subagents": {
+         "a1": {
+          "started": "@0",
+          "started_seen": true,
+          "state": "running",
+          "tool": "Read",
+          "type": "Explore",
+          "updated": "@1"
+         }
+        },
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@1"
+       }
+      }
+     },
+     "input": {
+      "agent_id": "a1",
+      "agent_type": "Explore",
+      "cwd": "/w/repo",
+      "hook_event_name": "PreToolUse",
+      "session_id": "sess-1",
+      "tool_name": "Read",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    }
+   ]
+  },
+  {
+   "name": "Esc 로 끊긴 뒤 새 요청은 working → working 이어도 since 를 새로 잡는다",
+   "seed": [
+    {
+     "json": {
+      "args": [],
+      "cwd": "/w/repo",
+      "headless": false,
+      "pid": 4242,
+      "project": "repo",
+      "project_dir": "/w/repo",
+      "session_id": "sess-1",
+      "since": "@seed-300",
+      "started": "@seed",
+      "state": "working",
+      "topic": "끊긴 요청",
+      "transcript_path": "@DIR/t/main.jsonl",
+      "tty": "hook-table-tty",
+      "updated": "@seed"
+     },
+     "path": "notifier/sessions/sess-1.json"
+    }
+   ],
+   "steps": [
+    {
+     "arg": "working",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@0",
+        "started": "@seed",
+        "state": "working",
+        "topic": "새 요청",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@0"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "UserPromptSubmit",
+      "prompt": "새 요청",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "working",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@0",
+        "started": "@seed",
+        "state": "working",
+        "topic": "새 요청",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@1"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "PreToolUse",
+      "session_id": "sess-1",
+      "tool_name": "Read",
+      "transcript_path": "@DIR/t/main.jsonl"
+     },
+     "note": "도구 hook 은 since 그대로"
+    },
+    {
+     "arg": "working",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@2",
+        "started": "@seed",
+        "state": "working",
+        "topic": "새 요청",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@2"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "UserPromptSubmit",
+      "prompt": "새 요청",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     },
+     "note": "같은 문구 — topic 은 그대로, since 는 새로"
+    }
+   ]
+  },
+  {
+   "name": "project_dir: cd·워크트리에도 띄운 폴더 그대로, 환경 변수가 비면 기록 값",
+   "steps": [
+    {
+     "arg": "idle",
+     "claude": [
+      "claude"
+     ],
+     "env": {
+      "CLAUDE_PROJECT_DIR": "/w/repo"
+     },
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@0",
+        "started": "@0",
+        "state": "idle",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@0"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "SessionStart",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "working",
+     "claude": [
+      "claude"
+     ],
+     "env": {
+      "CLAUDE_PROJECT_DIR": "/w/repo"
+     },
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo/sub",
+        "headless": false,
+        "pid": 4242,
+        "project": "sub",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@1",
+        "started": "@0",
+        "state": "working",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@1"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo/sub",
+      "hook_event_name": "PreToolUse",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "working",
+     "claude": [
+      "claude"
+     ],
+     "env": {
+      "CLAUDE_PROJECT_DIR": "/w/repo"
+     },
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo/.claude/worktrees/t1",
+        "headless": false,
+        "pid": 4242,
+        "project": "t1",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@1",
+        "started": "@0",
+        "state": "working",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@2"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo/.claude/worktrees/t1",
+      "hook_event_name": "PreToolUse",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "working",
+     "claude": [
+      "claude"
+     ],
+     "env": {
+      "CLAUDE_PROJECT_DIR": ""
+     },
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo/.claude/worktrees/t1",
+        "headless": false,
+        "pid": 4242,
+        "project": "t1",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@1",
+        "started": "@0",
+        "state": "working",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@3"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo/.claude/worktrees/t1",
+      "hook_event_name": "PreToolUse",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "working",
+     "claude": [
+      "claude"
+     ],
+     "env": {
+      "CLAUDE_PROJECT_DIR": null
+     },
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/elsewhere",
+        "headless": false,
+        "pid": 4242,
+        "project": "elsewhere",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@1",
+        "started": "@0",
+        "state": "working",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@4"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/elsewhere",
+      "hook_event_name": "PreToolUse",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "working",
+     "claude": [
+      "claude"
+     ],
+     "env": {
+      "CLAUDE_PROJECT_DIR": "/w/other"
+     },
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/elsewhere",
+        "headless": false,
+        "pid": 4242,
+        "project": "elsewhere",
+        "project_dir": "/w/other",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@1",
+        "started": "@0",
+        "state": "working",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@5"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/elsewhere",
+      "hook_event_name": "PreToolUse",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    }
+   ]
+  },
+  {
+   "name": "project_dir 이 없는 예전 기록은 그 hook 의 cwd 부터, cwd 가 없으면 기록·현재 폴더",
+   "seed": [
+    {
+     "json": {
+      "args": [],
+      "cwd": "/w/old",
+      "headless": false,
+      "pid": 4242,
+      "project": "old",
+      "session_id": "sess-1",
+      "since": "@seed",
+      "started": "@seed",
+      "state": "working",
+      "transcript_path": "@DIR/t/main.jsonl",
+      "tty": "hook-table-tty",
+      "updated": "@seed"
+     },
+     "path": "notifier/sessions/sess-1.json"
+    }
+   ],
+   "steps": [
+    {
+     "arg": "working",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo/sub",
+        "headless": false,
+        "pid": 4242,
+        "project": "sub",
+        "project_dir": "/w/repo/sub",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@seed",
+        "started": "@seed",
+        "state": "working",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@0"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo/sub",
+      "hook_event_name": "PreToolUse",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "working",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo/sub",
+        "headless": false,
+        "pid": 4242,
+        "project": "sub",
+        "project_dir": "/w/repo/sub",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@seed",
+        "started": "@seed",
+        "state": "working",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@1"
+       }
+      }
+     },
+     "input": {
+      "hook_event_name": "PostToolUse",
+      "session_id": "sess-1"
+     }
+    }
+   ]
+  },
+  {
+   "name": "새 세션에 cwd 가 없으면 현재 폴더",
+   "steps": [
+    {
+     "arg": "working",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/hook-table/cwd",
+        "headless": false,
+        "pid": 4242,
+        "project": "cwd",
+        "project_dir": "/hook-table/cwd",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@0",
+        "started": "@0",
+        "state": "working",
+        "topic": "cwd 없음",
+        "tty": "hook-table-tty",
+        "updated": "@0"
+       }
+      }
+     },
+     "input": {
+      "hook_event_name": "UserPromptSubmit",
+      "prompt": "cwd 없음",
+      "session_id": "sess-1"
+     }
+    }
+   ]
+  },
+  {
+   "name": "이어 열기: bypass 로 여러 번 이어 열어도 같은 플래그가 쌓이지 않는다",
+   "steps": [
+    {
+     "arg": "idle",
+     "claude": [
+      "claude",
+      "--dangerously-skip-permissions",
+      "--model",
+      "opus"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [
+         "--dangerously-skip-permissions",
+         "--model",
+         "opus"
+        ],
+        "cwd": "/w/repo",
+        "headless": false,
+        "model": "claude-opus-5-5",
+        "permission_mode": "bypassPermissions",
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--dangerously-skip-permissions",
+         "--permission-mode",
+         "bypassPermissions",
+         "--model",
+         "claude-opus-5-5",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@0",
+        "started": "@0",
+        "state": "idle",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@0"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "SessionStart",
+      "model": "claude-opus-5-5",
+      "permission_mode": "bypassPermissions",
+      "session_id": "sess-1",
+      "source": "startup",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "ended",
+     "claude": [
+      "claude",
+      "--dangerously-skip-permissions",
+      "--model",
+      "opus"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [
+         "--dangerously-skip-permissions",
+         "--model",
+         "opus"
+        ],
+        "cwd": "/w/repo",
+        "headless": false,
+        "model": "claude-opus-5-5",
+        "permission_mode": "bypassPermissions",
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--dangerously-skip-permissions",
+         "--permission-mode",
+         "bypassPermissions",
+         "--model",
+         "claude-opus-5-5",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@1",
+        "started": "@0",
+        "state": "ended",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@1"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "SessionEnd",
+      "reason": "exit",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "idle",
+     "claude": [
+      "claude",
+      "--dangerously-skip-permissions",
+      "--permission-mode",
+      "bypassPermissions",
+      "--model",
+      "claude-opus-5-5",
+      "--resume",
+      "sess-1",
+      "--allow-dangerously-skip-permissions"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [
+         "--dangerously-skip-permissions",
+         "--permission-mode",
+         "bypassPermissions",
+         "--model",
+         "claude-opus-5-5",
+         "--allow-dangerously-skip-permissions"
+        ],
+        "cwd": "/w/repo",
+        "headless": false,
+        "model": "claude-opus-5-5",
+        "permission_mode": "bypassPermissions",
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--dangerously-skip-permissions",
+         "--allow-dangerously-skip-permissions",
+         "--permission-mode",
+         "bypassPermissions",
+         "--model",
+         "claude-opus-5-5",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@2",
+        "started": "@2",
+        "state": "idle",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@2"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "SessionStart",
+      "permission_mode": "bypassPermissions",
+      "session_id": "sess-1",
+      "source": "resume",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "ended",
+     "claude": [
+      "claude",
+      "--dangerously-skip-permissions",
+      "--model",
+      "opus"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [
+         "--dangerously-skip-permissions",
+         "--permission-mode",
+         "bypassPermissions",
+         "--model",
+         "claude-opus-5-5",
+         "--allow-dangerously-skip-permissions"
+        ],
+        "cwd": "/w/repo",
+        "headless": false,
+        "model": "claude-opus-5-5",
+        "permission_mode": "bypassPermissions",
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--dangerously-skip-permissions",
+         "--allow-dangerously-skip-permissions",
+         "--permission-mode",
+         "bypassPermissions",
+         "--model",
+         "claude-opus-5-5",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@3",
+        "started": "@2",
+        "state": "ended",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@3"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "SessionEnd",
+      "reason": "exit",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "idle",
+     "claude": [
+      "claude",
+      "--dangerously-skip-permissions",
+      "--allow-dangerously-skip-permissions",
+      "--permission-mode",
+      "bypassPermissions",
+      "--model",
+      "claude-opus-5-5",
+      "--resume",
+      "sess-1",
+      "--allow-dangerously-skip-permissions"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [
+         "--dangerously-skip-permissions",
+         "--allow-dangerously-skip-permissions",
+         "--permission-mode",
+         "bypassPermissions",
+         "--model",
+         "claude-opus-5-5"
+        ],
+        "cwd": "/w/repo",
+        "headless": false,
+        "model": "claude-opus-5-5",
+        "permission_mode": "bypassPermissions",
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--dangerously-skip-permissions",
+         "--allow-dangerously-skip-permissions",
+         "--permission-mode",
+         "bypassPermissions",
+         "--model",
+         "claude-opus-5-5",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@4",
+        "started": "@4",
+        "state": "idle",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@4"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "SessionStart",
+      "permission_mode": "bypassPermissions",
+      "session_id": "sess-1",
+      "source": "resume",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "ended",
+     "claude": [
+      "claude",
+      "--dangerously-skip-permissions",
+      "--model",
+      "opus"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [
+         "--dangerously-skip-permissions",
+         "--allow-dangerously-skip-permissions",
+         "--permission-mode",
+         "bypassPermissions",
+         "--model",
+         "claude-opus-5-5"
+        ],
+        "cwd": "/w/repo",
+        "headless": false,
+        "model": "claude-opus-5-5",
+        "permission_mode": "bypassPermissions",
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--dangerously-skip-permissions",
+         "--allow-dangerously-skip-permissions",
+         "--permission-mode",
+         "bypassPermissions",
+         "--model",
+         "claude-opus-5-5",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@5",
+        "started": "@4",
+        "state": "ended",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@5"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "SessionEnd",
+      "reason": "exit",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "idle",
+     "claude": [
+      "claude",
+      "--dangerously-skip-permissions",
+      "--allow-dangerously-skip-permissions",
+      "--permission-mode",
+      "bypassPermissions",
+      "--model",
+      "claude-opus-5-5",
+      "--resume",
+      "sess-1",
+      "--allow-dangerously-skip-permissions"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [
+         "--dangerously-skip-permissions",
+         "--allow-dangerously-skip-permissions",
+         "--permission-mode",
+         "bypassPermissions",
+         "--model",
+         "claude-opus-5-5"
+        ],
+        "cwd": "/w/repo",
+        "headless": false,
+        "model": "claude-opus-5-5",
+        "permission_mode": "bypassPermissions",
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--dangerously-skip-permissions",
+         "--allow-dangerously-skip-permissions",
+         "--permission-mode",
+         "bypassPermissions",
+         "--model",
+         "claude-opus-5-5",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@6",
+        "started": "@6",
+        "state": "idle",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@6"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "SessionStart",
+      "permission_mode": "bypassPermissions",
+      "session_id": "sess-1",
+      "source": "resume",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    }
+   ]
+  },
+  {
+   "name": "넘길 실행 인자 고르기(carry_args)와 기록의 권한 모드·모델로 바꿔 끼우기",
+   "steps": [
+    {
+     "arg": "idle",
+     "claude": [
+      "/opt/claude/bin/claude",
+      "--model",
+      "opus",
+      "--model=sonnet",
+      "--permission-mode=plan",
+      "--add-dir",
+      "a b",
+      "c",
+      "--add-dir",
+      "a b",
+      "--mcp-config",
+      "m.json",
+      "n.json",
+      "--settings",
+      "{\"x\": 1}",
+      "--plugin-dir",
+      "/p q",
+      "--agent",
+      "rev",
+      "--chrome",
+      "--chrome",
+      "--ide",
+      "--verbose",
+      "-c",
+      "--print",
+      "--resume",
+      "old",
+      "--add-dir=x",
+      "--add-dir=x",
+      "--model",
+      "opus",
+      "--agent"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [
+         "--model",
+         "opus",
+         "--model=sonnet",
+         "--permission-mode=plan",
+         "--add-dir",
+         "a b",
+         "c",
+         "--add-dir",
+         "a b",
+         "--mcp-config",
+         "m.json",
+         "n.json",
+         "--settings",
+         "{\"x\": 1}",
+         "--plugin-dir",
+         "/p q",
+         "--agent",
+         "rev",
+         "--chrome",
+         "--ide",
+         "--verbose",
+         "--add-dir=x"
+        ],
+        "cwd": "/w/repo",
+        "headless": false,
+        "model": "claude-sonnet-5",
+        "permission_mode": "acceptEdits",
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--model=sonnet",
+         "--add-dir",
+         "a b",
+         "c",
+         "--add-dir",
+         "a b",
+         "--mcp-config",
+         "m.json",
+         "n.json",
+         "--settings",
+         "{\"x\": 1}",
+         "--plugin-dir",
+         "/p q",
+         "--agent",
+         "rev",
+         "--chrome",
+         "--ide",
+         "--verbose",
+         "--add-dir=x",
+         "--permission-mode",
+         "acceptEdits",
+         "--model",
+         "claude-sonnet-5",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@0",
+        "started": "@0",
+        "state": "idle",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@0"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "SessionStart",
+      "model": "claude-sonnet-5",
+      "permission_mode": "acceptEdits",
+      "session_id": "sess-1",
+      "source": "startup",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    }
+   ]
+  },
+  {
+   "name": "권한 모드·모델: 메인 hook 만 바꾸고 빈 값·문자열 아닌 값은 버린다",
+   "steps": [
+    {
+     "arg": "idle",
+     "claude": [
+      "claude",
+      "--permission-mode",
+      "default",
+      "--model=old"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [
+         "--permission-mode",
+         "default",
+         "--model=old"
+        ],
+        "cwd": "/w/repo",
+        "headless": false,
+        "model": "m1",
+        "permission_mode": "default",
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--permission-mode",
+         "default",
+         "--model",
+         "m1",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@0",
+        "started": "@0",
+        "state": "idle",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@0"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "SessionStart",
+      "model": "m1",
+      "permission_mode": "default",
+      "session_id": "sess-1",
+      "source": "startup",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "working",
+     "claude": [
+      "claude",
+      "--permission-mode",
+      "default",
+      "--model=old"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [
+         "--permission-mode",
+         "default",
+         "--model=old"
+        ],
+        "cwd": "/w/repo",
+        "headless": false,
+        "model": "m1",
+        "permission_mode": "plan",
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--permission-mode",
+         "plan",
+         "--model",
+         "m1",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@1",
+        "started": "@0",
+        "state": "working",
+        "topic": "계획부터",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@1"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "UserPromptSubmit",
+      "permission_mode": "plan",
+      "prompt": "계획부터",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "working",
+     "claude": [
+      "claude",
+      "--permission-mode",
+      "default",
+      "--model=old"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [
+         "--permission-mode",
+         "default",
+         "--model=old"
+        ],
+        "cwd": "/w/repo",
+        "headless": false,
+        "model": "m1",
+        "permission_mode": "plan",
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--permission-mode",
+         "plan",
+         "--model",
+         "m1",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@1",
+        "started": "@0",
+        "state": "working",
+        "subagents": {
+         "a1": {
+          "started": "@2",
+          "started_seen": false,
+          "state": "running",
+          "tool": "Read",
+          "type": "Explore",
+          "updated": "@2"
+         }
+        },
+        "topic": "계획부터",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@2"
+       }
+      }
+     },
+     "input": {
+      "agent_id": "a1",
+      "agent_type": "Explore",
+      "cwd": "/w/repo",
+      "hook_event_name": "PreToolUse",
+      "model": "sub-model",
+      "permission_mode": "acceptEdits",
+      "session_id": "sess-1",
+      "tool_name": "Read",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "working",
+     "claude": [
+      "claude",
+      "--permission-mode",
+      "default",
+      "--model=old"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [
+         "--permission-mode",
+         "default",
+         "--model=old"
+        ],
+        "cwd": "/w/repo",
+        "headless": false,
+        "model": "m1",
+        "permission_mode": "plan",
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--permission-mode",
+         "plan",
+         "--model",
+         "m1",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@1",
+        "started": "@0",
+        "state": "working",
+        "subagents": {
+         "a1": {
+          "started": "@2",
+          "started_seen": false,
+          "state": "running",
+          "tool": "Read",
+          "type": "Explore",
+          "updated": "@2"
+         }
+        },
+        "topic": "계획부터",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@3"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "PreToolUse",
+      "model": "",
+      "permission_mode": 5,
+      "session_id": "sess-1",
+      "tool_name": "Read",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "idle",
+     "claude": [
+      "claude",
+      "--permission-mode",
+      "default",
+      "--model=old"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [
+         "--permission-mode",
+         "default",
+         "--model=old"
+        ],
+        "cwd": "/w/repo",
+        "headless": false,
+        "model": "m2",
+        "permission_mode": "plan",
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--permission-mode",
+         "plan",
+         "--model",
+         "m2",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@4",
+        "started": "@0",
+        "state": "idle",
+        "subagents": {
+         "a1": {
+          "started": "@2",
+          "started_seen": false,
+          "state": "running",
+          "tool": "Read",
+          "type": "Explore",
+          "updated": "@2"
+         }
+        },
+        "topic": "계획부터",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@4"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "Stop",
+      "model": "m2",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    }
+   ]
+  },
+  {
+   "name": "사용 한도(limit_hit): 한도 문구만 남기고 메인 hook 이 다시 오면 지운다",
+   "steps": [
+    {
+     "arg": "working",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@0",
+        "started": "@0",
+        "state": "working",
+        "topic": "큰 작업",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@0"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "UserPromptSubmit",
+      "prompt": "큰 작업",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "idle",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "last_message": "You've hit your weekly limit · resets 4pm",
+        "limit_hit": {
+         "at": "@1",
+         "message": "You've hit your weekly limit · resets 4pm"
+        },
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@1",
+        "started": "@0",
+        "state": "idle",
+        "topic": "큰 작업",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@1"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "error": "rate_limit",
+      "hook_event_name": "StopFailure",
+      "last_assistant_message": "You've hit your weekly limit ·  resets 4pm",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "working",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "last_message": "You've hit your weekly limit · resets 4pm",
+        "limit_hit": {
+         "at": "@1",
+         "message": "You've hit your weekly limit · resets 4pm"
+        },
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@1",
+        "started": "@0",
+        "state": "idle",
+        "subagents": {
+         "a1": {
+          "started": "@2",
+          "started_seen": false,
+          "state": "running",
+          "tool": "Read",
+          "type": "Explore",
+          "updated": "@2"
+         }
+        },
+        "topic": "큰 작업",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@2"
+       }
+      }
+     },
+     "input": {
+      "agent_id": "a1",
+      "agent_type": "Explore",
+      "cwd": "/w/repo",
+      "hook_event_name": "PreToolUse",
+      "session_id": "sess-1",
+      "tool_name": "Read",
+      "transcript_path": "@DIR/t/main.jsonl"
+     },
+     "note": "서브에이전트 hook 은 지우지 않는다"
+    },
+    {
+     "arg": "idle",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "last_message": "API Error: Repeated 529 Overloaded",
+        "limit_hit": {
+         "at": "@1",
+         "message": "You've hit your weekly limit · resets 4pm"
+        },
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@1",
+        "started": "@0",
+        "state": "idle",
+        "subagents": {
+         "a1": {
+          "started": "@2",
+          "started_seen": false,
+          "state": "running",
+          "tool": "Read",
+          "type": "Explore",
+          "updated": "@2"
+         }
+        },
+        "topic": "큰 작업",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@3"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "error": "rate_limit",
+      "hook_event_name": "StopFailure",
+      "last_assistant_message": "API Error: Repeated 529 Overloaded",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     },
+     "note": "한도 문구가 아닌 rate_limit 은 새로 쓰지도 지우지도 않는다"
+    },
+    {
+     "arg": "idle",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "last_message": "usage limit",
+        "limit_hit": {
+         "at": "@1",
+         "message": "You've hit your weekly limit · resets 4pm"
+        },
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@1",
+        "started": "@0",
+        "state": "idle",
+        "subagents": {
+         "a1": {
+          "started": "@2",
+          "started_seen": false,
+          "state": "running",
+          "tool": "Read",
+          "type": "Explore",
+          "updated": "@2"
+         }
+        },
+        "topic": "큰 작업",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@4"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "error": "server_error",
+      "hook_event_name": "StopFailure",
+      "last_assistant_message": "usage limit",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     },
+     "note": "rate_limit 이 아닌 StopFailure 는 지우지 않는다"
+    },
+    {
+     "arg": "working",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "last_message": "usage limit",
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@5",
+        "started": "@0",
+        "state": "working",
+        "subagents": {
+         "a1": {
+          "started": "@2",
+          "started_seen": false,
+          "state": "running",
+          "tool": "Read",
+          "type": "Explore",
+          "updated": "@2"
+         }
+        },
+        "topic": "다시",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@5"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "UserPromptSubmit",
+      "prompt": "다시",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "idle",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "last_message": "Claude AI USAGE LIMIT reached 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마",
+        "limit_hit": {
+         "at": "@6",
+         "message": "Claude AI USAGE LIMIT reached 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마"
+        },
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@6",
+        "started": "@0",
+        "state": "idle",
+        "subagents": {
+         "a1": {
+          "started": "@2",
+          "started_seen": false,
+          "state": "running",
+          "tool": "Read",
+          "type": "Explore",
+          "updated": "@2"
+         }
+        },
+        "topic": "다시",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@6"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "error": "rate_limit",
+      "hook_event_name": "StopFailure",
+      "last_assistant_message": "Claude AI USAGE LIMIT reached 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 ",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "idle",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "last_message": "Claude AI USAGE LIMIT reached 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마",
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@6",
+        "started": "@7",
+        "state": "idle",
+        "subagents": {
+         "a1": {
+          "started": "@2",
+          "started_seen": false,
+          "state": "running",
+          "tool": "Read",
+          "type": "Explore",
+          "updated": "@2"
+         }
+        },
+        "topic": "다시",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@7"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "SessionStart",
+      "session_id": "sess-1",
+      "source": "resume",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    }
+   ]
+  },
+  {
+   "name": "topic: 공백 정리 뒤 앞 40자, < 로 시작하거나 빈 요청은 무시",
+   "steps": [
+    {
+     "arg": "working",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@0",
+        "started": "@0",
+        "state": "working",
+        "topic": "여러 칸의 공백과 줄바꿈을 한 칸으로 줄이고 앞 마흔 글자만 주제로 남깁",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@0"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "UserPromptSubmit",
+      "prompt": "  여러   칸의\n공백과 줄바꿈을\t한 칸으로 줄이고 앞 마흔 글자만 주제로 남깁니다 뒤는 버립니다  ",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "working",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@1",
+        "started": "@0",
+        "state": "working",
+        "topic": "여러 칸의 공백과 줄바꿈을 한 칸으로 줄이고 앞 마흔 글자만 주제로 남깁",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@1"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "UserPromptSubmit",
+      "prompt": "<command-name>/clear</command-name>",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "working",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@2",
+        "started": "@0",
+        "state": "working",
+        "topic": "여러 칸의 공백과 줄바꿈을 한 칸으로 줄이고 앞 마흔 글자만 주제로 남깁",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@2"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "UserPromptSubmit",
+      "prompt": "",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "working",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@3",
+        "started": "@0",
+        "state": "working",
+        "topic": "😀 이모지와 한글 섞인 요청",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@3"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "UserPromptSubmit",
+      "prompt": "😀 이모지와　한글\u001c섞인 요청",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    }
+   ]
+  },
+  {
+   "name": "last_message: idle 은 응답 공백 정리 200자, waiting 은 message 앞 200자, 없으면 그대로",
+   "steps": [
+    {
+     "arg": "idle",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "last_message": "첫 줄 둘째 줄 셋째 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아",
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@0",
+        "started": "@0",
+        "state": "idle",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@0"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "Stop",
+      "last_assistant_message": "첫 줄\n\n둘째　줄\u001c셋째   가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 ",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "working",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "last_message": "첫 줄 둘째 줄 셋째 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아",
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@1",
+        "started": "@0",
+        "state": "working",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@1"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "PreToolUse",
+      "message": "도구 hook 의 message 는 쓰지 않는다",
+      "session_id": "sess-1",
+      "tool_name": "Bash",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "waiting",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "last_message": "  승인   가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파",
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@2",
+        "started": "@0",
+        "state": "waiting",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@2"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "PermissionRequest",
+      "message": "  승인   가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 ",
+      "session_id": "sess-1",
+      "tool_name": "Bash",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "idle",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "last_message": "  승인   가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 가나다라마바사아자차카타파",
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@3",
+        "started": "@0",
+        "state": "idle",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@3"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "Stop",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    }
+   ]
+  },
+  {
+   "name": "Claude 프로세스를 못 찾은 세션: pid 없음 → 다시 찾지 않다가 SessionStart 에서 찾는다",
+   "steps": [
+    {
+     "arg": "working",
+     "claude": null,
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "cwd": "/w/repo",
+        "headless": true,
+        "pid": null,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@0",
+        "started": "@0",
+        "state": "working",
+        "topic": "headless",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": null,
+        "updated": "@0"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "UserPromptSubmit",
+      "prompt": "headless",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "working",
+     "claude": [
+      "claude",
+      "--chrome"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "cwd": "/w/repo",
+        "headless": true,
+        "pid": null,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@0",
+        "started": "@0",
+        "state": "working",
+        "topic": "headless",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": null,
+        "updated": "@1"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "PreToolUse",
+      "session_id": "sess-1",
+      "tool_name": "Read",
+      "transcript_path": "@DIR/t/main.jsonl"
+     },
+     "note": "기록의 pid 가 null 이면 산 것으로 보고 다시 찾지 않는다"
+    },
+    {
+     "arg": "idle",
+     "claude": [
+      "claude",
+      "--chrome"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [
+         "--chrome"
+        ],
+        "cwd": "/w/repo",
+        "headless": false,
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--chrome",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@2",
+        "started": "@2",
+        "state": "idle",
+        "topic": "headless",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@2"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "SessionStart",
+      "session_id": "sess-1",
+      "source": "resume",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    }
+   ]
+  },
+  {
+   "name": "죽은 pid 의 기록은 프로세스를 다시 잡는다",
+   "seed": [
+    {
+     "json": {
+      "args": [
+       "--old"
+      ],
+      "cwd": "/w/repo",
+      "headless": false,
+      "pid": "@DEAD_PID",
+      "project": "repo",
+      "project_dir": "/w/repo",
+      "session_id": "sess-1",
+      "since": "@seed",
+      "started": "@seed",
+      "state": "working",
+      "transcript_path": "@DIR/t/main.jsonl",
+      "tty": "hook-table-tty",
+      "updated": "@seed"
+     },
+     "path": "notifier/sessions/sess-1.json"
+    }
+   ],
+   "steps": [
+    {
+     "arg": "working",
+     "claude": [
+      "claude",
+      "--verbose"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [
+         "--verbose"
+        ],
+        "cwd": "/w/repo",
+        "headless": false,
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--verbose",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@seed",
+        "started": "@0",
+        "state": "working",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@0"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "PreToolUse",
+      "session_id": "sess-1",
+      "tool_name": "Read",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    }
+   ]
+  },
+  {
+   "name": "산 pid 인데 args 가 없는 예전 기록은 args 만 채운다",
+   "seed": [
+    {
+     "json": {
+      "cwd": "/w/repo",
+      "headless": false,
+      "pid": 4242,
+      "project": "repo",
+      "project_dir": "/w/repo",
+      "session_id": "sess-1",
+      "since": "@seed",
+      "started": "@seed",
+      "state": "working",
+      "transcript_path": "@DIR/t/main.jsonl",
+      "tty": "hook-table-tty",
+      "updated": "@seed"
+     },
+     "path": "notifier/sessions/sess-1.json"
+    }
+   ],
+   "steps": [
+    {
+     "arg": "working",
+     "claude": [
+      "claude",
+      "--ide"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [
+         "--ide"
+        ],
+        "cwd": "/w/repo",
+        "headless": false,
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--ide",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@seed",
+        "started": "@seed",
+        "state": "working",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@0"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "PreToolUse",
+      "session_id": "sess-1",
+      "tool_name": "Read",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    }
+   ]
+  },
+  {
+   "name": "SessionStart 는 산 기록도 프로세스 정보를 새로 잡는다(--resume)",
+   "seed": [
+    {
+     "json": {
+      "args": [
+       "--old"
+      ],
+      "cwd": "/w/repo",
+      "headless": false,
+      "pid": 4242,
+      "project": "repo",
+      "project_dir": "/w/repo",
+      "session_id": "sess-1",
+      "since": "@seed",
+      "started": "@seed",
+      "state": "idle",
+      "transcript_path": "@DIR/t/main.jsonl",
+      "tty": "hook-table-tty",
+      "updated": "@seed"
+     },
+     "path": "notifier/sessions/sess-1.json"
+    }
+   ],
+   "steps": [
+    {
+     "arg": "idle",
+     "claude": [
+      "claude",
+      "--chrome"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [
+         "--chrome"
+        ],
+        "cwd": "/w/repo",
+        "headless": false,
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--chrome",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@seed",
+        "started": "@0",
+        "state": "idle",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@0"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "SessionStart",
+      "session_id": "sess-1",
+      "source": "resume",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    }
+   ]
+  },
+  {
+   "name": "2일 지난 기록 정리(prune)는 SessionStart 에만",
+   "seed": [
+    {
+     "age": 259200,
+     "json": {
+      "pid": "@DEAD_PID",
+      "session_id": "old-dead",
+      "state": "ended"
+     },
+     "path": "notifier/sessions/old-dead.json"
+    },
+    {
+     "age": 259200,
+     "json": {
+      "pid": null,
+      "session_id": "old-nopid",
+      "state": "ended"
+     },
+     "path": "notifier/sessions/old-nopid.json"
+    },
+    {
+     "age": 259200,
+     "json": {
+      "pid": "@LIVE_PID",
+      "session_id": "old-live",
+      "state": "idle"
+     },
+     "path": "notifier/sessions/old-live.json"
+    },
+    {
+     "age": 259200,
+     "json": {
+      "pid": "@PARENT_PID",
+      "session_id": "old-parent",
+      "state": "idle"
+     },
+     "path": "notifier/sessions/old-parent.json"
+    },
+    {
+     "age": 86400,
+     "json": {
+      "pid": "@DEAD_PID",
+      "session_id": "fresh-dead",
+      "state": "ended"
+     },
+     "path": "notifier/sessions/fresh-dead.json"
+    },
+    {
+     "age": 259200,
+     "path": "notifier/sessions/old-broken.json",
+     "text": "{"
+    },
+    {
+     "age": 259200,
+     "path": "notifier/sessions/notes.txt",
+     "text": "x"
+    },
+    {
+     "path": "notifier/sessions/.old-live.lock",
+     "text": ""
+    },
+    {
+     "path": "notifier/sessions/.gone.lock",
+     "text": ""
+    },
+    {
+     "json": {
+      "paused_at": "@seed",
+      "topic": "x"
+     },
+     "path": "notifier/sessions/gone.paused"
+    },
+    {
+     "path": "notifier/sessions/gone.mute",
+     "text": ""
+    },
+    {
+     "path": "notifier/sessions/fresh-dead.mute",
+     "text": ""
+    },
+    {
+     "json": {
+      "paused_at": "@seed",
+      "topic": "x"
+     },
+     "path": "notifier/sessions/old-live.paused"
+    }
+   ],
+   "steps": [
+    {
+     "arg": "idle",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".gone.lock": true,
+       ".old-live.lock": true,
+       ".sess-1.lock": true,
+       "fresh-dead.json": {
+        "pid": "@DEAD_PID",
+        "session_id": "fresh-dead",
+        "state": "ended"
+       },
+       "fresh-dead.mute": true,
+       "gone.mute": true,
+       "gone.paused": true,
+       "notes.txt": true,
+       "old-broken.json": true,
+       "old-dead.json": {
+        "pid": "@DEAD_PID",
+        "session_id": "old-dead",
+        "state": "ended"
+       },
+       "old-live.json": {
+        "pid": "@LIVE_PID",
+        "session_id": "old-live",
+        "state": "idle"
+       },
+       "old-live.paused": true,
+       "old-nopid.json": {
+        "pid": null,
+        "session_id": "old-nopid",
+        "state": "ended"
+       },
+       "old-parent.json": {
+        "pid": "@PARENT_PID",
+        "session_id": "old-parent",
+        "state": "idle"
+       },
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "last_message": "정리 전",
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@0",
+        "started": "@0",
+        "state": "idle",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@0"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "Stop",
+      "last_assistant_message": "정리 전",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     },
+     "note": "SessionStart 가 아니면 정리하지 않는다"
+    },
+    {
+     "arg": "idle",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".old-live.lock": true,
+       ".sess-1.lock": true,
+       "fresh-dead.json": {
+        "pid": "@DEAD_PID",
+        "session_id": "fresh-dead",
+        "state": "ended"
+       },
+       "fresh-dead.mute": true,
+       "notes.txt": true,
+       "old-broken.json": true,
+       "old-live.json": {
+        "pid": "@LIVE_PID",
+        "session_id": "old-live",
+        "state": "idle"
+       },
+       "old-live.paused": true,
+       "old-parent.json": {
+        "pid": "@PARENT_PID",
+        "session_id": "old-parent",
+        "state": "idle"
+       },
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "last_message": "정리 전",
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@0",
+        "started": "@1",
+        "state": "idle",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@1"
+       }
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "SessionStart",
+      "session_id": "sess-1",
+      "source": "startup",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    }
+   ]
+  },
+  {
+   "name": "일시중지 표지(.paused)는 그 세션의 새 요청에만 지운다",
+   "seed": [
+    {
+     "json": {
+      "args": [],
+      "cwd": "/w/repo",
+      "headless": false,
+      "pid": 4242,
+      "project": "repo",
+      "project_dir": "/w/repo",
+      "session_id": "sess-1",
+      "since": "@seed",
+      "started": "@seed",
+      "state": "idle",
+      "transcript_path": "@DIR/t/main.jsonl",
+      "tty": "hook-table-tty",
+      "updated": "@seed"
+     },
+     "path": "notifier/sessions/sess-1.json"
+    },
+    {
+     "json": {
+      "paused_at": "@seed",
+      "topic": "끊긴 요청"
+     },
+     "path": "notifier/sessions/sess-1.paused"
+    },
+    {
+     "json": {
+      "args": [],
+      "cwd": "/w/repo",
+      "headless": false,
+      "pid": null,
+      "project": "repo",
+      "project_dir": "/w/repo",
+      "session_id": "sess-2",
+      "since": "@seed",
+      "started": "@seed",
+      "state": "idle",
+      "transcript_path": "@DIR/t/main.jsonl",
+      "tty": "hook-table-tty",
+      "updated": "@seed"
+     },
+     "path": "notifier/sessions/sess-2.json"
+    },
+    {
+     "json": {
+      "paused_at": "@seed",
+      "topic": "다른 세션"
+     },
+     "path": "notifier/sessions/sess-2.paused"
+    }
+   ],
+   "steps": [
+    {
+     "arg": "working",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@0",
+        "started": "@seed",
+        "state": "working",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@0"
+       },
+       "sess-1.paused": true,
+       "sess-2.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "pid": null,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "session_id": "sess-2",
+        "since": "@seed",
+        "started": "@seed",
+        "state": "idle",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@seed"
+       },
+       "sess-2.paused": true
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "PreToolUse",
+      "session_id": "sess-1",
+      "tool_name": "Read",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "idle",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "last_message": "쉼",
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@1",
+        "started": "@seed",
+        "state": "idle",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@1"
+       },
+       "sess-1.paused": true,
+       "sess-2.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "pid": null,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "session_id": "sess-2",
+        "since": "@seed",
+        "started": "@seed",
+        "state": "idle",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@seed"
+       },
+       "sess-2.paused": true
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "Stop",
+      "last_assistant_message": "쉼",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    },
+    {
+     "arg": "working",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {
+       ".sess-1.lock": true,
+       "sess-1.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "last_message": "쉼",
+        "pid": 4242,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "resume_cmd": [
+         "claude",
+         "--resume",
+         "sess-1"
+        ],
+        "session_id": "sess-1",
+        "since": "@2",
+        "started": "@seed",
+        "state": "working",
+        "topic": "재개",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@2"
+       },
+       "sess-2.json": {
+        "args": [],
+        "cwd": "/w/repo",
+        "headless": false,
+        "pid": null,
+        "project": "repo",
+        "project_dir": "/w/repo",
+        "session_id": "sess-2",
+        "since": "@seed",
+        "started": "@seed",
+        "state": "idle",
+        "transcript_path": "@DIR/t/main.jsonl",
+        "tty": "hook-table-tty",
+        "updated": "@seed"
+       },
+       "sess-2.paused": true
+      }
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "UserPromptSubmit",
+      "prompt": "재개",
+      "session_id": "sess-1",
+      "transcript_path": "@DIR/t/main.jsonl"
+     }
+    }
+   ]
+  },
+  {
+   "name": "세션 id 가 없거나 입력이 깨졌으면 아무것도 쓰지 않는다",
+   "steps": [
+    {
+     "arg": "working",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {}
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "UserPromptSubmit",
+      "prompt": "id 없음"
+     }
+    },
+    {
+     "arg": "working",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {}
+     },
+     "input": {
+      "cwd": "/w/repo",
+      "hook_event_name": "UserPromptSubmit",
+      "session_id": ""
+     }
+    },
+    {
+     "arg": "working",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {}
+     },
+     "input_text": "not json"
+    },
+    {
+     "arg": "idle",
+     "claude": [
+      "claude"
+     ],
+     "expect": {
+      "sessions": {}
+     },
+     "input_text": ""
+    }
+   ]
+  }
+ ]
+}

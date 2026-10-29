@@ -1,0 +1,153 @@
+# 공통 규칙 확인 (macOS) — hook 공유 시험 표와 보드 규칙 시험 (이슈 #9)
+# - hook-rules: macOS hook(state.py·notify.py·hooks.py)을 끝까지 돌려 hook-table/ 의 표를 다시 만들고 커밋된 것과 같은지 본다.
+#   hooks.py 사본(packaging/hooks.py)을 견주고, Windows 판 Rust 코어 시험을 돌린다(hook_table 시험이 같은 표로 state·notify·HOOKS 를 견준다.
+#   진짜 pid 생사를 쓰므로 unix 에서만 돌고, windows.yml 의 Windows 러너에서는 빈 시험이다)
+# - board-rules: BoardRules 의 Swift Testing 시험. SwiftPM 이 시험 0개로 성공하는 함정이 있어 "Test run with N tests" 의 N 이 0 보다 큰지 본다
+# 표·유지 규칙은 hook-table/README.md
+name: rules
+
+on:
+  push:
+    branches: ['**']   # 태그 push 에는 돌지 않는다
+    paths:
+      - 'state.py'
+      - 'notify.py'
+      - 'hooks.py'
+      - 'packaging/hooks.py'
+      - 'ClaudeBoard.swift'
+      - 'Package.swift'
+      - 'Package.resolved'
+      - 'Sources/**'
+      - 'Tests/**'
+      - 'clt-testing.json'
+      - 'hook-table/**'
+      - 'windows/crates/**'
+      - 'windows/Cargo.toml'
+      - 'windows/Cargo.lock'
+      - '.github/workflows/rules.yml'
+  pull_request:
+    paths:
+      - 'state.py'
+      - 'notify.py'
+      - 'hooks.py'
+      - 'packaging/hooks.py'
+      - 'ClaudeBoard.swift'
+      - 'Package.swift'
+      - 'Package.resolved'
+      - 'Sources/**'
+      - 'Tests/**'
+      - 'clt-testing.json'
+      - 'hook-table/**'
+      - 'windows/crates/**'
+      - 'windows/Cargo.toml'
+      - 'windows/Cargo.lock'
+      - '.github/workflows/rules.yml'
+  workflow_dispatch:
+
+# 같은 브랜치의 이전 실행은 취소한다(배포하지 않는 확인 작업뿐이다)
+concurrency:
+  group: rules-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  hook-rules:
+    # Xcode 가 필요 없으므로 늘 있는 이름을 쓴다. 실제 macOS·python3·Rust 판은 첫 실행 로그로 확인한다
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 도구 확인
+        run: |
+          sw_vers
+          command -v python3 && python3 --version
+          if command -v cargo >/dev/null 2>&1; then cargo --version; rustc --version; else echo "러너에 cargo 가 없다 - 다음 단계에서 설치한다"; fi
+
+      # 러너에 Rust 가 없으면 설치하고, 있으면 stable 로 맞춘다(core 는 std File::lock 때문에 1.89 이상이 필요하다)
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: windows -> target
+
+      # 표는 Python 이 기준이다 — hook 규칙을 고치고 표를 다시 만들지 않았으면 여기서 실패한다
+      - name: hook 공유 시험 표 다시 만들기·차이 확인
+        run: |
+          python3 -I hook-table/gen.py
+          if ! git diff --exit-code -- hook-table/; then
+            echo "::error::hook-table/ 의 표가 지금 hook 스크립트로 만든 것과 다릅니다. python3 -I hook-table/gen.py 로 다시 만들어 같은 커밋에 넣으세요(hook-table/README.md 유지 규칙)."
+            exit 1
+          fi
+          new="$(git ls-files --others --exclude-standard -- hook-table/)"
+          if [ -n "$new" ]; then
+            echo "::error::표를 만들며 커밋되지 않은 파일이 생겼습니다: $new"
+            exit 1
+          fi
+          # 생성기는 저장소에 아무것도 남기지 않아야 한다(state.py 를 저장소에서 바로 돌리면 sessions/ 가 생긴다)
+          if [ -e sessions ] || [ -n "$(find . -name __pycache__ -not -path './.git/*' -print -quit)" ]; then
+            echo "::error::생성기가 저장소에 sessions/ 나 __pycache__ 를 남겼습니다."
+            exit 1
+          fi
+
+      # CLAUDE.md: 두 파일은 같은 내용의 사본이다(build-board.sh 는 앞의 것, make-dmg.sh 는 뒤의 것을 앱에 싣는다)
+      - name: hooks.py 사본 확인
+        run: cmp hooks.py packaging/hooks.py
+
+      - name: core cargo test (hook 표 시험·HOOKS 비교 포함)
+        run: cargo test -p claude-board-core --manifest-path windows/Cargo.toml
+
+  board-rules:
+    # Package.swift 가 swift-tools-version 6.2 라 Xcode 26 급이 필요하다. 러너 이름은 추정이다 — 첫 실행 로그로 확인한다
+    runs-on: macos-26
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 설치된 Xcode
+        run: ls /Applications | grep -i xcode || echo "/Applications 에 Xcode 가 없다"
+
+      - name: Swift 6.2 이상을 주는 Xcode 고르기
+        run: |
+          num() { printf '%s\n' "$1" | awk -F. '{ printf "%d", $1 * 1000 + $2 }'; }
+          best=""; best_n=0
+          for app in /Applications/Xcode*.app; do
+            [ -d "$app" ] || continue
+            v="$(DEVELOPER_DIR="$app/Contents/Developer" xcrun swift --version 2>/dev/null | sed -n 's/.*Swift version \([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | head -1)"
+            echo "$app: Swift ${v:-?}"
+            [ -n "$v" ] || continue
+            n="$(num "$v")"
+            if [ "$n" -ge "$(num 6.2)" ] && [ "$n" -gt "$best_n" ]; then best="$app"; best_n="$n"; fi
+          done
+          if [ -z "$best" ]; then
+            echo "::error::Swift 6.2 이상을 주는 Xcode 가 없습니다(Package.swift 는 swift-tools-version 6.2). runs-on 을 바꿔야 합니다."
+            exit 1
+          fi
+          sudo xcode-select -s "$best/Contents/Developer"
+          xcode-select -p
+          swift --version
+
+      # 엔진(libghostty-spm, 약 77 MB) 내려받기를 아낀다 — Package.resolved 가 바뀌면 새로 받는다
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/org.swift.swiftpm
+            .build/artifacts
+            .build/checkouts
+            .build/repositories
+          key: spm-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Package.resolved') }}
+
+      # Xcode 가 있으므로 --toolset clt-testing.json 은 붙이지 않는다(Command Line Tools 만 있는 Mac 용)
+      - name: swift test (BoardRules)
+        run: |
+          set -o pipefail
+          log="$RUNNER_TEMP/swift-test.log"
+          swift test --disable-keychain --triple "$(uname -m)-apple-macosx14.0" 2>&1 | tee "$log"
+          n="$(grep -Eo 'Test run with [0-9]+ tests?' "$log" | tail -1 | grep -Eo '[0-9]+' || true)"
+          echo "Swift Testing 시험 수: ${n:-0}"
+          if [ "${n:-0}" -le 0 ]; then
+            echo "::error::swift test 가 시험을 하나도 돌리지 않았습니다(SwiftPM 이 시험 0개로 성공하는 함정). 'Test run with N tests' 줄을 확인하세요."
+            exit 1
+          fi

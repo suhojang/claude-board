@@ -1,0 +1,7 @@
+{
+  "name": "claude-board-jev",
+  "private": true,
+  "type": "module",
+  "main": "run-all.mjs",
+  "engines": { "node": ">=24" }
+}

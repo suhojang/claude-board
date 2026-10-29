@@ -274,7 +274,7 @@ footer.site a:hover { color: var(--fg) }
   <div class="hero"><div class="wrap">
     <div class="copy">
       <div class="badges">
-        <a class="badge" href="#terminal"><b>3.1.0</b><span>새 기능 경로별 터미널·화면 나누기<span class="long">: 작업 경로마다 탭을 따로 보고 Ghostty 와 같은 키로 나눕니다</span></span></a>
+        <a class="badge" href="#guide-settings"><b>3.2.0</b><span>새 기능 설정 화면<span class="long">: ⌘, 로 모든 설정을 한곳에서 찾고 단축키까지 바꿉니다</span></span></a>
         <a class="badge pv" href="#autopilot"><b>미리보기</b><span>다음 기능 자율주행 모드<span class="long">: 주제 하나로 조사부터 끝까지</span></span></a>
       </div>
       <h1>Claude Code 세션을<br><span>한 화면에서</span> 지휘하세요</h1>
@@ -312,7 +312,7 @@ footer.site a:hover { color: var(--fg) }
         </div>
         <div class="divider"></div>
         <div class="board">
-          <div class="bh">Claude Board <small>3.1.0</small></div>
+          <div class="bh">Claude Board <small>3.2.0</small></div>
           <div class="sc"><span style="color:var(--st-wait)">● 1</span><span style="color:var(--st-work)">● 2</span><span style="color:var(--st-idle)">● 2</span></div>
           <div class="use">
             <div><span>5시간</span><span style="color:var(--ok)">38%</span></div><i><b style="width:38%;background:var(--ok)"></b></i>
@@ -419,6 +419,8 @@ footer.site a:hover { color: var(--fg) }
       <div class="card"><h3>계정 전환과 자동 전환</h3><p>여러 Claude 계정을 저장해 두고 한 번에 바꿉니다. 실행 중인 세션도 다시 시작하지 않고 다음 요청부터 새 계정을 씁니다.</p></div>
       <div class="card"><h3>세 가지 화면 크기와 투명 모드</h3><p>전체, 중간, 미니 화면이 창 크기에 맞춰 바뀌고, 다른 앱을 쓰는 동안 보드를 반투명하게 띄워 둘 수 있습니다.</p></div>
       <div class="card"><h3>캐릭터와 앱 독</h3><p>세션 상태를 말풍선으로 알려 주는 캐릭터 여덟 가지 중에서 고르고, 보드 가장자리의 독에서 Ghostty, iTerm2 같은 터미널 앱을 바로 엽니다.</p></div>
+      <div class="card"><h3>설정 화면</h3><p><kbd>⌘</kbd><kbd>,</kbd> 를 누르면 보드는 그대로 두고 터미널 자리가 설정 화면으로 바뀝니다. 일반, 창, 알림, 터미널, 보드, 계정, 단축키, 업데이트 묶음에서 고르거나 검색으로 찾고, 바꾸면 바로 적용됩니다.</p></div>
+      <div class="card"><h3>단축키 바꾸기</h3><p>새 세션, 탭·경로 이동, 화면 나누기, 글자 크기, 어느 앱에서든 듣는 <kbd>⌃</kbd><kbd>⌥</kbd><kbd>B</kbd>·<kbd>⌃</kbd><kbd>⌥</kbd><kbd>T</kbd> 까지 보드 단축키를 원하는 키로 바꿉니다. 다른 동작이나 macOS 단축키와 겹치면 알려 줍니다.</p></div>
     </div>
   </div></div>
   <div class="block"><div class="wrap">
@@ -440,8 +442,8 @@ footer.site a:hover { color: var(--fg) }
         <div class="prose">
           <p>제목 막대의 "터미널 펼침" 단추나 어느 앱에서든 <kbd>⌃</kbd><kbd>⌥</kbd><kbd>T</kbd> 로 터미널을 펼치고 접습니다. 펼치면 창이 화면 전체로 넓어지고, 접으면 보드만 화면 한쪽에 남습니다. 접혀 있어도 탭의 세션은 계속 돕니다.</p>
           <ul>
-            <li><b>보드 위치</b>: 메뉴 막대 윈도우 › 보드 위치에서 오른쪽(기본)과 왼쪽을 고릅니다. 왼쪽이면 접기, 미니, 처음 크기로 붙이기도 모두 화면 왼쪽 기준입니다.</li>
-            <li><b>펼치기·접기 애니메이션</b>: 같은 메뉴에서 켜면 약 0.5초 동안 부드럽게 열리고 닫힙니다. 기본은 꺼짐입니다.</li>
+            <li><b>보드 위치</b>: 설정 › 창 › 보드 위치에서 오른쪽(기본)과 왼쪽을 고릅니다. 왼쪽이면 접기, 미니, 처음 크기로 붙이기도 모두 화면 왼쪽 기준입니다.</li>
+            <li><b>펼치기·접기 애니메이션</b>: 설정 › 창에서 켜면 약 0.55초 동안 부드럽게 열리고 닫힙니다. 기본은 꺼짐입니다.</li>
             <li><b>경계 끌기</b>: 터미널과 보드 사이 경계를 끌어 폭을 바꾸면 그 폭을 기억합니다.</li>
             <li><b>창 크기 전환</b>: 펼친 동안 제목 막대나 경로 줄·탭 줄의 빈 곳을 두 번 누르면 화면 전체와 가로·세로 60%(화면 가운데) 사이를 오갑니다. 초록 단추도 같습니다.</li>
           </ul>
@@ -487,7 +489,7 @@ footer.site a:hover { color: var(--fg) }
         <button type="button" class="btn ghost sm" id="demoPlay">멈춤</button>
         <div class="seg" role="group" aria-label="보드 위치"><button type="button" data-side="right" aria-pressed="true">보드 오른쪽</button><button type="button" data-side="left" aria-pressed="false">보드 왼쪽</button></div>
       </div>
-      <p class="meta">펼치기·접기 애니메이션을 켠 모습입니다(0.55초). 움직이는 동안 터미널 화면은 크기를 그대로 둔 채 밀려 나가고 들어옵니다. 실제 앱의 기본값은 애니메이션 없이 바로 바뀝니다.</p>
+      <p class="meta">펼치기·접기 애니메이션을 켠 모습입니다(0.55초). 움직이는 동안 터미널 화면은 크기를 그대로 둔 채 밀려 나가고 들어옵니다. 실제 앱의 기본값은 애니메이션 없이 바로 바뀝니다(설정 › 창에서 켭니다).</p>
     </div>
   </div></div>
 
@@ -496,8 +498,8 @@ footer.site a:hover { color: var(--fg) }
     <p class="lead">탭 줄 끝의 + 단추나 <kbd>⌘</kbd><kbd>T</kbd> 를 누르면 작업 폴더와 명령을 고르는 창이 뜹니다(터미널이 접혀 있으면 펼칩니다). 경로 카드 머리의 + 를 누르면 창 없이 그 경로에서 바로 시작합니다.</p>
     <div class="grid g3">
       <div class="card"><h3>작업 폴더</h3><p>보드에 있는 경로 가운데서 고르거나 "다른 폴더 고르기…" 로 정합니다. 지금 터미널 경로(경로 줄에서 고른 경로)가 먼저 골라져 있습니다.</p></div>
-      <div class="card"><h3>실행할 명령</h3><p>기본값은 <code>claude --dangerously-skip-permissions</code> 입니다. 권한 확인을 건너뛰므로 승인 대기가 거의 없습니다. 확인을 받고 싶으면 이 옵션을 지우세요.</p></div>
-      <div class="card"><h3>답변 마크다운 꾸미기</h3><p>기본으로 켜져 있습니다. 끄고 띄운 세션은 보드가 기억해, 다시 열 때도 끈 채로 엽니다.</p></div>
+      <div class="card"><h3>실행할 명령</h3><p>기본값은 <code>claude --dangerously-skip-permissions</code> 입니다. 권한 확인을 건너뛰므로 승인 대기가 거의 없습니다. 확인을 받고 싶으면 이 옵션을 지우세요. 늘 쓰는 명령은 설정 › 터미널 › 새 세션의 기본 명령에 넣어 두면 이 창과 경로 카드의 + 가 그 명령을 씁니다.</p></div>
+      <div class="card"><h3>답변 마크다운 꾸미기</h3><p>기본으로 켜져 있고, 기본값은 설정 › 터미널 › 새 세션에서 바꿉니다. 끄고 띄운 세션은 보드가 기억해, 다시 열 때도 끈 채로 엽니다.</p></div>
     </div>
   </div></div>
 
@@ -520,7 +522,7 @@ footer.site a:hover { color: var(--fg) }
       <div class="card"><h3>보드로 옮기기</h3><p>Ghostty 에서 돌던 세션의 ⋯ 메뉴에서 고르면, 그쪽 세션을 끝내고 보드 새 탭에서 같은 대화를 이어 엽니다. 작업 중이면 먼저 묻습니다(진행 중인 응답은 끊깁니다).</p></div>
       <div class="card"><h3>끝난 탭</h3><p>claude 는 그 작업 폴더의 셸에서 뜹니다. <code>/exit</code> 로 끝내면 일반 터미널처럼 셸 프롬프트로 돌아오고, 종료된 세션을 누르면 그 탭에서 이어 엽니다. 셸까지 끝내면 탭이 닫힙니다.</p></div>
       <div class="card"><h3>업데이트·종료 전 확인</h3><p>보드 탭에서 일하는 세션이 있으면 업데이트나 종료 전에 그 목록을 보여 주고 묻습니다. 일하는 세션이 없으면 묻지 않습니다. 백그라운드와 다른 터미널의 세션은 영향을 받지 않습니다.</p></div>
-      <div class="card"><h3>다시 뜰 때 되살리기</h3><p>보드는 쥐고 있는 탭 목록을 늘 남겨 두었다가, 다시 뜨면 같은 순서로 탭을 되살리고 대화를 이어 엽니다. 일하다 끊긴 세션은 일시중지로 남아 "세션 재개" 한 번으로 이어 갑니다.</p></div>
+      <div class="card"><h3>다시 뜰 때 되살리기</h3><p>보드는 쥐고 있는 탭 목록을 늘 남겨 두었다가, 다시 뜨면 같은 순서로 탭을 되살립니다. 마지막에 보던 탭은 바로 대화를 이어 열고, 다른 탭은 그 탭에 들어갈 때 이어 엽니다. 일하다 끊긴 세션은 일시중지로 남아 "세션 재개" 한 번으로 이어 갑니다.</p></div>
     </div>
   </div></div>
 
@@ -597,7 +599,7 @@ footer.site a:hover { color: var(--fg) }
   <div class="block"><div class="wrap narrow">
     <h2>설치하면 바뀌는 것</h2>
     <div class="prose"><ul>
-      <li><code>/Applications/Claude Board.app</code> 이 설치되고 로그인할 때 자동으로 실행됩니다.</li>
+      <li><code>/Applications/Claude Board.app</code> 이 설치되고 로그인할 때 자동으로 실행됩니다. 보드의 설정 › 일반 › 로그인할 때 열기로 끌 수 있고, 끄면 업데이트해도 다시 등록하지 않습니다.</li>
       <li><code>~/.claude/notifier/</code> 에 알림 패널과 상태 기록 스크립트가 들어갑니다.</li>
       <li><code>~/.claude/settings.json</code> 에 hook 11개와 환경 변수 하나가 더해집니다. 바꾸기 전에 원본을 백업하고, 쓰고 계신 다른 hook 과 설정은 그대로 둡니다. 여러 번 설치해도 중복으로 등록되지 않습니다.</li>
       <li><code>~/.local/bin</code> 에 <code>claude-board</code>(보드 열기)와 <code>claude-board-tui</code>(터미널판 보드) 명령이 생깁니다.</li>
@@ -608,7 +610,7 @@ footer.site a:hover { color: var(--fg) }
   </div></div>
   <div class="block"><div class="wrap narrow">
     <div class="split" style="align-items:start">
-      <div><h2>업데이트</h2><p class="lead">새 버전이 나오면 보드 윗줄 아래에 알림이 뜹니다. "업데이트" 를 누르면 새 버전으로 바꾸고 보드가 다시 열립니다. 보드 탭에서 일하는 세션이 있으면 먼저 묻고, 다시 열린 보드가 탭을 되살립니다. 윗줄의 ⟳ 단추로 바로 확인할 수도 있습니다.</p></div>
+      <div><h2>업데이트</h2><p class="lead">새 버전이 나오면 보드 윗줄 아래에 알림이 뜹니다. 보드를 켤 때와 그 뒤 1시간마다 확인하고, 설정 › 업데이트 › 자동으로 업데이트 확인으로 끌 수 있습니다. "업데이트" 를 누르면 새 버전으로 바꾸고 보드가 다시 열립니다. 보드 탭에서 일하는 세션이 있으면 먼저 묻고, 다시 열린 보드가 탭을 되살립니다. 윗줄의 ⟳ 단추나 설정 › 업데이트의 "업데이트 확인" 으로 바로 확인할 수도 있습니다.</p></div>
       <figure><div class="shot"><img src="images/update.png" alt="보드 윗줄 아래에 새 버전 알림이 뜬 모습" loading="lazy"></div></figure>
     </div>
     <h2 style="margin-top:40px">제거</h2>
@@ -621,7 +623,7 @@ footer.site a:hover { color: var(--fg) }
   <div class="page-head"><div class="wrap"><p class="eyebrow">사용 설명서</p><h1>Claude Board 사용법</h1><p>보드 화면을 읽는 법부터 계정 전환까지 차례로 설명합니다. 보드 안 터미널은 따로 정리한 페이지를 보세요.</p></div></div>
   <div class="subnav"><div class="wrap">
     <a href="#guide-board">보드 읽기</a><a href="#guide-click">세션 누르기</a><a href="#guide-menu">세션 메뉴</a><a href="#guide-notify">알림 패널</a>
-    <a href="#guide-size">화면 크기</a><a href="#guide-usage">사용 한도</a><a href="#guide-account">계정 전환</a><a href="#guide-more">그 밖의 기능</a>
+    <a href="#guide-size">화면 크기</a><a href="#guide-usage">사용 한도</a><a href="#guide-account">계정 전환</a><a href="#guide-settings">설정 화면</a><a href="#guide-more">그 밖의 기능</a>
   </div></div>
 
   <div class="block topic" id="guide-board"><div class="wrap narrow">
@@ -671,7 +673,7 @@ footer.site a:hover { color: var(--fg) }
     <div class="prose"><ul>
       <li>응답이 끝나거나 승인이 필요할 때 뜹니다. 키보드 입력을 가져가지 않아 쓰던 프롬프트를 그대로 이어 쓸 수 있습니다.</li>
       <li>누르면 보드가 열리고(보드 탭 세션이면 그 탭으로) 패널이 닫힙니다. 누르지 않으면 10초 뒤 닫히고, 마우스를 올려 두면 기다립니다.</li>
-      <li>위치는 메뉴 막대 Claude Board › 알림 위치에서 가운데, 왼쪽 위, 오른쪽 위, 왼쪽 아래, 오른쪽 아래 중에 고릅니다. 모서리에서는 여러 알림이 겹치지 않게 쌓입니다.</li>
+      <li>위치는 설정 › 알림 › 알림 위치의 화면 그림에서 가운데, 왼쪽 위, 오른쪽 위, 왼쪽 아래, 오른쪽 아래 중 한 자리를 눌러 고릅니다. 모서리에서는 여러 알림이 겹치지 않게 쌓입니다.</li>
       <li>세션 줄의 종 모양 스위치로 그 세션의 알림을, 윗줄의 종 단추로 모든 알림을 끕니다.</li>
     </ul></div>
   </div></div>
@@ -699,11 +701,32 @@ footer.site a:hover { color: var(--fg) }
     <div class="prose">
       <p>사용 한도 카드 왼쪽 위의 계정(이메일·요금제)을 누르면 계정 메뉴가 열립니다.</p>
       <ul>
-        <li><b>계정 추가</b>: 터미널 새 창에서 로그인이 시작됩니다. 브라우저에서 추가할 계정으로 로그인하면 보드에 저장됩니다. 지금 쓰는 로그인은 바뀌지 않아 작업 중에도 미리 추가해 둘 수 있습니다.</li>
-        <li><b>계정 바꾸기</b>: 저장한 계정을 고르면 모든 Claude Code 세션이 그 계정으로 바뀝니다. 실행 중인 세션도 다음 요청부터(30초 안에) 새 계정을 씁니다. 작업 중인 세션이 있으면 한 번 더 묻습니다.</li>
-        <li><b>한도 자동 전환</b>: 메뉴 맨 아래 "한도가 차면 다른 계정으로 자동 전환" 을 켜면, 한도가 차거나 세션이 한도에 걸려 멈출 때 다른 계정으로 바꾸고 멈췄던 세션을 이어 가게 합니다(기본 꺼짐).</li>
+        <li><b>계정 추가</b>: "계정 추가…" 를 누르면 설정 › 계정이 열리고 그 안에서 로그인이 시작됩니다(터미널 창은 뜨지 않습니다). 보드가 띄운 로그인 창에서 추가할 계정으로 로그인하면 저절로 저장되고, 그 창을 닫으면 계정 추가를 취소합니다. Google 로그인이 막히면 이메일로 로그인하거나 링크를 다른 브라우저에서 열고, 브라우저가 보여 준 코드는 같은 자리의 칸에 붙여넣습니다. 지금 쓰는 로그인은 바뀌지 않아 작업 중에도 미리 추가해 둘 수 있습니다.</li>
+        <li><b>계정 바꾸기</b>: 저장한 계정을 고르면 모든 Claude Code 세션이 그 계정으로 바뀝니다. 실행 중인 세션도 다음 요청부터(30초 안에) 새 계정을 씁니다. 작업 중인 세션이 있으면 한 번 더 묻습니다. 설정 › 계정에서도 고르고 지울 수 있고, 지우기 전에 한 번 묻습니다.</li>
+        <li><b>한도 자동 전환</b>: 메뉴 맨 아래나 설정 › 계정의 "한도가 차면 다른 계정으로 자동 전환" 을 켜면, 한도가 차거나 세션이 한도에 걸려 멈출 때 다른 계정으로 바꾸고 멈췄던 세션을 이어 가게 합니다(기본 꺼짐).</li>
       </ul>
       <div class="note">로그인 토큰은 macOS 키체인에만 저장됩니다. 계정을 바꿀 때는 Claude Code 의 /login·/logout 대신 보드의 계정 메뉴를 쓰세요. /logout 은 그 계정의 로그인을 서버에서 취소합니다.</div>
+    </div>
+  </div></div>
+
+  <div class="block topic" id="guide-settings"><div class="wrap narrow">
+    <h2>설정 화면</h2>
+    <div class="prose">
+      <p>메뉴 막대의 Claude Board › 설정…(<kbd>⌘</kbd><kbd>,</kbd>)을 누르면 오른쪽 보드는 그대로 두고 터미널 자리가 설정 화면으로 바뀝니다. 왼쪽에서 묶음을 고르거나 검색 칸에 이름을 쳐 모든 묶음에서 찾습니다. 저장 단추는 없고, 바꾸면 바로 적용되어 다시 켜도 남습니다.</p>
+      <ul>
+        <li><b>일반</b>: 항상 위에 고정, 로그인할 때 열기, 제목 옆 캐릭터</li>
+        <li><b>창</b>: 보드 위치, 투명도, 펼치기·접기 애니메이션, 설정 화면 전환(옆으로 밀기 기본, 서서히 바뀌기, 효과 없음)</li>
+        <li><b>알림</b>: 모든 알림 끄기, 알림 위치</li>
+        <li><b>터미널</b>: 터미널 글자 크기, 터미널 테마, 새 세션의 기본 명령과 답변 마크다운 꾸미기 기본값</li>
+        <li><b>보드</b>: 보드 글자 크기, 사용 한도 간략히 보기</li>
+        <li><b>계정</b>: 저장한 계정 고르기·지우기, 계정 추가, 한도가 차면 다른 계정으로 자동 전환</li>
+        <li><b>단축키</b>: 보드 단축키 바꾸기</li>
+        <li><b>업데이트</b>: 지금 버전, 업데이트 확인, 바뀐 점, 자동으로 업데이트 확인</li>
+      </ul>
+      <p><kbd>Esc</kbd>(검색어가 있으면 먼저 지웁니다), "터미널로 돌아가기", <kbd>⌘</kbd><kbd>,</kbd> 한 번 더, <kbd>⌘</kbd><kbd>W</kbd> 로 닫습니다. 터미널이 접혀 있었으면 펼쳐서 보여 주고 닫을 때 다시 접습니다. 설정 화면이 떠 있는 동안에도 탭은 뒤에서 그대로 돌고, <kbd>⌘</kbd><kbd>T</kbd>·<kbd>⌘</kbd><kbd>1</kbd> 같은 탭 단축키나 세션 줄을 누르면 설정 화면을 닫고 그 동작을 합니다.</p>
+      <h3>단축키 바꾸기</h3>
+      <p>설정 › 단축키에서 줄의 키를 누르고 새 키를 누르면 바로 바뀌고, 메뉴와 탭 줄·제목 막대의 안내 글자도 함께 바뀝니다. <kbd>Esc</kbd> 는 취소, <kbd>⌫</kbd> 는 그 단축키 비우기입니다. 보드의 다른 동작과 같은 키면 그 줄에 알리고 겹친 쪽을 비울 수 있고, macOS 시스템 단축키(시스템 설정 › 키보드 › 키보드 단축키에서 켜 둔 것)와 겹치면 알립니다. <kbd>⌘</kbd><kbd>Q</kbd>·<kbd>⌘</kbd><kbd>W</kbd>·<kbd>⌘</kbd><kbd>C</kbd>·<kbd>⌘</kbd><kbd>V</kbd> 같은 macOS 기본 키와 설정 화면을 여는 <kbd>⌘</kbd><kbd>,</kbd> 는 고를 수 없습니다. 바꾼 키는 "모두 기본값으로" 나 줄의 되돌리기 단추로 되돌립니다.</p>
+      <div class="note">Rectangle 이나 Raycast 같은 창 정리 앱이 <kbd>⌃</kbd><kbd>⌥</kbd> 방향키를 먼저 가져가 탭·경로 이동이 듣지 않으면, 설정 › 단축키에서 다른 키로 옮기면 됩니다.</div>
     </div>
   </div></div>
 
@@ -711,10 +734,10 @@ footer.site a:hover { color: var(--fg) }
     <h2>그 밖의 기능</h2>
     <div class="prose"><ul>
       <li><b>메뉴 막대 아이콘</b>: 보드 창을 열고 닫고, 승인 대기와 작업 중 세션 수를 보여 줍니다.</li>
-      <li><b>캐릭터</b>: 제목 오른쪽 캐릭터가 세션 상태를 말풍선으로 알려 줍니다. 오른쪽 클릭이나 Claude Board › 캐릭터에서 여덟 가지 중에 고릅니다.</li>
+      <li><b>캐릭터</b>: 제목 오른쪽 캐릭터가 세션 상태를 말풍선으로 알려 줍니다. 오른쪽 클릭이나 설정 › 일반에서 여덟 가지 중에 고릅니다.</li>
       <li><b>앱 독</b>: 보드 바깥쪽 가장자리 아래의 작은 탭에 마우스를 대면 Ghostty, iTerm2, 터미널, Orca 를 바로 여는 독이 나옵니다.</li>
-      <li><b>투명 모드</b>: 오른쪽 아래 슬라이더로 투명도를 정하면 다른 앱을 쓰는 동안 보드가 반투명해집니다. 마우스를 올리면 다시 또렷해집니다.</li>
-      <li><b>위에 고정</b>: 윗줄의 "위에 고정" 으로 보드를 다른 창 위에 띄워 둡니다.</li>
+      <li><b>투명 모드</b>: 오른쪽 아래 슬라이더(설정 › 창의 투명도와 같습니다)로 투명도를 정하면 마우스가 보드 창 밖에 있는 동안 보드가 반투명해집니다. 마우스를 올리면 다시 또렷해지고, 터미널을 펼쳐 화면 전체를 덮은 동안에는 늘 불투명합니다.</li>
+      <li><b>위에 고정</b>: 윗줄의 "위에 고정", <kbd>⌘</kbd><kbd>P</kbd>, 설정 › 일반에서 보드를 다른 창 위에 띄워 둡니다.</li>
       <li><b>터미널판 보드</b>: 터미널에서 <code>claude-board-tui</code> 를 실행하면 보드를 터미널 안에서 봅니다.</li>
     </ul></div>
   </div></div>
@@ -722,13 +745,15 @@ footer.site a:hover { color: var(--fg) }
 
 <!-- 단축키 -->
 <section class="page" id="keys" data-page>
-  <div class="page-head"><div class="wrap"><p class="eyebrow">단축키</p><h1>손에 익히면 더 빠릅니다</h1><p>어느 앱을 쓰고 있든 듣는 전역 단축키와 보드 안에서 쓰는 키입니다.</p></div></div>
+  <div class="page-head"><div class="wrap"><p class="eyebrow">단축키</p><h1>손에 익히면 더 빠릅니다</h1><p>어느 앱을 쓰고 있든 듣는 전역 단축키와 보드 안에서 쓰는 키입니다. 아래는 기본값이고, 보드 단축키는 설정 › 단축키에서 원하는 키로 바꿀 수 있습니다.</p></div></div>
   <div class="block"><div class="wrap narrow">
     <div class="tbl" style="margin-top:0"><table>
       <thead><tr><th>키</th><th>하는 일</th><th>어디서</th></tr></thead>
       <tbody>
         <tr><td><kbd>⌃</kbd><kbd>⌥</kbd><kbd>T</kbd></td><td>터미널 펼치기·접기. 다른 앱을 쓰는 중이면 보드를 앞으로 꺼내 터미널에 포커스</td><td>어디서나</td></tr>
         <tr><td><kbd>⌃</kbd><kbd>⌥</kbd><kbd>B</kbd></td><td>처음 크기로 화면 한쪽에 붙이기(터미널은 접힘)</td><td>어디서나</td></tr>
+        <tr><td><kbd>⌘</kbd><kbd>,</kbd></td><td>설정 화면 열기·닫기(<kbd>Esc</kbd> 로도 닫힘, 이 키는 바꿀 수 없음)</td><td>보드</td></tr>
+        <tr><td><kbd>⌘</kbd><kbd>P</kbd></td><td>항상 위에 고정 켜기·끄기</td><td>보드</td></tr>
         <tr><td><kbd>⌘</kbd><kbd>T</kbd></td><td>새 세션 창 열기(터미널이 접혀 있으면 펼침)</td><td>보드</td></tr>
         <tr><td><kbd>⌘</kbd><kbd>1</kbd> ~ <kbd>⌘</kbd><kbd>9</kbd></td><td>탭 줄(지금 경로의 탭) 순서대로 그 탭으로 가기(터미널이 접혀 있으면 펼침)</td><td>보드</td></tr>
         <tr><td><kbd>⌃</kbd><kbd>⌥</kbd><kbd>←</kbd> <kbd>⌃</kbd><kbd>⌥</kbd><kbd>→</kbd></td><td>지금 경로 안에서 왼쪽·오른쪽 탭으로 가기(끝에서는 반대쪽 끝 탭으로). Ghostty 의 탭 키 <kbd>⇧</kbd><kbd>⌘</kbd><kbd>[</kbd> <kbd>⇧</kbd><kbd>⌘</kbd><kbd>]</kbd>, <kbd>⌃</kbd><kbd>⇥</kbd> <kbd>⌃</kbd><kbd>⇧</kbd><kbd>⇥</kbd> 도 같음</td><td>보드</td></tr>
@@ -760,6 +785,7 @@ footer.site a:hover { color: var(--fg) }
     <details><summary>알림이 뜨지 않아요</summary><div><p>설치한 뒤 Claude Code 세션을 다시 시작했는지 확인하세요. python3 가 동작하는지, <code>~/.claude/settings.json</code> 에 <code>.claude/notifier/</code> 가 들어간 hook 이 있는지도 봅니다.</p></div></details>
     <details><summary>보드에 세션이 나타나지 않아요</summary><div><p>설치한 뒤 새로 시작한 세션만 보입니다. 질문 없이 끝난 세션은 이어 열 대화가 없어 목록에 나오지 않습니다.</p></div></details>
     <details><summary>세션을 두 번 눌러도 터미널 탭으로 가지 않아요</summary><div><p>탭 이동은 Ghostty 1.3 이상에서 됩니다. 시스템 설정 › 개인정보 보호 및 보안 › 자동화에서 Claude Board 가 Ghostty 를 제어하도록 허용했는지 확인하세요. "보드로 옮기기" 가 세션 터미널을 찾지 못할 때도 같습니다.</p></div></details>
+    <details><summary>탭·경로 이동 단축키(⌃⌥ 방향키)가 듣지 않아요</summary><div><p>Rectangle 이나 Raycast 같은 창 정리 앱이 같은 키를 먼저 가져간 것입니다. 그 앱에서 키를 비우거나, 보드의 설정 › 단축키에서 이전 탭·다음 탭·이전 경로·다음 경로를 다른 키로 옮기세요.</p></div></details>
     <details><summary>보드 탭의 claude 가 node 같은 명령을 못 찾아요</summary><div><p>터미널 새 창에서 그 명령이 PATH 에 있는지 확인하세요. 셸 설정을 바꿨다면 보드를 다시 띄워야 새 탭에 반영됩니다.</p></div></details>
     <details><summary>"답변 마크다운 꾸미기" 체크가 흐리게 꺼져 있어요</summary><div><p>플러그인을 <code>~/.claude/notifier/plugins/md-render/</code> 로 옮기지 못한 것입니다. 그 폴더에 쓸 수 있는지 확인하세요.</p></div></details>
     <details><summary>계정을 바꿨더니 사용 한도가 "로그인 토큰 갱신 전" 으로 나와요</summary><div><p>오래 쓰지 않은 계정은 토큰이 만료된 채 전환됩니다. 아무 세션에서나 요청을 한 번 보내면 갱신되고 사용량이 보입니다.</p></div></details>
@@ -770,7 +796,7 @@ footer.site a:hover { color: var(--fg) }
 </main>
 
 <footer class="site"><div class="wrap">
-  <div><a class="brand" href="#home" style="padding:0"><img src="images/icon.png" alt="">Claude Board</a><p style="margin-top:10px">Claude Code 세션을 한 화면에서 보고, 띄우고, 이어 여는 macOS 앱입니다. 이 설명서는 3.1.0 을 기준으로 합니다.</p><p style="margin-top:8px">Claude Board 는 Anthropic 의 공식 제품이 아닌 개인 오픈 소스 프로젝트입니다.</p></div>
+  <div><a class="brand" href="#home" style="padding:0"><img src="images/icon.png" alt="">Claude Board</a><p style="margin-top:10px">Claude Code 세션을 한 화면에서 보고, 띄우고, 이어 여는 macOS 앱입니다. 이 설명서는 3.2.0 을 기준으로 합니다.</p><p style="margin-top:8px">Claude Board 는 Anthropic 의 공식 제품이 아닌 개인 오픈 소스 프로젝트입니다.</p></div>
   <div><h4>설명서</h4><a href="#features">기능</a><a href="#terminal">보드 안 터미널</a><a href="#autopilot">다음 기능 미리보기</a><a href="#install">설치</a><a href="#guide">사용 설명서</a><a href="#keys">단축키</a><a href="#help">문제 해결</a></div>
   <div><h4>프로젝트</h4><a href="https://github.com/suhojang/claude-board">GitHub 저장소</a><a href="https://github.com/suhojang/claude-board/releases/latest">최신 릴리스</a><a href="https://github.com/suhojang/claude-board/blob/main/CHANGELOG.md">변경 기록</a><a href="https://github.com/suhojang/claude-board/blob/main/LICENSE">라이선스(Apache 2.0)</a></div>
 </div></footer>

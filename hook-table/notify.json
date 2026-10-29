@@ -1,0 +1,1434 @@
+{
+ "about": "hook-table/gen.py 가 만든 표. 손으로 고치지 않는다. macOS hook 의 main() 을 끝까지 돌려 얻은 결과이고 Windows 판 Rust 코어가 같은 표로 견준다(windows/crates/core/tests/hook_table.rs). 자세한 규칙은 hook-table/README.md",
+ "claude": {
+  "pid": 4242,
+  "tty": "hook-table-tty"
+ },
+ "excluded": [
+  "프로세스 찾기·headless 판정·터미널 제목 쓰기: 플랫폼마다 다르게 구현한다. 표는 가짜 claude 를 넣고 그 값이 기록에 실리는 길만 본다",
+  "resume_cmd 의 인용 방식: macOS 는 POSIX 셸(shlex.join), Windows 는 명령줄 규칙. 표에는 인용을 풀어 토큰 목록으로 적는다",
+  "Rust 에만 있는 resume_args·pid_ctime: Windows 판이 더한 필드라 견주기 전에 뺀다(resume_args 는 resume_cmd 토큰과 같아야 한다)",
+  "패널 인자의 순서·--sound 이름·--activate·--notify·실행 파일 경로: 패널 프로그램이 다르다. 표에는 이름별 값만 적는다",
+  "패널의 --session 이 빈 값: macOS 는 빈 문자열로 늘 넘기고 Windows 는 빼지만, 패널은 둘 다 '세션 없음'으로 본다. 표에는 null",
+  "경로 구분자가 든 session_id: Windows 판만 받지 않는다(sessions 밖에 쓰지 않게). 표에 넣지 않는다",
+  "세션 파일의 키 순서: 표는 키를 정렬해 적는다(키 순서는 windows/crates/core/tests/state_sequence.rs 가 본다)",
+  "hook 입력 앞의 UTF-8 BOM·notify 의 깨진 입력: Windows 는 hook 실행 파일(crates/hook main.rs)이 코어를 부르기 전에 다룬다. 표는 코어만 본다"
+ ],
+ "fallback_cwd": "/hook-table/cwd",
+ "markers": {
+  "4242": "가짜 claude 프로세스 pid(가짜 생사 판정에서 늘 산 것)",
+  "@<k>": "k 번째 단계(0부터)에서 hook 이 쓴 시각",
+  "@DEAD_PID": "띄웠다가 거둔 자식의 pid(죽은 것)",
+  "@DIR": "표를 돌리는 쪽의 임시 폴더(경로 앞부분)",
+  "@LIVE_PID": "표를 돌리는 프로세스 자신의 pid(산 것)",
+  "@PARENT_PID": "그 부모의 pid(산 것)",
+  "@seed": "심어 둔 시각 = 시나리오 시작 시각 - 1000초. '@seed-<n>' 은 시작 시각 - n초, '@ms:seed-<n>' 은 그 밀리초",
+  "age": "심은 파일의 수정 시각 = 시작 시각 - age초"
+ },
+ "scenarios": [
+  {
+   "expect": {
+    "panel": {
+     "body": "로그인 화면을 고쳤습니다.",
+     "duration": "10",
+     "kind": "done",
+     "position": "center",
+     "session": "sess-1",
+     "subtitle": "repo",
+     "summary": "waiting=0,working=0,idle=1",
+     "title": "작업 완료"
+    }
+   },
+   "input": {
+    "cwd": "/w/repo",
+    "hook_event_name": "Stop",
+    "last_assistant_message": "로그인 화면을 고쳤습니다. 시험도 통과합니다.",
+    "session_id": "sess-1",
+    "transcript_path": "@DIR/t/main.jsonl"
+   },
+   "kind": "stop",
+   "name": "작업 완료: 응답의 첫 문장, 이 세션만 있으면 대기 1"
+  },
+  {
+   "expect": {
+    "panel": {
+     "body": "대화 기록에서 꺼낸 답입니다.",
+     "duration": "10",
+     "kind": "done",
+     "position": "center",
+     "session": "sess-1",
+     "subtitle": "repo",
+     "summary": "waiting=0,working=0,idle=1",
+     "title": "작업 완료"
+    }
+   },
+   "input": {
+    "cwd": "/w/repo",
+    "hook_event_name": "Stop",
+    "session_id": "sess-1",
+    "transcript_path": "@DIR/t/main.jsonl"
+   },
+   "kind": "stop",
+   "name": "작업 완료: 응답이 없으면 대화 기록의 마지막 assistant 글",
+   "seed": [
+    {
+     "lines": [
+      {
+       "message": {
+        "content": "안녕",
+        "role": "user"
+       },
+       "type": "user"
+      },
+      {
+       "message": {
+        "content": [
+         {
+          "text": "이전 답",
+          "type": "text"
+         }
+        ]
+       },
+       "type": "assistant"
+      },
+      {
+       "message": {
+        "content": [
+         {
+          "text": "  \n",
+          "type": "text"
+         },
+         {
+          "text": "대화 기록에서 꺼낸 답입니다. 둘째 문장.",
+          "type": "text"
+         }
+        ]
+       },
+       "type": "assistant"
+      },
+      {
+       "message": {
+        "content": [
+         {
+          "name": "Read",
+          "type": "tool_use"
+         }
+        ]
+       },
+       "type": "assistant"
+      },
+      {
+       "message": {
+        "content": [
+         {
+          "content": "ok",
+          "type": "tool_result"
+         }
+        ],
+        "role": "user"
+       },
+       "type": "user"
+      }
+     ],
+     "path": "t/main.jsonl"
+    }
+   ]
+  },
+  {
+   "expect": {
+    "panel": {
+     "body": "기록의 답!",
+     "duration": "10",
+     "kind": "done",
+     "position": "center",
+     "session": "sess-1",
+     "subtitle": "repo",
+     "summary": "waiting=0,working=0,idle=1",
+     "title": "작업 완료"
+    }
+   },
+   "input": {
+    "cwd": "/w/repo",
+    "hook_event_name": "Stop",
+    "last_assistant_message": "",
+    "session_id": "sess-1",
+    "transcript_path": "@DIR/t/main.jsonl"
+   },
+   "kind": "stop",
+   "name": "작업 완료: 응답이 빈 문자열이어도 대화 기록에서",
+   "seed": [
+    {
+     "lines": [
+      {
+       "message": {
+        "content": [
+         {
+          "text": "기록의 답!",
+          "type": "text"
+         }
+        ]
+       },
+       "type": "assistant"
+      },
+      {
+       "type": "summary"
+      }
+     ],
+     "path": "t/main.jsonl"
+    }
+   ]
+  },
+  {
+   "expect": {
+    "panel": {
+     "body": "",
+     "duration": "10",
+     "kind": "done",
+     "position": "center",
+     "session": "sess-1",
+     "subtitle": "repo",
+     "summary": "waiting=0,working=0,idle=1",
+     "title": "작업 완료"
+    }
+   },
+   "input": {
+    "cwd": "/w/repo",
+    "hook_event_name": "Stop",
+    "session_id": "sess-1",
+    "transcript_path": "@DIR/t/main.jsonl"
+   },
+   "kind": "stop",
+   "name": "작업 완료: 응답도 대화 기록도 없으면 빈 본문"
+  },
+  {
+   "expect": {
+    "panel": {
+     "body": "Claude needs your permission to use Bash",
+     "duration": "10",
+     "kind": "wait",
+     "position": "center",
+     "session": "sess-1",
+     "subtitle": "repo",
+     "summary": "waiting=1,working=0,idle=0",
+     "title": "승인 대기"
+    }
+   },
+   "input": {
+    "cwd": "/w/repo",
+    "hook_event_name": "Notification",
+    "message": "Claude needs your permission to use Bash",
+    "notification_type": "permission_prompt",
+    "session_id": "sess-1",
+    "transcript_path": "@DIR/t/main.jsonl"
+   },
+   "kind": "notification",
+   "name": "승인 대기: message 가 본문"
+  },
+  {
+   "expect": {
+    "panel": {
+     "body": "Claude 가 입력을 기다리고 있습니다",
+     "duration": "10",
+     "kind": "wait",
+     "position": "center",
+     "session": "sess-1",
+     "subtitle": "repo",
+     "summary": "waiting=1,working=0,idle=0",
+     "title": "승인 대기"
+    }
+   },
+   "input": {
+    "cwd": "/w/repo",
+    "hook_event_name": "Notification",
+    "notification_type": "permission_prompt",
+    "session_id": "sess-1",
+    "transcript_path": "@DIR/t/main.jsonl"
+   },
+   "kind": "notification",
+   "name": "승인 대기: message 가 없으면 기본 문구"
+  },
+  {
+   "expect": {
+    "panel": null
+   },
+   "input": {
+    "cwd": "/w/repo",
+    "hook_event_name": "Notification",
+    "message": "Claude is waiting for your input",
+    "notification_type": "idle_prompt",
+    "session_id": "sess-1",
+    "transcript_path": "@DIR/t/main.jsonl"
+   },
+   "kind": "notification",
+   "name": "idle_prompt 알림은 띄우지 않는다"
+  },
+  {
+   "expect": {
+    "panel": null
+   },
+   "input": {
+    "cwd": "/w/repo",
+    "hook_event_name": "Notification",
+    "message": "Background task finished",
+    "notification_type": "agent_completed",
+    "session_id": "sess-1",
+    "transcript_path": "@DIR/t/main.jsonl"
+   },
+   "kind": "notification",
+   "name": "다른 작업이 끝남(agent_completed)은 띄우지 않는다"
+  },
+  {
+   "expect": {
+    "panel": null
+   },
+   "input": {
+    "cwd": "/w/repo",
+    "hook_event_name": "Notification",
+    "message": "Login successful",
+    "notification_type": "auth_success",
+    "session_id": "sess-1",
+    "transcript_path": "@DIR/t/main.jsonl"
+   },
+   "kind": "notification",
+   "name": "로그인 성공 같은 알림은 띄우지 않는다"
+  },
+  {
+   "expect": {
+    "panel": {
+     "body": "팀원이 승인을 기다립니다",
+     "duration": "10",
+     "kind": "wait",
+     "position": "center",
+     "session": "sess-1",
+     "subtitle": "repo",
+     "summary": "waiting=1,working=0,idle=0",
+     "title": "승인 대기"
+    }
+   },
+   "input": {
+    "cwd": "/w/repo",
+    "hook_event_name": "Notification",
+    "message": "팀원이 승인을 기다립니다",
+    "notification_type": "worker_permission_prompt",
+    "session_id": "sess-1",
+    "transcript_path": "@DIR/t/main.jsonl"
+   },
+   "kind": "notification",
+   "name": "팀원 승인(worker_permission_prompt)은 띄운다"
+  },
+  {
+   "expect": {
+    "panel": {
+     "body": "MCP 서버가 주소를 엽니다",
+     "duration": "10",
+     "kind": "wait",
+     "position": "center",
+     "session": "sess-1",
+     "subtitle": "repo",
+     "summary": "waiting=1,working=0,idle=0",
+     "title": "승인 대기"
+    }
+   },
+   "input": {
+    "cwd": "/w/repo",
+    "hook_event_name": "Notification",
+    "message": "MCP 서버가 주소를 엽니다",
+    "notification_type": "elicitation_url_dialog",
+    "session_id": "sess-1",
+    "transcript_path": "@DIR/t/main.jsonl"
+   },
+   "kind": "notification",
+   "name": "MCP 입력 요청(elicitation_url_dialog)은 띄운다"
+  },
+  {
+   "expect": {
+    "panel": {
+     "body": "Claude needs your permission",
+     "duration": "10",
+     "kind": "wait",
+     "position": "center",
+     "session": "sess-1",
+     "subtitle": "repo",
+     "summary": "waiting=1,working=0,idle=0",
+     "title": "승인 대기"
+    }
+   },
+   "input": {
+    "cwd": "/w/repo",
+    "hook_event_name": "Notification",
+    "message": "Claude needs your permission",
+    "session_id": "sess-1",
+    "transcript_path": "@DIR/t/main.jsonl"
+   },
+   "kind": "notification",
+   "name": "종류 없는 예전 알림은 띄운다"
+  },
+  {
+   "expect": {
+    "panel": null
+   },
+   "input": {
+    "cwd": "/w/repo",
+    "hook_event_name": "Stop",
+    "last_assistant_message": "로그인 화면을 고쳤습니다. 시험도 통과합니다.",
+    "session_id": "sess-1",
+    "transcript_path": "@DIR/t/main.jsonl"
+   },
+   "kind": "stop",
+   "name": "전체 알림 끔(mute-all)이면 작업 완료도 띄우지 않는다",
+   "seed": [
+    {
+     "path": "notifier/mute-all",
+     "text": ""
+    }
+   ]
+  },
+  {
+   "expect": {
+    "panel": null
+   },
+   "input": {
+    "cwd": "/w/repo",
+    "hook_event_name": "Notification",
+    "message": "Claude needs your permission to use Bash",
+    "notification_type": "permission_prompt",
+    "session_id": "sess-1",
+    "transcript_path": "@DIR/t/main.jsonl"
+   },
+   "kind": "notification",
+   "name": "전체 알림 끔이면 승인 대기도 띄우지 않는다",
+   "seed": [
+    {
+     "path": "notifier/mute-all",
+     "text": ""
+    },
+    {
+     "json": {
+      "args": [],
+      "cwd": "/w/repo",
+      "headless": false,
+      "pid": 4242,
+      "project": "repo",
+      "project_dir": "/w/repo",
+      "session_id": "sess-1",
+      "since": "@seed",
+      "started": "@seed",
+      "state": "working",
+      "transcript_path": "@DIR/t/main.jsonl",
+      "tty": "hook-table-tty",
+      "updated": "@seed"
+     },
+     "path": "notifier/sessions/sess-1.json"
+    }
+   ]
+  },
+  {
+   "expect": {
+    "panel": null
+   },
+   "input": {
+    "cwd": "/w/repo",
+    "hook_event_name": "Notification",
+    "message": "Claude needs your permission to use Bash",
+    "notification_type": "permission_prompt",
+    "session_id": "sess-1",
+    "transcript_path": "@DIR/t/main.jsonl"
+   },
+   "kind": "notification",
+   "name": "이 세션 알림 끔(.mute)이면 띄우지 않는다",
+   "seed": [
+    {
+     "path": "notifier/sessions/sess-1.mute",
+     "text": ""
+    }
+   ]
+  },
+  {
+   "expect": {
+    "panel": {
+     "body": "로그인 화면을 고쳤습니다.",
+     "duration": "10",
+     "kind": "done",
+     "position": "center",
+     "session": "sess-1",
+     "subtitle": "repo",
+     "summary": "waiting=0,working=0,idle=2",
+     "title": "작업 완료"
+    }
+   },
+   "input": {
+    "cwd": "/w/repo",
+    "hook_event_name": "Stop",
+    "last_assistant_message": "로그인 화면을 고쳤습니다. 시험도 통과합니다.",
+    "session_id": "sess-1",
+    "transcript_path": "@DIR/t/main.jsonl"
+   },
+   "kind": "stop",
+   "name": "다른 세션의 .mute 는 상관없다",
+   "seed": [
+    {
+     "path": "notifier/sessions/sess-2.mute",
+     "text": ""
+    },
+    {
+     "json": {
+      "args": [],
+      "cwd": "/w/repo",
+      "headless": false,
+      "pid": null,
+      "project": "repo",
+      "project_dir": "/w/repo",
+      "session_id": "sess-2",
+      "since": "@seed",
+      "started": "@seed",
+      "state": "idle",
+      "transcript_path": "@DIR/t/main.jsonl",
+      "tty": "hook-table-tty",
+      "updated": "@seed"
+     },
+     "path": "notifier/sessions/sess-2.json"
+    }
+   ]
+  },
+  {
+   "expect": {
+    "panel": {
+     "body": "로그인 화면을 고쳤습니다.",
+     "duration": "10",
+     "kind": "done",
+     "position": "top-right",
+     "session": "sess-1",
+     "subtitle": "repo",
+     "summary": "waiting=0,working=0,idle=1",
+     "title": "작업 완료"
+    }
+   },
+   "input": {
+    "cwd": "/w/repo",
+    "hook_event_name": "Stop",
+    "last_assistant_message": "로그인 화면을 고쳤습니다. 시험도 통과합니다.",
+    "session_id": "sess-1",
+    "transcript_path": "@DIR/t/main.jsonl"
+   },
+   "kind": "stop",
+   "name": "알림 위치 파일(앞뒤 공백 정리)",
+   "seed": [
+    {
+     "path": "notifier/notify-position",
+     "text": "top-right\n"
+    }
+   ]
+  },
+  {
+   "expect": {
+    "panel": {
+     "body": "Claude needs your permission to use Bash",
+     "duration": "10",
+     "kind": "wait",
+     "position": "center",
+     "session": "sess-1",
+     "subtitle": "repo",
+     "summary": "waiting=1,working=0,idle=0",
+     "title": "승인 대기"
+    }
+   },
+   "input": {
+    "cwd": "/w/repo",
+    "hook_event_name": "Notification",
+    "message": "Claude needs your permission to use Bash",
+    "notification_type": "permission_prompt",
+    "session_id": "sess-1",
+    "transcript_path": "@DIR/t/main.jsonl"
+   },
+   "kind": "notification",
+   "name": "알림 위치 파일이 비었으면 가운데",
+   "seed": [
+    {
+     "path": "notifier/notify-position",
+     "text": "  \n"
+    }
+   ]
+  },
+  {
+   "expect": {
+    "panel": {
+     "body": "로그인 화면을 고쳤습니다.",
+     "duration": "10",
+     "kind": "done",
+     "position": "center",
+     "session": "sess-1",
+     "subtitle": "repo",
+     "summary": "waiting=1,working=1,idle=2",
+     "title": "작업 완료"
+    }
+   },
+   "input": {
+    "cwd": "/w/repo",
+    "hook_event_name": "Stop",
+    "last_assistant_message": "로그인 화면을 고쳤습니다. 시험도 통과합니다.",
+    "session_id": "sess-1",
+    "transcript_path": "@DIR/t/main.jsonl"
+   },
+   "kind": "stop",
+   "name": "상태별 개수: 이 세션은 막 바뀐 상태로, 끝난 세션·깨진 파일·표지 파일은 세지 않는다",
+   "seed": [
+    {
+     "json": {
+      "pid": null,
+      "session_id": "idle-a",
+      "state": "idle"
+     },
+     "path": "notifier/sessions/idle-a.json"
+    },
+    {
+     "json": {
+      "session_id": "work-b",
+      "since": "@seed",
+      "state": "working"
+     },
+     "path": "notifier/sessions/work-b.json"
+    },
+    {
+     "json": {
+      "pid": null,
+      "session_id": "wait-c",
+      "since": "@seed",
+      "state": "waiting"
+     },
+     "path": "notifier/sessions/wait-c.json"
+    },
+    {
+     "json": {
+      "pid": null,
+      "session_id": "ended-d",
+      "state": "ended"
+     },
+     "path": "notifier/sessions/ended-d.json"
+    },
+    {
+     "path": "notifier/sessions/broken.json",
+     "text": "{broken"
+    },
+    {
+     "path": "notifier/sessions/.idle-a.lock",
+     "text": ""
+    },
+    {
+     "path": "notifier/sessions/idle-a.mute",
+     "text": ""
+    },
+    {
+     "json": {
+      "args": [],
+      "cwd": "/w/repo",
+      "headless": false,
+      "pid": null,
+      "project": "repo",
+      "project_dir": "/w/repo",
+      "session_id": "sess-1",
+      "since": "@seed",
+      "started": "@seed",
+      "state": "working",
+      "transcript_path": "@DIR/t/main.jsonl",
+      "tty": "hook-table-tty",
+      "updated": "@seed"
+     },
+     "path": "notifier/sessions/sess-1.json"
+    }
+   ]
+  },
+  {
+   "expect": {
+    "panel": {
+     "body": "Claude needs your permission to use Bash",
+     "duration": "10",
+     "kind": "wait",
+     "position": "center",
+     "session": "sess-1",
+     "subtitle": "repo",
+     "summary": "waiting=2,working=1,idle=1",
+     "title": "승인 대기"
+    }
+   },
+   "input": {
+    "cwd": "/w/repo",
+    "hook_event_name": "Notification",
+    "message": "Claude needs your permission to use Bash",
+    "notification_type": "permission_prompt",
+    "session_id": "sess-1",
+    "transcript_path": "@DIR/t/main.jsonl"
+   },
+   "kind": "notification",
+   "name": "상태별 개수: 승인 대기는 이 세션을 waiting 으로",
+   "seed": [
+    {
+     "json": {
+      "pid": null,
+      "session_id": "idle-a",
+      "state": "idle"
+     },
+     "path": "notifier/sessions/idle-a.json"
+    },
+    {
+     "json": {
+      "session_id": "work-b",
+      "since": "@seed",
+      "state": "working"
+     },
+     "path": "notifier/sessions/work-b.json"
+    },
+    {
+     "json": {
+      "pid": null,
+      "session_id": "wait-c",
+      "since": "@seed",
+      "state": "waiting"
+     },
+     "path": "notifier/sessions/wait-c.json"
+    },
+    {
+     "json": {
+      "pid": null,
+      "session_id": "ended-d",
+      "state": "ended"
+     },
+     "path": "notifier/sessions/ended-d.json"
+    },
+    {
+     "path": "notifier/sessions/broken.json",
+     "text": "{broken"
+    },
+    {
+     "path": "notifier/sessions/.idle-a.lock",
+     "text": ""
+    },
+    {
+     "path": "notifier/sessions/idle-a.mute",
+     "text": ""
+    },
+    {
+     "json": {
+      "args": [],
+      "cwd": "/w/repo",
+      "headless": false,
+      "pid": null,
+      "project": "repo",
+      "project_dir": "/w/repo",
+      "session_id": "sess-1",
+      "since": "@seed",
+      "started": "@seed",
+      "state": "idle",
+      "transcript_path": "@DIR/t/main.jsonl",
+      "tty": "hook-table-tty",
+      "updated": "@seed"
+     },
+     "path": "notifier/sessions/sess-1.json"
+    }
+   ]
+  },
+  {
+   "expect": {
+    "panel": {
+     "body": "Claude needs your permission to use Bash",
+     "duration": "10",
+     "kind": "wait",
+     "position": "center",
+     "session": "sess-1",
+     "subtitle": "repo",
+     "summary": "waiting=2,working=1,idle=1",
+     "title": "승인 대기"
+    }
+   },
+   "input": {
+    "cwd": "/w/repo",
+    "hook_event_name": "Notification",
+    "message": "Claude needs your permission to use Bash",
+    "notification_type": "permission_prompt",
+    "session_id": "sess-1",
+    "transcript_path": "@DIR/t/main.jsonl"
+   },
+   "kind": "notification",
+   "name": "상태별 개수: 이 세션 파일이 아직 없으면 그 상태에 1 을 더한다",
+   "seed": [
+    {
+     "json": {
+      "pid": null,
+      "session_id": "idle-a",
+      "state": "idle"
+     },
+     "path": "notifier/sessions/idle-a.json"
+    },
+    {
+     "json": {
+      "session_id": "work-b",
+      "since": "@seed",
+      "state": "working"
+     },
+     "path": "notifier/sessions/work-b.json"
+    },
+    {
+     "json": {
+      "pid": null,
+      "session_id": "wait-c",
+      "since": "@seed",
+      "state": "waiting"
+     },
+     "path": "notifier/sessions/wait-c.json"
+    },
+    {
+     "json": {
+      "pid": null,
+      "session_id": "ended-d",
+      "state": "ended"
+     },
+     "path": "notifier/sessions/ended-d.json"
+    },
+    {
+     "path": "notifier/sessions/broken.json",
+     "text": "{broken"
+    },
+    {
+     "path": "notifier/sessions/.idle-a.lock",
+     "text": ""
+    },
+    {
+     "path": "notifier/sessions/idle-a.mute",
+     "text": ""
+    }
+   ]
+  },
+  {
+   "expect": {
+    "panel": {
+     "body": "로그인 화면을 고쳤습니다.",
+     "duration": "10",
+     "kind": "done",
+     "position": "center",
+     "session": "sess-1",
+     "subtitle": "repo",
+     "summary": "waiting=0,working=0,idle=2",
+     "title": "작업 완료"
+    }
+   },
+   "input": {
+    "cwd": "/w/repo",
+    "hook_event_name": "Stop",
+    "last_assistant_message": "로그인 화면을 고쳤습니다. 시험도 통과합니다.",
+    "session_id": "sess-1",
+    "transcript_path": "@DIR/t/main.jsonl"
+   },
+   "kind": "stop",
+   "name": "상태별 개수: pid 가 죽은 다른 세션은 빼고 산 것은 센다",
+   "seed": [
+    {
+     "json": {
+      "pid": "@LIVE_PID",
+      "session_id": "live",
+      "state": "idle"
+     },
+     "path": "notifier/sessions/live.json"
+    },
+    {
+     "json": {
+      "pid": "@DEAD_PID",
+      "session_id": "dead-w",
+      "since": "@seed",
+      "state": "working"
+     },
+     "path": "notifier/sessions/dead-w.json"
+    },
+    {
+     "json": {
+      "pid": "@DEAD_PID",
+      "session_id": "dead-i",
+      "state": "idle"
+     },
+     "path": "notifier/sessions/dead-i.json"
+    }
+   ]
+  },
+  {
+   "expect": {
+    "panel": {
+     "body": "로그인 화면을 고쳤습니다.",
+     "duration": "10",
+     "kind": "done",
+     "position": "center",
+     "session": "sess-1",
+     "subtitle": "repo",
+     "summary": "waiting=0,working=1,idle=3",
+     "title": "작업 완료"
+    }
+   },
+   "input": {
+    "cwd": "/w/repo",
+    "hook_event_name": "Stop",
+    "last_assistant_message": "로그인 화면을 고쳤습니다. 시험도 통과합니다.",
+    "session_id": "sess-1",
+    "transcript_path": "@DIR/t/main.jsonl"
+   },
+   "kind": "stop",
+   "name": "상태별 개수: Esc 로 끊긴 다른 세션은 대기(대화 기록 끝의 중단 표시)",
+   "seed": [
+    {
+     "json": {
+      "pid": null,
+      "session_id": "esc",
+      "since": "@seed",
+      "state": "working",
+      "transcript_path": "@DIR/t/esc.jsonl"
+     },
+     "path": "notifier/sessions/esc.json"
+    },
+    {
+     "lines": [
+      {
+       "message": {
+        "content": "요청",
+        "role": "user"
+       },
+       "type": "user"
+      },
+      {
+       "message": {
+        "content": [
+         {
+          "text": "하는 중",
+          "type": "text"
+         }
+        ]
+       },
+       "type": "assistant"
+      },
+      {
+       "message": {
+        "content": [
+         {
+          "text": "[Request interrupted by user for tool use]",
+          "type": "text"
+         }
+        ],
+        "role": "user"
+       },
+       "timestamp": "2026-10-28T00:00:00.000Z",
+       "type": "user"
+      },
+      {
+       "type": "cost-state"
+      },
+      {
+       "message": {
+        "content": "<local-command-stdout>ok</local-command-stdout>",
+        "role": "user"
+       },
+       "type": "user"
+      },
+      {
+       "isMeta": true,
+       "message": {
+        "content": "메타",
+        "role": "user"
+       },
+       "type": "user"
+      },
+      {
+       "isSidechain": true,
+       "message": {
+        "content": "곁가지",
+        "role": "user"
+       },
+       "type": "user"
+      }
+     ],
+     "path": "t/esc.jsonl"
+    },
+    {
+     "json": {
+      "pid": null,
+      "session_id": "esc-wait",
+      "since": "@seed",
+      "state": "waiting",
+      "transcript_path": "@DIR/t/esc-wait.jsonl"
+     },
+     "path": "notifier/sessions/esc-wait.json"
+    },
+    {
+     "lines": [
+      {
+       "message": {
+        "content": "요청",
+        "role": "user"
+       },
+       "type": "user"
+      },
+      {
+       "message": {
+        "content": "[Request interrupted by user]",
+        "role": "user"
+       },
+       "type": "user"
+      }
+     ],
+     "path": "t/esc-wait.jsonl"
+    },
+    {
+     "json": {
+      "pid": null,
+      "session_id": "resumed",
+      "since": "@seed",
+      "state": "working",
+      "transcript_path": "@DIR/t/resumed.jsonl"
+     },
+     "path": "notifier/sessions/resumed.json"
+    },
+    {
+     "lines": [
+      {
+       "message": {
+        "content": "[Request interrupted by user]",
+        "role": "user"
+       },
+       "type": "user"
+      },
+      {
+       "message": {
+        "content": "다시 해 줘",
+        "role": "user"
+       },
+       "type": "user"
+      },
+      {
+       "message": {
+        "content": [
+         {
+          "text": "다시 하는 중",
+          "type": "text"
+         }
+        ]
+       },
+       "type": "assistant"
+      }
+     ],
+     "path": "t/resumed.jsonl"
+    }
+   ]
+  },
+  {
+   "expect": {
+    "panel": {
+     "body": "Claude needs your permission to use Bash",
+     "duration": "10",
+     "kind": "wait",
+     "position": "center",
+     "session": "sess-1",
+     "subtitle": "repo",
+     "summary": "waiting=1,working=1,idle=1",
+     "title": "승인 대기"
+    }
+   },
+   "input": {
+    "cwd": "/w/repo",
+    "hook_event_name": "Notification",
+    "message": "Claude needs your permission to use Bash",
+    "notification_type": "permission_prompt",
+    "session_id": "sess-1",
+    "transcript_path": "@DIR/t/main.jsonl"
+   },
+   "kind": "notification",
+   "name": "상태별 개수: Claude Code 의 status 로 덮기(busy 는 승인 대기를 작업 중으로, idle 은 대기로)",
+   "seed": [
+    {
+     "json": {
+      "pid": "@LIVE_PID",
+      "session_id": "busy",
+      "since": "@seed-100",
+      "state": "waiting"
+     },
+     "path": "notifier/sessions/busy.json"
+    },
+    {
+     "json": {
+      "pid": "@LIVE_PID",
+      "sessionId": "busy",
+      "status": "busy",
+      "statusUpdatedAt": "@ms:seed-50"
+     },
+     "path": "home/.claude/sessions/@LIVE_PID.json"
+    },
+    {
+     "json": {
+      "pid": "@PARENT_PID",
+      "session_id": "idle-now",
+      "since": "@seed-100",
+      "state": "working"
+     },
+     "path": "notifier/sessions/idle-now.json"
+    },
+    {
+     "json": {
+      "pid": "@PARENT_PID",
+      "sessionId": "idle-now",
+      "status": "idle",
+      "statusUpdatedAt": "@ms:seed-50"
+     },
+     "path": "home/.claude/sessions/@PARENT_PID.json"
+    }
+   ]
+  },
+  {
+   "expect": {
+    "panel": {
+     "body": "로그인 화면을 고쳤습니다.",
+     "duration": "10",
+     "kind": "done",
+     "position": "center",
+     "session": "sess-1",
+     "subtitle": "repo",
+     "summary": "waiting=1,working=1,idle=1",
+     "title": "작업 완료"
+    }
+   },
+   "input": {
+    "cwd": "/w/repo",
+    "hook_event_name": "Stop",
+    "last_assistant_message": "로그인 화면을 고쳤습니다. 시험도 통과합니다.",
+    "session_id": "sess-1",
+    "transcript_path": "@DIR/t/main.jsonl"
+   },
+   "kind": "stop",
+   "name": "상태별 개수: status 가 since 보다 앞이거나 다른 세션 id 면 덮지 않는다",
+   "seed": [
+    {
+     "json": {
+      "pid": "@LIVE_PID",
+      "session_id": "old-busy",
+      "since": "@seed-100",
+      "state": "waiting"
+     },
+     "path": "notifier/sessions/old-busy.json"
+    },
+    {
+     "json": {
+      "pid": "@LIVE_PID",
+      "sessionId": "old-busy",
+      "status": "busy",
+      "statusUpdatedAt": "@ms:seed-200"
+     },
+     "path": "home/.claude/sessions/@LIVE_PID.json"
+    },
+    {
+     "json": {
+      "pid": "@PARENT_PID",
+      "session_id": "cleared",
+      "since": "@seed-100",
+      "state": "working"
+     },
+     "path": "notifier/sessions/cleared.json"
+    },
+    {
+     "json": {
+      "pid": "@PARENT_PID",
+      "sessionId": "after-clear",
+      "status": "idle",
+      "statusUpdatedAt": "@ms:seed-50"
+     },
+     "path": "home/.claude/sessions/@PARENT_PID.json"
+    }
+   ]
+  },
+  {
+   "expect": {
+    "panel": {
+     "body": "로그인 화면을 고쳤습니다.",
+     "duration": "10",
+     "kind": "done",
+     "position": "center",
+     "session": "sess-1",
+     "subtitle": "repo",
+     "summary": "waiting=0,working=0,idle=1",
+     "title": "작업 완료"
+    }
+   },
+   "input": {
+    "cwd": "/w/repo",
+    "hook_event_name": "Stop",
+    "last_assistant_message": "로그인 화면을 고쳤습니다. 시험도 통과합니다.",
+    "session_id": "sess-1",
+    "transcript_path": "@DIR/t/main.jsonl"
+   },
+   "kind": "stop",
+   "name": "이 세션은 Claude Code status 로 덮지 않는다",
+   "seed": [
+    {
+     "json": {
+      "args": [],
+      "cwd": "/w/repo",
+      "headless": false,
+      "pid": "@LIVE_PID",
+      "project": "repo",
+      "project_dir": "/w/repo",
+      "session_id": "sess-1",
+      "since": "@seed-100",
+      "started": "@seed",
+      "state": "working",
+      "transcript_path": "@DIR/t/main.jsonl",
+      "tty": "hook-table-tty",
+      "updated": "@seed"
+     },
+     "path": "notifier/sessions/sess-1.json"
+    },
+    {
+     "json": {
+      "pid": "@LIVE_PID",
+      "sessionId": "sess-1",
+      "status": "busy",
+      "statusUpdatedAt": "@ms:seed-50"
+     },
+     "path": "home/.claude/sessions/@LIVE_PID.json"
+    }
+   ]
+  },
+  {
+   "expect": {
+    "panel": {
+     "body": "id 없는 알림",
+     "duration": "10",
+     "kind": "wait",
+     "position": "center",
+     "session": null,
+     "subtitle": "repo",
+     "summary": "waiting=1,working=1,idle=1",
+     "title": "승인 대기"
+    }
+   },
+   "input": {
+    "cwd": "/w/repo",
+    "hook_event_name": "Notification",
+    "message": "id 없는 알림"
+   },
+   "kind": "notification",
+   "name": "세션 id 가 없으면 --session 없음, 이 세션을 더하지 않는다",
+   "seed": [
+    {
+     "json": {
+      "pid": null,
+      "session_id": "idle-a",
+      "state": "idle"
+     },
+     "path": "notifier/sessions/idle-a.json"
+    },
+    {
+     "json": {
+      "session_id": "work-b",
+      "since": "@seed",
+      "state": "working"
+     },
+     "path": "notifier/sessions/work-b.json"
+    },
+    {
+     "json": {
+      "pid": null,
+      "session_id": "wait-c",
+      "since": "@seed",
+      "state": "waiting"
+     },
+     "path": "notifier/sessions/wait-c.json"
+    },
+    {
+     "json": {
+      "pid": null,
+      "session_id": "ended-d",
+      "state": "ended"
+     },
+     "path": "notifier/sessions/ended-d.json"
+    },
+    {
+     "path": "notifier/sessions/broken.json",
+     "text": "{broken"
+    },
+    {
+     "path": "notifier/sessions/.idle-a.lock",
+     "text": ""
+    },
+    {
+     "path": "notifier/sessions/idle-a.mute",
+     "text": ""
+    }
+   ]
+  },
+  {
+   "expect": {
+    "panel": {
+     "body": "로그인 화면을 고쳤습니다.",
+     "duration": "10",
+     "kind": "done",
+     "position": "center",
+     "session": null,
+     "subtitle": "repo",
+     "summary": "waiting=0,working=0,idle=0",
+     "title": "작업 완료"
+    }
+   },
+   "input": {
+    "cwd": "/w/repo",
+    "hook_event_name": "Stop",
+    "last_assistant_message": "로그인 화면을 고쳤습니다. 시험도 통과합니다.",
+    "session_id": ""
+   },
+   "kind": "stop",
+   "name": "세션 id 가 빈 문자열이어도 --session 없음"
+  },
+  {
+   "expect": {
+    "panel": {
+     "body": "로그인 화면을 고쳤습니다.",
+     "duration": "10",
+     "kind": "done",
+     "position": "center",
+     "session": "sess-1",
+     "subtitle": "cwd",
+     "summary": "waiting=0,working=0,idle=1",
+     "title": "작업 완료"
+    }
+   },
+   "input": {
+    "hook_event_name": "Stop",
+    "last_assistant_message": "로그인 화면을 고쳤습니다. 시험도 통과합니다.",
+    "session_id": "sess-1"
+   },
+   "kind": "stop",
+   "name": "cwd 가 없으면 현재 폴더의 이름"
+  },
+  {
+   "expect": {
+    "panel": {
+     "body": "로그인 화면을 고쳤습니다.",
+     "duration": "10",
+     "kind": "done",
+     "position": "center",
+     "session": "sess-1",
+     "subtitle": "",
+     "summary": "waiting=0,working=0,idle=1",
+     "title": "작업 완료"
+    }
+   },
+   "input": {
+    "cwd": "/w/repo/",
+    "hook_event_name": "Stop",
+    "last_assistant_message": "로그인 화면을 고쳤습니다. 시험도 통과합니다.",
+    "session_id": "sess-1",
+    "transcript_path": "@DIR/t/main.jsonl"
+   },
+   "kind": "stop",
+   "name": "cwd 가 / 로 끝나면 빈 이름"
+  },
+  {
+   "expect": {
+    "panel": {
+     "body": "요약 굵게 항목 code 입니다!",
+     "duration": "10",
+     "kind": "done",
+     "position": "center",
+     "session": "sess-1",
+     "subtitle": "repo",
+     "summary": "waiting=0,working=0,idle=1",
+     "title": "작업 완료"
+    }
+   },
+   "input": {
+    "cwd": "/w/repo",
+    "hook_event_name": "Stop",
+    "last_assistant_message": "## 요약\n\n```rust\nfn main() {}\n```\n- **굵게** 항목 `code` 입니다! 다음\n1. 둘째 줄\n| 표 | 칸 |",
+    "session_id": "sess-1",
+    "transcript_path": "@DIR/t/main.jsonl"
+   },
+   "kind": "stop",
+   "name": "본문 다듬기: 코드 블록·인라인 코드·굵게·줄머리 기호를 덜고 첫 문장"
+  },
+  {
+   "expect": {
+    "panel": {
+     "body": "가나다라마바사아자차 가나다라마바사아자차 가나다라마바사아자차 가나다라마바사아자차 가나다라마바사아자차 가나다라마바사아자차 가나다라마바사아자차 가나다라마바사아자차 가나다라마바사아자차 가나다라마바사아자차 가나다라마바사아자차 가나다라마바사아자차 가나다라마바사…",
+     "duration": "10",
+     "kind": "done",
+     "position": "center",
+     "session": "sess-1",
+     "subtitle": "repo",
+     "summary": "waiting=0,working=0,idle=1",
+     "title": "작업 완료"
+    }
+   },
+   "input": {
+    "cwd": "/w/repo",
+    "hook_event_name": "Stop",
+    "last_assistant_message": "가나다라마바사아자차 가나다라마바사아자차 가나다라마바사아자차 가나다라마바사아자차 가나다라마바사아자차 가나다라마바사아자차 가나다라마바사아자차 가나다라마바사아자차 가나다라마바사아자차 가나다라마바사아자차 가나다라마바사아자차 가나다라마바사아자차 가나다라마바사아자차 가나다라마바사아자차 가나다라마바사아자차 가나다라마바사아자차 ",
+    "session_id": "sess-1",
+    "transcript_path": "@DIR/t/main.jsonl"
+   },
+   "kind": "stop",
+   "name": "본문 다듬기: 140자를 넘으면 139자 + …, 문장 끝이 없으면 전부"
+  },
+  {
+   "expect": {
+    "panel": {
+     "body": "v1.2.3 버전을 올렸습니다.",
+     "duration": "10",
+     "kind": "done",
+     "position": "center",
+     "session": "sess-1",
+     "subtitle": "repo",
+     "summary": "waiting=0,working=0,idle=1",
+     "title": "작업 완료"
+    }
+   },
+   "input": {
+    "cwd": "/w/repo",
+    "hook_event_name": "Stop",
+    "last_assistant_message": "v1.2.3 버전을 올렸습니다. 확인해 주세요.",
+    "session_id": "sess-1",
+    "transcript_path": "@DIR/t/main.jsonl"
+   },
+   "kind": "stop",
+   "name": "첫 문장: 버전 번호의 점은 문장 끝이 아니다"
+  },
+  {
+   "expect": {
+    "panel": {
+     "body": "이 파일을 지울까요?",
+     "duration": "10",
+     "kind": "wait",
+     "position": "center",
+     "session": "sess-1",
+     "subtitle": "repo",
+     "summary": "waiting=1,working=0,idle=0",
+     "title": "승인 대기"
+    }
+   },
+   "input": {
+    "cwd": "/w/repo",
+    "hook_event_name": "Notification",
+    "message": "이 파일을 지울까요? 되돌릴 수 없습니다。끝",
+    "notification_type": "permission_prompt",
+    "session_id": "sess-1",
+    "transcript_path": "@DIR/t/main.jsonl"
+   },
+   "kind": "notification",
+   "name": "첫 문장: 。·? 로도 끊는다"
+  },
+  {
+   "expect": {
+    "panel": null
+   },
+   "input": {
+    "cwd": "/w/repo",
+    "hook_event_name": "Stop",
+    "last_assistant_message": "로그인 화면을 고쳤습니다. 시험도 통과합니다.",
+    "session_id": "sess-1",
+    "transcript_path": "@DIR/t/main.jsonl"
+   },
+   "kind": "stop",
+   "name": "패널 실행 파일이 없으면 띄우지 않는다",
+   "panel_app": false
+  }
+ ]
+}

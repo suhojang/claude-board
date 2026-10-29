@@ -1,0 +1,224 @@
+{
+  "source": "state.py track_subagent (3.2.0) 로 만든 기대값 — gen-started-seen.py",
+  "steps": [
+    {
+      "input": {
+        "session_id": "s",
+        "hook_event_name": "SubagentStart",
+        "agent_id": "seen",
+        "agent_type": "Explore"
+      },
+      "state": "working",
+      "now": 100.0,
+      "subagents": {
+        "seen": {
+          "type": "Explore",
+          "started": 100.0,
+          "state": "running",
+          "started_seen": true,
+          "updated": 100.0
+        }
+      }
+    },
+    {
+      "input": {
+        "session_id": "s",
+        "hook_event_name": "PreToolUse",
+        "agent_id": "seen",
+        "agent_type": "Explore",
+        "tool_name": "Bash"
+      },
+      "state": "working",
+      "now": 110.0,
+      "subagents": {
+        "seen": {
+          "type": "Explore",
+          "started": 100.0,
+          "state": "running",
+          "started_seen": true,
+          "updated": 110.0,
+          "tool": "Bash"
+        }
+      }
+    },
+    {
+      "input": {
+        "session_id": "s",
+        "hook_event_name": "SubagentStop",
+        "agent_id": "seen",
+        "agent_type": "Explore"
+      },
+      "state": "working",
+      "now": 120.0,
+      "subagents": {
+        "seen": {
+          "type": "Explore",
+          "started": 100.0,
+          "state": "done",
+          "started_seen": true,
+          "updated": 120.0,
+          "tool": "Bash",
+          "ended": 120.0
+        }
+      }
+    },
+    {
+      "input": {
+        "session_id": "s",
+        "hook_event_name": "SubagentStop",
+        "agent_id": "orphan_stop",
+        "agent_type": "Explore"
+      },
+      "state": "working",
+      "now": 130.0,
+      "subagents": {
+        "seen": {
+          "type": "Explore",
+          "started": 100.0,
+          "state": "done",
+          "started_seen": true,
+          "updated": 120.0,
+          "tool": "Bash",
+          "ended": 120.0
+        },
+        "orphan_stop": {
+          "type": "Explore",
+          "started": 130.0,
+          "state": "done",
+          "started_seen": false,
+          "ended": 130.0,
+          "updated": 130.0
+        }
+      }
+    },
+    {
+      "input": {
+        "session_id": "s",
+        "hook_event_name": "PreToolUse",
+        "agent_id": "orphan_tool",
+        "agent_type": "Explore",
+        "tool_name": "Read"
+      },
+      "state": "working",
+      "now": 131.0,
+      "subagents": {
+        "seen": {
+          "type": "Explore",
+          "started": 100.0,
+          "state": "done",
+          "started_seen": true,
+          "updated": 120.0,
+          "tool": "Bash",
+          "ended": 120.0
+        },
+        "orphan_stop": {
+          "type": "Explore",
+          "started": 130.0,
+          "state": "done",
+          "started_seen": false,
+          "ended": 130.0,
+          "updated": 130.0
+        },
+        "orphan_tool": {
+          "type": "Explore",
+          "started": 131.0,
+          "state": "running",
+          "started_seen": false,
+          "tool": "Read",
+          "updated": 131.0
+        }
+      }
+    },
+    {
+      "input": {
+        "session_id": "s",
+        "hook_event_name": "PermissionRequest",
+        "agent_id": "orphan_perm",
+        "agent_type": "Explore",
+        "tool_name": "Bash"
+      },
+      "state": "waiting",
+      "now": 132.0,
+      "subagents": {
+        "seen": {
+          "type": "Explore",
+          "started": 100.0,
+          "state": "done",
+          "started_seen": true,
+          "updated": 120.0,
+          "tool": "Bash",
+          "ended": 120.0
+        },
+        "orphan_stop": {
+          "type": "Explore",
+          "started": 130.0,
+          "state": "done",
+          "started_seen": false,
+          "ended": 130.0,
+          "updated": 130.0
+        },
+        "orphan_tool": {
+          "type": "Explore",
+          "started": 131.0,
+          "state": "running",
+          "started_seen": false,
+          "tool": "Read",
+          "updated": 131.0
+        },
+        "orphan_perm": {
+          "type": "Explore",
+          "started": 132.0,
+          "state": "waiting",
+          "started_seen": false,
+          "tool": "Bash",
+          "updated": 132.0
+        }
+      }
+    },
+    {
+      "input": {
+        "session_id": "s",
+        "hook_event_name": "SubagentStart",
+        "agent_id": "orphan_tool",
+        "agent_type": "Explore"
+      },
+      "state": "working",
+      "now": 140.0,
+      "subagents": {
+        "seen": {
+          "type": "Explore",
+          "started": 100.0,
+          "state": "done",
+          "started_seen": true,
+          "updated": 120.0,
+          "tool": "Bash",
+          "ended": 120.0
+        },
+        "orphan_stop": {
+          "type": "Explore",
+          "started": 130.0,
+          "state": "done",
+          "started_seen": false,
+          "ended": 130.0,
+          "updated": 130.0
+        },
+        "orphan_tool": {
+          "type": "Explore",
+          "started": 140.0,
+          "state": "running",
+          "started_seen": true,
+          "tool": "Read",
+          "updated": 140.0
+        },
+        "orphan_perm": {
+          "type": "Explore",
+          "started": 132.0,
+          "state": "waiting",
+          "started_seen": false,
+          "tool": "Bash",
+          "updated": 132.0
+        }
+      }
+    }
+  ]
+}

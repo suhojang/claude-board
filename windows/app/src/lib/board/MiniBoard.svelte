@@ -1,10 +1,12 @@
 <script lang="ts">
-  // 미니 화면(ClaudeBoard.swift:4372-4460) — 캐릭터 줄, 경로마다 한 줄(상태 · 이름 · 지금 하는 일), 아래 줄에 사용 한도와 투명도.
-  // 한 줄을 누르면 대표 세션의 터미널 앱을, 두 번 누르면 그 세션의 터미널 창을 앞으로
+  // 미니 화면(ClaudeBoard.swift MiniBoard) — 캐릭터 줄, 경로마다 한 줄(상태 · 이름 · 지금 하는 일), 아래 줄에 사용 한도와 투명도.
+  // 한 줄을 누르면 대표 세션의 터미널 앱을, 두 번 누르면 그 세션의 터미널 창을 앞으로(보드 탭 세션이면 그 탭, 터미널 없는 세션이면 안내)
+  import { onDestroy } from "svelte";
   import { flip } from "svelte/animate";
   import type { Group, Snapshot } from "$lib/types";
   import Foreman from "$lib/mascot/Foreman.svelte";
-  import { sessionAction, setMascot } from "$lib/backend";
+  import { setMascot } from "$lib/backend";
+  import { createRowClick, type RowClick } from "$lib/terminal/sessionFlow.svelte";
   import CompactLimit from "./CompactLimit.svelte";
   import Fit from "./Fit.svelte";
   import KindLabel from "./KindLabel.svelte";
@@ -25,11 +27,30 @@
     return { busy, top, first, live };
   }
 
-  function click(e: MouseEvent, g: Group) {
-    const { live } = rowInfo(g);
-    if (!live) return;
-    sessionAction(e.detail >= 2 ? "focus" : "activate", live.id);
+  // 경로 줄마다 클릭 처리기 하나 — 다른 터미널의 한 번 클릭을 미루는 타이머가 줄마다 따로 돈다
+  const clickers = new Map<string, RowClick>();
+  function clickerOf(g: Group): RowClick {
+    let clicker = clickers.get(g.id);
+    if (!clicker) {
+      const group = g.id;
+      clicker = createRowClick(() => {
+        const current = snap.groups.find((x) => x.id === group);
+        return current && rowInfo(current).live;
+      });
+      clickers.set(g.id, clicker);
+    }
+    return clicker;
   }
+  // 사라진 경로 줄의 처리기는 타이머째 치운다
+  $effect(() => {
+    const live = new Set(snap.groups.map((g) => g.id));
+    for (const [id, clicker] of clickers) {
+      if (live.has(id)) continue;
+      clicker.dispose();
+      clickers.delete(id);
+    }
+  });
+  onDestroy(() => clickers.forEach((clicker) => clicker.dispose()));
 </script>
 
 <div class="mini">
@@ -49,9 +70,9 @@
           role="button"
           tabindex="-1"
           animate:flip={{ duration: 400 }}
-          onclick={(e) => click(e, g)}
+          onclick={(e) => clickerOf(g).click(e)}
           onkeydown={() => {}}
-          use:hint={r.live ? `${g.path} — 눌러서 터미널 앱, 두 번 눌러서 그 세션으로 이동` : g.path}
+          use:hint={r.live ? `${g.path} · 눌러서 터미널 앱, 두 번 눌러서 그 세션으로 이동` : g.path}
         >
           <StateIcon state={u} scale={0.8} />
           <span class="name">{g.name}</span>

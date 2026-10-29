@@ -26,7 +26,7 @@
         "maximizable": false,
         "decorations": false,
         "transparent": true,
-        "shadow": true,
+        "shadow": false,
         "visible": false
       }
     ],
@@ -43,6 +43,14 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "resources": {
+      "../../../plugins/md-render/LICENSE": "plugins/md-render/LICENSE",
+      "../../../plugins/md-render/README.md": "plugins/md-render/README.md",
+      "../../../plugins/md-render/.claude-plugin/plugin.json": "plugins/md-render/.claude-plugin/plugin.json",
+      "../../../plugins/md-render/hooks/hooks.json": "plugins/md-render/hooks/hooks.json",
+      "../../../plugins/md-render/hooks/register.tsx": "plugins/md-render/hooks/register.tsx",
+      "../../packaging/THIRD_PARTY_NOTICES.txt": "THIRD_PARTY_NOTICES.txt"
+    }
   }
 }

@@ -17,6 +17,12 @@ pub fn take_chars(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
 }
 
+/// 앞의 UTF-8 BOM(EF BB BF) 한 개를 뗀다. 가운데·뒤의 BOM 바이트는 건드리지 않는다.
+/// Windows 전용 관용이다 — PowerShell 5.1 의 `|` 등이 stdin 앞에 BOM 을 붙이는데 python 의 `json.load` 는 BOM 을 거부한다.
+pub fn strip_utf8_bom(b: &[u8]) -> &[u8] {
+    b.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(b)
+}
+
 /// Python 참·거짓 — None·null·false·0·빈 문자열·빈 목록·빈 객체는 거짓.
 pub fn truthy(v: Option<&Value>) -> bool {
     match v {
@@ -50,6 +56,19 @@ mod tests {
     fn take_counts_code_points() {
         assert_eq!(take_chars("가나다라", 2), "가나");
         assert_eq!(take_chars("ab", 5), "ab");
+    }
+
+    #[test]
+    fn bom_is_stripped_only_at_the_front() {
+        assert_eq!(strip_utf8_bom(b"\xEF\xBB\xBF{\"a\":1}"), b"{\"a\":1}");
+        assert_eq!(strip_utf8_bom(b"{\"a\":1}"), b"{\"a\":1}");
+        assert_eq!(strip_utf8_bom(b""), b"");
+        assert_eq!(strip_utf8_bom(b"\xEF\xBB\xBF"), b"");
+        // 가운데의 BOM 은 그대로, 앞의 것은 한 개만
+        assert_eq!(strip_utf8_bom(b"a\xEF\xBB\xBFb"), b"a\xEF\xBB\xBFb");
+        assert_eq!(strip_utf8_bom(b"\xEF\xBB\xBF\xEF\xBB\xBFx"), b"\xEF\xBB\xBFx");
+        // 일부만 맞는 앞머리는 BOM 이 아니다
+        assert_eq!(strip_utf8_bom(b"\xEF\xBB{"), b"\xEF\xBB{");
     }
 
     #[test]
