@@ -788,23 +788,41 @@ func gitPlaceIn(_ d: String) -> String? {
 // (HEAD·refs·objects 는 보지 않는다 — 커밋마다 바뀐다). .git 이 파일·링크면 그 글·대상.
 // 깊이 상한 없이 모든 폴더를 이름만 보며 훑고(링크는 따라가지 않음), 뿌리의 .git 과 다른 저장소 뿌리는 건너뛴다. 항목·시간 상한에 닿거나
 // 읽지 못한 폴더가 있으면 complete=false(놓쳤을 수 있음 — 알림은 "있을 수 있음"으로)
-func gitPlaceDigest(_ p: String) -> String {
+// 모델이 쓸 수 있는 자리의 파일 하나를 샌드박스 밖에서 볼 때의 표지(5-4 보안 검토 넷째): readHarnessFile 처럼 lstat 으로 보통 파일이고 1 MiB 아래일 때만
+// O_NOFOLLOW|O_NONBLOCK 으로 열어 상한까지 읽어 해시한다. 링크는 가리키는 글, FIFO·장치·소켓은 종류만, 큰 파일은 크기만(엔진이 멈추거나 메모리를 다 쓰지 않게)
+func fileMark(_ p: String) -> String {
+    switch readHarnessFile(p, budget: harnessFileCap) {
+    case .data(let d)?: return "file:" + sha256(d)
+    case .large(let n)?: return "large:\(n)"
+    case .other(let k)?: return k
+    case nil: return "-"
+    }
+}
+// 모델이 쓸 수 있는 자리의 파일(결과 기록 등)을 엔진이 읽을 때 — 보통 파일이고 상한 아래일 때만 내용, 아니면 nil
+func modelFileData(_ p: String) -> Data? {
+    if case .data(let d)? = readHarnessFile(p, budget: harnessFileCap) { return d }
+    return nil
+}
+// git 꼴 자리 하나의 지문과 본 파일 수(훑기 상한에 센다). 폴더가 아니면(.git 파일·링크·FIFO 등) 그 표지 하나
+func gitPlaceDigest(_ p: String) -> (digest: String, cost: Int) {
     var st = stat()
-    guard lstat(p, &st) == 0 else { return "none" }
-    switch st.st_mode & S_IFMT {
-    case S_IFLNK: return "link:" + ((try? fm.destinationOfSymbolicLink(atPath: p)) ?? "?")
-    case S_IFREG: return "file:" + sha256(fm.contents(atPath: p) ?? Data())
-    case S_IFDIR: break
-    default: return "other"
-    }
-    var lines: [String] = []
+    guard lstat(p, &st) == 0 else { return ("none", 1) }
+    guard st.st_mode & S_IFMT == S_IFDIR else { return (fileMark(p), 1) }
+    var lines: [String] = [], cost = 0
     for f in ["config", "config.worktree", "info/attributes", "commondir", "gitdir", "objects/info/alternates"] {
-        lines.append(f + "\t" + (fm.contents(atPath: p + "/" + f).map(sha256) ?? "-"))
+        lines.append(f + "\t" + fileMark(p + "/" + f)); cost += 1
     }
-    for h in ((try? fm.contentsOfDirectory(atPath: p + "/hooks")) ?? []).sorted() {
-        lines.append("hooks/" + h + "\t" + (fm.contents(atPath: p + "/hooks/" + h).map(sha256) ?? "?"))
+    var hs = stat()
+    if lstat(p + "/hooks", &hs) == 0 {
+        if hs.st_mode & S_IFMT == S_IFDIR {
+            let names = ((try? fm.contentsOfDirectory(atPath: p + "/hooks")) ?? []).sorted()
+            for h in names.prefix(256) { lines.append("hooks/" + h + "\t" + fileMark(p + "/hooks/" + h)); cost += 1 }
+            if names.count > 256 { lines.append("hooks/…\t\(names.count)") }
+        } else {
+            lines.append("hooks\t" + fileMark(p + "/hooks")); cost += 1
+        }
     }
-    return "dir:" + sha256(Data(lines.joined(separator: "\n").utf8))
+    return ("dir:" + sha256(Data(lines.joined(separator: "\n").utf8)), cost)
 }
 func gitPlaces(_ roots: [String], maxEntries: Int = 2_000_000, maxSec: Double = 30) -> (places: [String: String], complete: Bool, why: String?) {
     var out: [String: String] = [:], n = 0
@@ -820,14 +838,14 @@ func gitPlaces(_ roots: [String], maxEntries: Int = 2_000_000, maxSec: Double = 
             if n % 4096 == 0, Date().timeIntervalSince(t0) > maxSec { return (out, false, "\(Int(maxSec))초 안에 다 훑지 못해") }
             let full = url.path, name = url.lastPathComponent
             if name == ".git" {
-                if full != base + "/.git" { out[full] = gitPlaceDigest(full) }
+                if full != base + "/.git" { let g = gitPlaceDigest(full); out[full] = g.digest; n += g.cost }
                 en.skipDescendants()
             } else if others.contains(full) {
                 en.skipDescendants()
             } else if name == "HEAD" {
                 let d = (full as NSString).deletingLastPathComponent
                 if d != base, !d.hasSuffix("/.git"), (isDir(d + "/objects") && isDir(d + "/refs")) || fm.fileExists(atPath: d + "/commondir") {
-                    out[d] = gitPlaceDigest(d)
+                    let g = gitPlaceDigest(d); out[d] = g.digest; n += g.cost
                 }
             }
         }
@@ -1272,7 +1290,7 @@ extension RecordsDB {
         var eng: [Int: [String: Any]] = [:], resText: [Int: String] = [:]
         for i in q.indices {
             if let e = readJSON(dir + "/units/\(i + 1)/engine.json") as? [String: Any] { eng[i + 1] = e }
-            if let d = fm.contents(atPath: dir + "/units/\(i + 1)/result.json") { resText[i + 1] = String(decoding: d, as: UTF8.self) }
+            if let d = modelFileData(dir + "/units/\(i + 1)/result.json") { resText[i + 1] = String(decoding: d, as: UTF8.self) }
         }
         if let project {
             let cwds = q.indices.compactMap { def($0)["cwd"] as? String }
@@ -2012,9 +2030,18 @@ final class Engine {
     // 작업 트리 안 git 꼴 자리를 출발 때 집합(branches.git_places)과 견주어 새로 생기거나 설정이 바뀐 것을 알린다(알림용 받침, gitPlaces 의 주석).
     // 찾은 것은 branches.git_places_changed 에 쌓고(같은 자리·같은 지문은 한 번), 훑기를 다 하지 못하면 branches.git_places_scan 에 적고 알린다
     func checkGitPlaces(_ when: String) {
-        guard let base = br["git_places"] as? [String: String], !repos.isEmpty else { return }
+        guard !repos.isEmpty else { return }
         let scan = gitPlaces(repos.map(wt))
         var b = br
+        guard let base = b["git_places"] as? [String: String] else {
+            // 출발 때 기록이 없다(이 고침 전에 출발한 실행을 이어 감 등) — 지금 상태를 기준으로 잡고, 그 앞의 변화는 볼 수 없다고 남긴다
+            b["git_places"] = scan.places
+            b["git_places_late"] = when
+            b["git_places_scan"] = ["complete": false, "why": "출발 때 기록 없음, \(when)부터 봄" + (scan.complete ? "" : " · \(scan.why ?? "")"), "when": when] as [String: Any]
+            br = b; saveRun()
+            event("engine", "보안: 출발 때 작업 트리의 git 자리 기록이 없어 \(when)의 상태를 기준으로 잡았습니다. 그 앞에 생기거나 바뀐 git 자리는 알릴 수 없습니다.")
+            return
+        }
         var seen = b["git_places_changed"] as? [[String: Any]] ?? []
         var found: [String] = []
         for (p, d) in scan.places.sorted(by: { $0.key < $1.key }) where base[p] != d {
@@ -2024,12 +2051,15 @@ final class Engine {
         }
         b["git_places_changed"] = seen
         let last = b["git_places_scan"] as? [String: Any]
-        b["git_places_scan"] = ["complete": scan.complete, "why": scan.why ?? NSNull(), "when": when] as [String: Any]
+        // 기준을 늦게 잡았으면(출발 때 기록 없음) 그 뒤 훑기도 다 본 것이 아니다 — 까닭을 늘 함께 남긴다
+        let late = (b["git_places_late"] as? String).map { "출발 때 기록 없음, \($0)부터 봄" }
+        let why = [late, scan.why].compactMap { $0 }.joined(separator: " · ")
+        b["git_places_scan"] = ["complete": scan.complete && late == nil, "why": why.isEmpty ? NSNull() : why, "when": when] as [String: Any]
         br = b; saveRun()
         if !found.isEmpty {
             event("engine", "보안: \(when) 작업 트리 안에 출발 때 없던(또는 설정이 바뀐) git 자리 \(found.count)곳이 있습니다(\(found.prefix(3).joined(separator: ", "))\(found.count > 3 ? " 등" : "")). 지우지 않았습니다. 그 폴더에서 git 을 돌리기 전에 사람이 확인하세요.")
         }
-        if !scan.complete, (last?["complete"] as? Bool ?? true) || (last?["why"] as? String) != scan.why {
+        if !scan.complete, (last?["complete"] as? Bool ?? true) || (last?["why"] as? String) != why {
             event("engine", "보안: \(when) 작업 트리를 다 훑지 못했습니다(\(scan.why ?? "?")). 출발 때 없던 git 자리가 있을 수 있는 것으로 봅니다. 그 작업 트리의 하위 폴더에서 git 을 돌리기 전에 사람이 확인하세요.")
         }
     }
@@ -2490,7 +2520,8 @@ final class Engine {
                 u["git"] = ["note": "작업 폴더가 git 저장소가 아니라 git 기록이 없습니다"]
             }
         }
-        let ok = readJSON(unitDir(n) + "/result.json") is [String: Any]
+        // 결과 기록은 모델이 쓰는 자리라 FIFO·큰 파일이어도 엔진이 멈추지 않게 읽는다(5-4 보안)
+        let ok = modelFileData(unitDir(n) + "/result.json").flatMap { try? JSONSerialization.jsonObject(with: $0) } is [String: Any]
         u["result_ok"] = ok
         if let task = def(n)["branch"] as? String { u["branch"] = task }
         saveUnit(n, u)
@@ -3794,7 +3825,7 @@ func sourceDigest(_ p: String) -> String {
     for u in units { names += ["units/\(u)/engine.json", "units/\(u)/result.json"] }
     var d = Data()
     for n in names {
-        guard let c = fm.contents(atPath: p + "/" + n) else { continue }
+        guard let c = n.hasSuffix("result.json") ? modelFileData(p + "/" + n) : fm.contents(atPath: p + "/" + n) else { continue }
         d.append(Data((n + "\u{0}").utf8)); d.append(Data(sha256(c).utf8)); d.append(0x0a)
     }
     return sha256(d)
