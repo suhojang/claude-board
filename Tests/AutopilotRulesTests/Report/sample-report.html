@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
+<meta name="generator" content="Claude Board 자율주행 보고서 틀 1">
+<title>자율주행 보고서: todo-api 마감일 묶음</title>
+<style>
+:root{color-scheme:light dark;--bg:#f6f7f8;--card:#ffffff;--fg:#1f2328;--muted:#57606a;--line:#d8dee4;--soft:#eef1f4;--code:#f1f3f5;--accent:#0b62d6;--ok:#1a7f37;--ok-bg:#dcf5e3;--fail:#c4252f;--fail-bg:#ffe9e8;--cap:#8a5a00;--cap-bg:#fff3c4;--run:#0b62d6;--run-bg:#e2edff;--chip:#e9edf1;--note:#fff6cc;--note-line:#c9a227;--frame:#8c959f;--tag:#e9edf1}
+@media (prefers-color-scheme:dark){:root{--bg:#101215;--card:#181b20;--fg:#e6edf3;--muted:#9aa4af;--line:#30363d;--soft:#20252c;--code:#1c2027;--accent:#6aa8ff;--ok:#56d37f;--ok-bg:#132a1b;--fail:#ff8078;--fail-bg:#311719;--cap:#e3a93a;--cap-bg:#2e2410;--run:#6aa8ff;--run-bg:#14243d;--chip:#232830;--note:#2d2712;--note-line:#8f7425;--frame:#76808b;--tag:#232830}}
+*{box-sizing:border-box}
+html{background:var(--bg)}
+body{margin:0 auto;max-width:960px;padding:24px 16px 40px;background:var(--bg);color:var(--fg);font:14px/1.6 -apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Malgun Gothic","Segoe UI",sans-serif;word-break:keep-all;overflow-wrap:anywhere}
+header,nav,section{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px 20px;margin:0 0 14px}
+h1{font-size:21px;line-height:1.35;margin:2px 0 4px}
+h2{font-size:16.5px;line-height:1.4;margin:0 0 4px}
+h3{font-size:12.5px;color:var(--muted);font-weight:600;margin:16px 0 4px}h3.top{margin-top:0}
+p{margin:4px 0}
+.mark{color:var(--muted);font-size:12px;margin:0}
+.meta{color:var(--muted);font-size:12.5px}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0 4px}
+.chip{display:inline-block;padding:1px 9px;border-radius:999px;font-size:12px;line-height:1.7;background:var(--chip);white-space:nowrap}
+.chip.ok{background:var(--ok-bg);color:var(--ok)}.chip.fail{background:var(--fail-bg);color:var(--fail)}
+.chip.cap{background:var(--cap-bg);color:var(--cap)}.chip.run{background:var(--run-bg);color:var(--run)}
+dl{display:grid;grid-template-columns:max-content 1fr;gap:3px 14px;margin:10px 0 0;font-size:13px}
+dt{color:var(--muted)}dd{margin:0}
+nav ol{margin:4px 0 0;padding-left:24px}nav li{margin:2px 0}
+a{color:var(--accent)}nav a{text-decoration:none}
+.headline{font-size:15px;font-weight:600;margin:10px 0 2px}
+ul{margin:4px 0;padding-left:20px}li{margin:2px 0}
+ul.risk li::marker{color:var(--cap)}
+table{border-collapse:collapse;width:100%;font-size:13px;margin:2px 0}
+th,td{border-bottom:1px solid var(--line);padding:5px 8px;text-align:left;vertical-align:top}
+th{color:var(--muted);font-weight:600}
+code,pre{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
+code{background:var(--code);border-radius:5px;padding:1px 5px}
+pre{background:var(--code);border-radius:8px;padding:10px 12px;margin:6px 0;overflow:auto;white-space:pre-wrap}
+details{margin:6px 0}summary{color:var(--muted);font-size:12.5px;cursor:pointer}
+figure{margin:8px 0 12px}figcaption{color:var(--muted);font-size:12.5px;margin:0 0 4px}
+.pic{overflow-x:auto;border:1px solid var(--line);border-radius:8px;padding:8px;background:var(--bg)}
+.pic svg{display:block;max-width:none}.pic svg.tl{width:100%;height:auto}
+svg text{font-family:-apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Malgun Gothic","Segoe UI",sans-serif}
+.sq .pb{fill:var(--soft);stroke:var(--frame)}.sq .pt{fill:var(--fg);font-size:13px}
+.sq .ll{stroke:var(--frame);stroke-dasharray:3 4}
+.sq .ml{stroke:var(--fg);stroke-width:1.3;fill:none}.sq .ml.d{stroke-dasharray:5 4}
+.sq .ah{fill:var(--fg)}.sq .mt{fill:var(--fg);font-size:12.5px}
+.sq .nb{fill:var(--note);stroke:var(--note-line)}.sq .nt{fill:var(--fg);font-size:12.5px}
+.sq .fr{fill:none;stroke:var(--frame)}.sq .fr.rc{fill:var(--soft);fill-opacity:.5;stroke-dasharray:2 3}
+.sq .ft{fill:var(--tag);stroke:var(--frame)}.sq .fl{fill:var(--fg);font-size:11.5px;font-weight:600}
+.sq .fc{fill:var(--muted);font-size:11.5px}.sq .fs{stroke:var(--frame);stroke-dasharray:4 3}
+.tl .ax{stroke:var(--line)}.tl .lb{fill:var(--muted);font-size:11px}.tl .bar{fill:var(--frame)}
+.tl .ok{fill:var(--ok)}.tl .fail{fill:var(--fail)}.tl .cap{fill:var(--cap)}.tl .run{fill:var(--run)}
+.empty{color:var(--muted)}
+footer{color:var(--muted);font-size:12px;margin:16px 4px 0}
+@media (max-width:560px){header,nav,section{padding:14px}dl{grid-template-columns:1fr}dt{margin-top:6px}}
+</style>
+</head>
+<body>
+<header>
+<p class="mark">자율주행 보고서</p>
+<h1>todo-api 마감일 묶음</h1>
+<p class="meta">todo-api · 2026년 10월 30일 09:00 ~ 10월 30일 12:05 · 모델 sonnet · 실행 <code>20261030-0900-todo-api</code></p>
+<div class="chips"><span class="chip ok">끝남</span><span class="chip">4개 중 1개 통과</span><span class="chip fail">미통과 1</span><span class="chip cap">상한에서 멈춤 1</span><span class="chip">건너뜀 1</span></div>
+<p>대기열의 단위를 모두 마쳤습니다.</p>
+<dl>
+<dt>걸린 시간</dt><dd>3시간 5분</dd>
+<dt>일한 시간</dt><dd>1시간 44분 (단위 시계 합, 대기·일시정지 뺌)</dd>
+<dt>비용</dt><dd>3.41 USD</dd>
+<dt>어디서</dt><dd>따로 작업 트리 · 저장소 <code>todo-api</code></dd>
+<dt>자율주행 가지</dt><dd><code>autopilot/20261030-0900-todo-api</code> (출발 todo-api: live)</dd>
+<dt>하네스</dt><dd>출발 때와 같음 (파일 3개)</dd>
+</dl>
+</header>
+<nav aria-label="단위 차례">
+<h3 class="top">단위</h3>
+<ol>
+<li><a href="#unit-1">할 일에 마감일 칸 더하기</a> <span class="chip ok">통과</span></li>
+<li><a href="#unit-2">마감 지난 할 일 알림</a> <span class="chip fail">미통과</span></li>
+<li><a href="#unit-3">목록 정렬 고침</a> <span class="chip cap">상한에서 멈춤</span></li>
+<li><a href="#unit-4">알림 설정 화면</a> <span class="chip">건너뜀</span></li>
+</ol>
+<figure><figcaption>단위가 돈 때</figcaption><div class="pic"><svg class="tl" viewBox="0 0 640 114" width="640" height="114" role="img" aria-label="단위가 돈 때"><text class="lb" x="0" y="17">단위 1</text><rect class="bar ok" x="73" y="8" width="82" height="12" rx="3"/><text class="lb" x="0" y="37">단위 2</text><rect class="bar fail" x="158" y="28" width="168" height="12" rx="3"/><text class="lb" x="0" y="57">단위 3</text><rect class="bar cap" x="329" y="48" width="98" height="12" rx="3"/><text class="lb" x="0" y="77">단위 4</text><rect class="bar " x="427" y="68" width="3" height="12" rx="3"/><line class="ax" x1="70" y1="90" x2="628" y2="90"/><text class="lb" x="70" y="106">09:00</text><text class="lb" x="628" y="106" text-anchor="end">12:05</text></svg></div></figure>
+</nav>
+<section id="unit-1">
+<h2>단위 1. 할 일에 마감일 칸 더하기 <span class="chip ok">통과</span></h2>
+<p class="meta">개발 · 일한 시간 24분 · 0.82 USD · 턴 14 · 09:01 ~ 09:28</p>
+<p class="headline">할 일마다 마감일을 넣고 고칠 수 있습니다.</p>
+<p class="meta">모델이 적은 결론: 끝냄</p>
+<h3>한 일</h3>
+<ul><li>할 일 표에 마감일 칸을 더했습니다.</li><li>할 일 고치기 API 가 마감일을 받습니다.</li><li>지난 날짜는 400 으로 거부합니다.</li></ul>
+<h3>시험</h3>
+<table><thead><tr><th>시험</th><th>결과</th><th>메모</th></tr></thead><tbody>
+<tr><td>마감일 넣기</td><td><span class="chip ok">통과</span></td><td></td></tr>
+<tr><td>지난 날짜 거부</td><td><span class="chip ok">통과</span></td><td>어제 날짜는 400</td></tr>
+<tr><td>시간대 바뀜</td><td><span class="chip">건너뜀</span></td><td>시험 환경에 시간대가 하나뿐입니다</td></tr>
+</tbody></table>
+<h3>바꾼 것</h3>
+<ul><li>할 일 표에 마감일 칸 <code>src/db/schema.sql</code></li><li>고치기 API 의 마감일 확인 <code>src/routes/todo.ts</code></li></ul>
+<h3>따른 결정</h3>
+<ul><li>마감일은 날짜만 받습니다(시각 없음). <span class="meta">(근거: 출발 카드 답)</span></li></ul>
+<h3>흐름 그림</h3>
+<figure>
+<figcaption>마감일 넣기</figcaption>
+<div class="pic"><svg class="sq" viewBox="-6 0 424 458" width="424" height="458" role="img" aria-label="흐름 그림: 마감일 넣기"><rect class="fr" x="-2" y="158" width="416" height="202" rx="2"/><path class="ft" d="M-2 158h35v12l-6 6h-29z"/><text class="fl" x="4" y="171">alt</text><text class="fc" x="41" y="172">[지난 날짜]</text><line class="fs" x1="-2" y1="220" x2="414" y2="220"/><text class="fc" x="6" y="235">[맞는 날짜]</text><line class="ll" x1="54" y1="44" x2="54" y2="414"/><line class="ll" x1="236" y1="44" x2="236" y2="414"/><line class="ll" x1="358" y1="44" x2="358" y2="414"/><rect class="pb ac" x="12" y="10" width="84" height="34" rx="14"/><text class="pt" x="54" y="30" text-anchor="middle">사용자</text><rect class="pb ac" x="12" y="414" width="84" height="34" rx="14"/><text class="pt" x="54" y="434" text-anchor="middle">사용자</text><rect class="pb" x="194" y="10" width="84" height="34" rx="4"/><text class="pt" x="236" y="30" text-anchor="middle">API</text><rect class="pb" x="194" y="414" width="84" height="34" rx="4"/><text class="pt" x="236" y="434" text-anchor="middle">API</text><rect class="pb" x="316" y="10" width="84" height="34" rx="4"/><text class="pt" x="358" y="30" text-anchor="middle">DB</text><rect class="pb" x="316" y="414" width="84" height="34" rx="4"/><text class="pt" x="358" y="434" text-anchor="middle">DB</text><text class="mt" x="145" y="74" text-anchor="middle">PUT /todos/1 (마감일)</text><line class="ml" x1="54" y1="84" x2="234" y2="84"/><polygon class="ah" points="234,84 225,80 225,89"/><text class="mt" x="246" y="112" text-anchor="start">날짜 확인</text><polyline class="ml" points="236,122 276,122 276,142 238,142"/><polygon class="ah" points="238,142 247,138 247,147"/><text class="mt" x="145" y="194" text-anchor="middle">400 지난 날짜</text><line class="ml d" x1="236" y1="204" x2="56" y2="204"/><polygon class="ah" points="56,204 65,200 65,209"/><text class="mt" x="297" y="256" text-anchor="middle">UPDATE todos</text><line class="ml" x1="236" y1="266" x2="356" y2="266"/><polygon class="ah" points="356,266 347,262 347,271"/><text class="mt" x="297" y="294" text-anchor="middle">1줄 바뀜</text><line class="ml d" x1="358" y1="304" x2="238" y2="304"/><polygon class="ah" points="238,304 247,300 247,309"/><text class="mt" x="145" y="332" text-anchor="middle">200 바뀐 할 일</text><line class="ml d" x1="236" y1="342" x2="56" y2="342"/><polygon class="ah" points="56,342 65,338 65,347"/><rect class="nb" x="216" y="370" width="162" height="26" rx="3"/><text class="nt" x="297" y="385" text-anchor="middle">한 트랜잭션</text></svg></div>
+<details><summary>원문 보기</summary><pre>sequenceDiagram
+    actor U as 사용자
+    participant A as API
+    participant D as DB
+    U-&gt;&gt;A: PUT /todos/1 (마감일)
+    A-&gt;&gt;A: 날짜 확인
+    alt 지난 날짜
+        A--&gt;&gt;U: 400 지난 날짜
+    else 맞는 날짜
+        A-&gt;&gt;D: UPDATE todos
+        D--&gt;&gt;A: 1줄 바뀜
+        A--&gt;&gt;U: 200 바뀐 할 일
+    end
+    Note over A,D: 한 트랜잭션</pre></details>
+</figure>
+<h3>알아 둘 위험</h3>
+<ul class="risk"><li>옛 할 일은 마감일이 비어 있습니다.</li></ul>
+<h3>새로 찾은 일(다음 출발 대기열 후보)</h3>
+<ul><li>마감일로 거르기: 목록 화면에서 자주 쓸 것 같습니다</li></ul>
+<h3>다음에 할 일</h3>
+<p>마감 지난 할 일 알림을 이어서 합니다.</p>
+<h3>참고</h3>
+<ul><li>commit: a1b2c3d</li><li>jira: TODO-1</li><li>ssot: <a href="https://example.com/todo-api/spec#due" rel="noopener noreferrer">https://example.com/todo-api/spec#due</a></li></ul>
+<h3>판정</h3>
+<ul><li>1번째: 통과(종료 코드 0) · 12초</li></ul>
+</section>
+<section id="unit-2">
+<h2>단위 2. 마감 지난 할 일 알림 <span class="chip fail">미통과</span></h2>
+<p class="meta">개발 · 일한 시간 50분 · 1.64 USD · 턴 31 · 09:29 ~ 10:25</p>
+<p class="meta">엔진: 판정을 세 번 했지만 통과하지 못했습니다</p>
+<p class="headline">알림 보내기는 썼지만 시험 하나가 계속 실패합니다.</p>
+<p class="meta">모델이 적은 결론: 끝내지 못함</p>
+<h3>한 일</h3>
+<ul><li>매시 정각에 마감 지난 할 일을 찾습니다.</li><li>찾은 할 일마다 알림을 보냅니다.</li></ul>
+<h3>시험</h3>
+<table><thead><tr><th>시험</th><th>결과</th><th>메모</th></tr></thead><tbody>
+<tr><td>알림 보내기</td><td><span class="chip fail">실패</span></td><td>메일 보내기 흉내가 불리지 않습니다</td></tr>
+</tbody></table>
+<h3>바꾼 것</h3>
+<ul><li>알림 스케줄러 <code>src/jobs/notify.ts</code></li></ul>
+<h3>흐름 그림</h3>
+<figure>
+<figcaption>매시 알림</figcaption>
+<div class="pic"><svg class="sq" viewBox="-6 0 556 300" width="556" height="300" role="img" aria-label="흐름 그림: 매시 알림"><rect class="fr" x="-2" y="62" width="416" height="140" rx="2"/><path class="ft" d="M-2 62h42v12l-6 6h-36z"/><text class="fl" x="4" y="75">loop</text><text class="fc" x="48" y="76">[매시 정각]</text><line class="ll" x1="54" y1="44" x2="54" y2="256"/><line class="ll" x1="238" y1="44" x2="238" y2="256"/><line class="ll" x1="358" y1="44" x2="358" y2="256"/><rect class="pb" x="12" y="10" width="84" height="34" rx="4"/><text class="pt" x="54" y="30" text-anchor="middle">스케줄러</text><rect class="pb" x="12" y="256" width="84" height="34" rx="4"/><text class="pt" x="54" y="276" text-anchor="middle">스케줄러</text><rect class="pb" x="196" y="10" width="84" height="34" rx="4"/><text class="pt" x="238" y="30" text-anchor="middle">API</text><rect class="pb" x="196" y="256" width="84" height="34" rx="4"/><text class="pt" x="238" y="276" text-anchor="middle">API</text><rect class="pb" x="316" y="10" width="84" height="34" rx="4"/><text class="pt" x="358" y="30" text-anchor="middle">메일</text><rect class="pb" x="316" y="256" width="84" height="34" rx="4"/><text class="pt" x="358" y="276" text-anchor="middle">메일</text><text class="mt" x="146" y="98" text-anchor="middle">1. 마감 지난 할 일 찾기</text><line class="ml" x1="54" y1="108" x2="236" y2="108"/><polygon class="ah" points="236,108 227,104 227,113"/><text class="mt" x="146" y="136" text-anchor="middle">2. 할 일 목록</text><line class="ml d" x1="238" y1="146" x2="56" y2="146"/><polygon class="ah" points="56,146 65,142 65,151"/><text class="mt" x="206" y="174" text-anchor="middle">3. 알림 보내기</text><line class="ml" x1="54" y1="184" x2="356" y2="184"/><polyline class="ml" points="347,179 356,184 347,189"/><rect class="nb" x="368" y="212" width="168" height="26" rx="3"/><text class="nt" x="452" y="227" text-anchor="middle">보낼 주소는 정하지 않음</text></svg></div>
+<details><summary>원문 보기</summary><pre>sequenceDiagram
+    autonumber
+    participant S as 스케줄러
+    participant A as API
+    participant M as 메일
+    loop 매시 정각
+        S-&gt;&gt;A: 마감 지난 할 일 찾기
+        A--&gt;&gt;S: 할 일 목록
+        S-)M: 알림 보내기
+    end
+    Note right of M: 보낼 주소는 정하지 않음</pre></details>
+</figure>
+<h3>사람 몫이라 미룬 것(다음 출발 카드)</h3>
+<ul><li>알림 보낼 메일 주소: 운영 값이라 사람이 정합니다</li></ul>
+<h3>다음에 할 일</h3>
+<p>메일 보내기 흉내를 고친 뒤 다시 돌립니다.</p>
+<h3>판정</h3>
+<ul><li>1번째: 종료 코드 1 · 9초</li><li>2번째: 종료 코드 1 · 10초</li><li>3번째: 종료 코드 1 · 9초</li></ul>
+<details><summary>마지막 판정 출력 끝부분</summary><pre>FAIL notify.test.ts
+  알림 보내기
+    expected 1 call, got 0
+
+Tests: 1 failed, 11 passed</pre></details>
+</section>
+<section id="unit-3">
+<h2>단위 3. 목록 정렬 고침 <span class="chip cap">상한에서 멈춤</span></h2>
+<p class="meta">고침 · 일한 시간 30분 · 0.95 USD · 턴 22 · 10:26 ~ 10:58</p>
+<p class="meta">엔진: 단위 시계 상한(30분)에 닿아 멈췄습니다</p>
+<p class="empty">결과 기록이 없습니다(모델이 남기지 않았습니다).</p>
+<h3>허용 범위 밖이라 거부한 일</h3>
+<ul><li>Bash: git push origin live</li></ul>
+</section>
+<section id="unit-4">
+<h2>단위 4. 알림 설정 화면 <span class="chip">건너뜀</span></h2>
+<p class="meta">개발 · 일한 시간 0분 · 0.00 USD · 10:58 ~ 10:58</p>
+<p class="meta">엔진: 기대는 앞 단위(마감 지난 할 일 알림)가 통과하지 않아 건너뜁니다</p>
+<p class="empty">결과 기록이 없습니다(단위를 시작하지 않았습니다).</p>
+</section>
+<footer>Claude Board 가 결과 기록(모델이 씀)과 엔진 기록으로 그렸습니다. 모델을 부르지 않았고, 바깥 글꼴·스크립트·그림 없이 이 파일 하나로 보입니다. 단위의 통과·미통과는 엔진의 판정입니다. 모델 글의 긴 줄표는 쉼표로 바꿔 옮겼습니다. 그린 때 2026년 10월 30일 12:10 · 바탕 실행 폴더.</footer>
+</body>
+</html>

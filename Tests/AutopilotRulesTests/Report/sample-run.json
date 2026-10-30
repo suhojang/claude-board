@@ -1,0 +1,267 @@
+{
+ "id": "20261030-0900-todo-api",
+ "home": "/Users/toy",
+ "at": 1793329800,
+ "run": {
+  "title": "todo-api 마감일 묶음",
+  "project": "todo-api",
+  "model": "sonnet",
+  "state": "done",
+  "reason": "대기열의 단위를 모두 마쳤습니다.",
+  "started": 1793318400,
+  "ended": 1793329500,
+  "worktree": {
+   "mode": "worktree",
+   "repo": "/Users/toy/workspace/todo-api",
+   "path": "/Users/toy/.claude-board/worktrees/20261030-0900-todo-api/todo-api",
+   "branch": "autopilot/20261030-0900-todo-api"
+  },
+  "branches": {
+   "repos": {
+    "/Users/toy/workspace/todo-api": {
+     "base": {
+      "branch": "live",
+      "head": "1111111"
+     },
+     "work": "autopilot/20261030-0900-todo-api"
+    }
+   },
+   "moved": [],
+   "created": [],
+   "stashed": []
+  },
+  "harness": {
+   "files": 3,
+   "same": true,
+   "changed": []
+  }
+ },
+ "queue": [
+  {
+   "id": "due-date",
+   "title": "할 일에 마감일 칸 더하기",
+   "kind": "dev",
+   "status": "done"
+  },
+  {
+   "id": "due-alert",
+   "title": "마감 지난 할 일 알림",
+   "kind": "dev",
+   "status": "failed"
+  },
+  {
+   "id": "sort-fix",
+   "title": "목록 정렬 고침",
+   "kind": "fix",
+   "status": "capped"
+  },
+  {
+   "id": "alert-ui",
+   "title": "알림 설정 화면",
+   "kind": "dev",
+   "status": "skipped",
+   "depends": [
+    "due-alert"
+   ]
+  }
+ ],
+ "engines": {
+  "1": {
+   "status": "done",
+   "reason": "판정 통과",
+   "active_sec": 1460,
+   "cost_usd": 0.82,
+   "turns": 14,
+   "try": 0,
+   "started": 1793318460,
+   "ended": 1793320100,
+   "checks": [
+    {
+     "try": 0,
+     "exit": 0,
+     "sec": 12.4,
+     "tail": "12 passed",
+     "interrupted": false,
+     "timed_out": false
+    }
+   ]
+  },
+  "2": {
+   "status": "failed",
+   "reason": "판정을 세 번 했지만 통과하지 못했습니다",
+   "active_sec": 3010,
+   "cost_usd": 1.64,
+   "turns": 31,
+   "try": 2,
+   "started": 1793320160,
+   "ended": 1793323500,
+   "checks": [
+    {
+     "try": 0,
+     "exit": 1,
+     "sec": 9.8,
+     "tail": "FAIL notify.test.ts",
+     "interrupted": false,
+     "timed_out": false
+    },
+    {
+     "try": 1,
+     "exit": 1,
+     "sec": 10.1,
+     "tail": "FAIL notify.test.ts",
+     "interrupted": false,
+     "timed_out": false
+    },
+    {
+     "try": 2,
+     "exit": 1,
+     "sec": 9.9,
+     "tail": "FAIL notify.test.ts\n  알림 보내기\n    expected 1 call, got 0\n\nTests: 1 failed, 11 passed",
+     "interrupted": false,
+     "timed_out": false
+    }
+   ]
+  },
+  "3": {
+   "status": "capped",
+   "reason": "단위 시계 상한(30분)에 닿아 멈췄습니다",
+   "active_sec": 1800,
+   "cost_usd": 0.95,
+   "turns": 22,
+   "try": 0,
+   "started": 1793323560,
+   "ended": 1793325500,
+   "checks": [],
+   "denials": [
+    {
+     "tool": "Bash",
+     "what": "git push origin live",
+     "ts": 1793324400
+    }
+   ]
+  },
+  "4": {
+   "status": "skipped",
+   "reason": "기대는 앞 단위(마감 지난 할 일 알림)가 통과하지 않아 건너뜁니다",
+   "active_sec": 0,
+   "cost_usd": 0,
+   "turns": 0,
+   "started": 1793325510,
+   "ended": 1793325510,
+   "checks": []
+  }
+ },
+ "results": {
+  "1": {
+   "unit": {
+    "title": "할 일에 마감일 칸 더하기",
+    "kind": "dev",
+    "ref": "TODO-1"
+   },
+   "outcome": "done",
+   "headline": "할 일마다 마감일을 넣고 고칠 수 있습니다.",
+   "risks": [
+    "옛 할 일은 마감일이 비어 있습니다."
+   ],
+   "summary": [
+    "할 일 표에 마감일 칸을 더했습니다.",
+    "할 일 고치기 API 가 마감일을 받습니다.",
+    "지난 날짜는 400 으로 거부합니다."
+   ],
+   "tests": [
+    {
+     "name": "마감일 넣기",
+     "result": "pass",
+     "note": ""
+    },
+    {
+     "name": "지난 날짜 거부",
+     "result": "pass",
+     "note": "어제 날짜는 400"
+    },
+    {
+     "name": "시간대 바뀜",
+     "result": "skip",
+     "note": "시험 환경에 시간대가 하나뿐입니다"
+    }
+   ],
+   "changes": [
+    {
+     "what": "할 일 표에 마감일 칸",
+     "where": "src/db/schema.sql"
+    },
+    {
+     "what": "고치기 API 의 마감일 확인",
+     "where": "src/routes/todo.ts"
+    }
+   ],
+   "decisions_applied": [
+    {
+     "what": "마감일은 날짜만 받습니다(시각 없음).",
+     "basis": "출발 카드 답"
+    }
+   ],
+   "sequence": [
+    {
+     "title": "마감일 넣기",
+     "mermaid": "sequenceDiagram\n    actor U as 사용자\n    participant A as API\n    participant D as DB\n    U->>A: PUT /todos/1 (마감일)\n    A->>A: 날짜 확인\n    alt 지난 날짜\n        A-->>U: 400 지난 날짜\n    else 맞는 날짜\n        A->>D: UPDATE todos\n        D-->>A: 1줄 바뀜\n        A-->>U: 200 바뀐 할 일\n    end\n    Note over A,D: 한 트랜잭션"
+    }
+   ],
+   "next_start": [],
+   "new_work": [
+    {
+     "title": "마감일로 거르기",
+     "why": "목록 화면에서 자주 쓸 것 같습니다"
+    }
+   ],
+   "next": "마감 지난 할 일 알림을 이어서 합니다.",
+   "refs": {
+    "jira": "TODO-1",
+    "ssot": "https://example.com/todo-api/spec#due",
+    "commit": "a1b2c3d"
+   }
+  },
+  "2": {
+   "unit": {
+    "title": "마감 지난 할 일 알림",
+    "kind": "dev"
+   },
+   "outcome": "failed",
+   "headline": "알림 보내기는 썼지만 시험 하나가 계속 실패합니다.",
+   "risks": [],
+   "summary": [
+    "매시 정각에 마감 지난 할 일을 찾습니다.",
+    "찾은 할 일마다 알림을 보냅니다."
+   ],
+   "tests": [
+    {
+     "name": "알림 보내기",
+     "result": "fail",
+     "note": "메일 보내기 흉내가 불리지 않습니다"
+    }
+   ],
+   "changes": [
+    {
+     "what": "알림 스케줄러",
+     "where": "src/jobs/notify.ts"
+    }
+   ],
+   "decisions_applied": [],
+   "sequence": [
+    {
+     "title": "매시 알림",
+     "mermaid": "sequenceDiagram\n    autonumber\n    participant S as 스케줄러\n    participant A as API\n    participant M as 메일\n    loop 매시 정각\n        S->>A: 마감 지난 할 일 찾기\n        A-->>S: 할 일 목록\n        S-)M: 알림 보내기\n    end\n    Note right of M: 보낼 주소는 정하지 않음"
+    }
+   ],
+   "next_start": [
+    {
+     "title": "알림 보낼 메일 주소",
+     "why": "운영 값이라 사람이 정합니다"
+    }
+   ],
+   "new_work": [],
+   "next": "메일 보내기 흉내를 고친 뒤 다시 돌립니다.",
+   "refs": {}
+  }
+ }
+}
