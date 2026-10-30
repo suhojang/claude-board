@@ -3717,7 +3717,8 @@ final class Engine {
         if plain {
             timedOut = !c.wait(limit)
         } else {
-            u["procs"] = ["groups": [["pgid": Int(c.pid), "cmd": argv.joined(separator: " ")]]]
+            // 적는 명령은 감싸지 않은 것(sandbox-exec 는 그 자리에서 exec 하므로 프로세스 표에는 이 글이 보인다). 다시 뜬 엔진이 앞부분으로 견줘 치운다
+            u["procs"] = ["groups": [["pgid": Int(c.pid), "cmd": s.argv.joined(separator: " ")]]]
             saveUnit(n, u)
             let cap = (caps(n)["minutes"] ?? 120) * 60
             var tick = start
