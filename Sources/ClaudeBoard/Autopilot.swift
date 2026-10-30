@@ -2444,16 +2444,37 @@ func apEngine(_ args: [String]) -> (code: Int32, out: String) {
     return (p.terminationStatus, String(decoding: d, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines))
 }
 
-// 보드가 읽는 git(지금 가지·가지 목록·머리·커밋 안 한 변경·커밋 수). 엔진 밖 git 과 같은 보호: 저장소 설정의 fsmonitor·hooks 를 쓰지 않고
-// 시스템·전역 설정·attributes·replace 를 읽지 않는다(사용자 저장소 설정에 심은 명령이 보드에서 돌지 않게). 메인 스레드에서 부르지 않는다
-func apGit(_ args: [String], _ cwd: String) -> String? {
-    let p = Process()
-    p.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-    p.arguments = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "core.attributesFile=/dev/null"] + args
-    p.currentDirectoryURL = URL(fileURLWithPath: cwd)
+// 보드가 돌리는 git 의 공통 보호(엔진 gitHardenC·gitHardenEnv 와 같은 꼴, ⑦ 보드 git 받침). -c: 저장소 설정의 fsmonitor·hooks·attributes 를
+// 쓰지 않고, bare 저장소 꼴 폴더를 스스로 저장소로 쓰지 않으며(safe.bareRepository), 하위 모듈(모델이 심은 중첩 git)로 status·diff 가
+// 들어가지 않는다(diff.ignoreSubmodules). env: 시스템·전역 설정·attributes·replace 를 읽지 않는다. 메인 스레드에서 부르지 않는다
+let apGitHardenC = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "core.attributesFile=/dev/null",
+                    "-c", "safe.bareRepository=explicit", "-c", "diff.ignoreSubmodules=all"]
+// 엔진 canonical 과 같게 경로를 푼다(실행 기록의 common_dir 과 글자로 견주려면 같은 꼴이어야 한다)
+func apCanonical(_ path: String) -> String {
+    let p = (path as NSString).expandingTildeInPath
+    guard let r = realpath(p, nil) else { return URL(fileURLWithPath: p).standardizedFileURL.path }
+    defer { free(r) }
+    return String(cString: r)
+}
+// git 폴더의 "장치:inode"(엔진 gitStat 과 같은 꼴, 바꿔치기 가리기)
+func apGitStat(_ p: String) -> String? {
+    var st = stat()
+    return lstat(p, &st) == 0 ? "\(st.st_dev):\(st.st_ino)" : nil
+}
+func apGitEnv(_ extra: [String]) -> [String: String] {
     var env = ProcessInfo.processInfo.environment
     for (k, v) in [("GIT_CONFIG_NOSYSTEM", "1"), ("GIT_CONFIG_GLOBAL", "/dev/null"), ("GIT_ATTR_NOSYSTEM", "1"), ("GIT_NO_REPLACE_OBJECTS", "1")] { env[k] = v }
-    p.environment = env
+    // extra: "GIT_DIR=…"·"GIT_WORK_TREE=…"·"GIT_CEILING_DIRECTORIES=…" 꼴로 실행 기록이 있는 자리를 박는다(apBoardRefsPin)
+    for s in extra { if let eq = s.firstIndex(of: "=") { env[String(s[..<eq])] = String(s[s.index(after: eq)...]) } }
+    return env
+}
+// 보드가 읽는 git(지금 가지·가지 목록·머리·커밋 안 한 변경·커밋 수). env 로 GIT_DIR 등을 박는다(실행 기록이 있는 자리)
+func apGit(_ args: [String], _ cwd: String, env: [String] = []) -> String? {
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+    p.arguments = apGitHardenC + args
+    p.currentDirectoryURL = URL(fileURLWithPath: cwd)
+    p.environment = apGitEnv(env)
     let out = Pipe()
     p.standardOutput = out
     p.standardError = FileHandle.nullDevice
@@ -3078,7 +3099,7 @@ extension APRecords {
                 let f = line.split(separator: "\t")
                 if f.count == 2, f[0].hasPrefix("refs/heads/") { let b = String(f[0].dropFirst(11)); i.branches.append(b); i.heads[b] = String(f[1]) }
             }
-            i.dirty = (apGit(["status", "--porcelain"], r) ?? "").split(separator: "\n").map(String.init)
+            i.dirty = (apGit(["status", "--porcelain", "--ignore-submodules=all"], r) ?? "").split(separator: "\n").map(String.init)
             let names = apBranchRoles(i.branches)
             if let dev = names.dev, let live = names.live { i.devAhead = Int(apGit(["rev-list", "--count", "\(live)..\(dev)"], r) ?? "") }
             info[r] = i
@@ -4761,14 +4782,12 @@ struct APConfirm: View {
 // 시계·애니메이션은 두지 않는다(시트는 따로 창이라 보드 배치를 다시 계산하지 않는다)
 
 // git 을 부르고 종료 코드와 표준 출력을 함께 받는다(merge-tree 는 충돌이면 1 로 끝나며 충돌 파일을 낸다). apGit 과 같은 보호
-func apGitRun(_ args: [String], _ cwd: String) -> (code: Int32, out: String) {
+func apGitRun(_ args: [String], _ cwd: String, env: [String] = []) -> (code: Int32, out: String) {
     let p = Process()
     p.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-    p.arguments = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "core.attributesFile=/dev/null"] + args
+    p.arguments = apGitHardenC + args
     p.currentDirectoryURL = URL(fileURLWithPath: cwd)
-    var env = ProcessInfo.processInfo.environment
-    for (k, v) in [("GIT_CONFIG_NOSYSTEM", "1"), ("GIT_CONFIG_GLOBAL", "/dev/null"), ("GIT_ATTR_NOSYSTEM", "1"), ("GIT_NO_REPLACE_OBJECTS", "1")] { env[k] = v }
-    p.environment = env
+    p.environment = apGitEnv(env)
     let out = Pipe()
     p.standardOutput = out
     p.standardError = FileHandle.nullDevice
@@ -4853,6 +4872,8 @@ struct APMergeView: Equatable {
     var steps: [APStep] = []
     var promotionSaved = false
     var repos: [String] = []                 // 엔진이 가지를 만든 저장소(branches.repos)
+    var gitRec: [String: APGitRecord] = [:]  // 저장소 → 출발 때 git 자리(⑦ 보드 git 받침, GIT_DIR 박기·바꿔치기 가리기)
+    var gitBlocked: [String: String] = [:]   // 출발 때와 git 폴더가 달라져 보드가 돌리지 않은 저장소 → 까닭(readGit 가 채움)
     var baseHeads: [String: String] = [:]
     var restored: [String: Bool] = [:]
     var restoreNotes: [String: String] = [:]
@@ -4977,6 +4998,8 @@ struct APRepoPlan: Identifiable { let repo: String; let plan: APMergePlan?; var 
             if let b = i["restored"] as? Bool { m.restored[k] = b }
             if let n = apText(i["restore_note"]) { m.restoreNotes[k] = n }
             m.made[k] = apStrings(i["made"])
+            m.gitRec[k] = APGitRecord(commonDir: apText(i["common_dir"]), commonIno: apText(i["common_ino"]),
+                                      workGitDir: apText(i["work_git_dir"]), workGitIno: apText(i["work_git_ino"]))
         }
         for (k, val) in br["end"] as? [String: Any] ?? [:] { m.endHeads[k] = (val as? [String: Any] ?? [:]).compactMapValues { $0 as? String } }
         for (k, val) in br["stories"] as? [String: Any] ?? [:] {
@@ -5108,6 +5131,10 @@ struct APRepoPlan: Identifiable { let repo: String; let plan: APMergePlan?; var 
     }
     func lockReason(_ st: APMergeStep) -> String? {
         if let o = orderLock(st) { return o }
+        // 하위 모듈·바꿔치기로 보드가 그 저장소의 git 을 돌리지 않았으면(⑦ 보드 git 받침) 승격을 잠근다
+        if let b = v?.gitBlocked, let r = st.refs.keys.first(where: { b[$0] != nil }) {
+            return (st.refs.count > 1 ? (r as NSString).lastPathComponent + ": " : "") + (b[r] ?? "") + " 보드가 가지를 읽지 않았습니다. 사람이 확인하세요"
+        }
         let ps = plansOf(st)
         if reading || ps.contains(where: { $0.plan == nil }) { return "가지를 읽는 중입니다" }
         let named = { (r: String) in ps.count > 1 ? (r as NSString).lastPathComponent + ": " : "" }
@@ -5170,18 +5197,29 @@ struct APRepoPlan: Identifiable { let repo: String; let plan: APMergePlan?; var 
         reading = true
         // 앞 읽기 값(앞 실행이나 엔진이 한 일 전의 가지)을 그대로 보이지 않게 비운다(5-3b ⑦) — 읽는 동안 단계·저장소 줄·지우기 글은 "읽는 중"
         plans = [:]; spans = [:]; existing = [:]; contained = []; foreign = []
+        let gitRec = m.gitRec
         queue.async {
             var plans: [String: APMergePlan] = [:], spans: [String: APMergePlan] = [:], have: [String: Set<String>] = [:], contained = Set<String>()
             var wts: [String: [String: String]] = [:], heads: [String: [String: String]] = [:], foreign = Set<String>()
+            // 저장소마다 git 자리를 박는 env 와 막은 까닭(⑦ 보드 git 받침). 실행 기록(gitRec)이 있으면 그때 공통 git 폴더가 지금과 같은지 보고,
+            // 다르면 그 저장소는 돌리지 않는다(사람이 확인). 같으면 GIT_DIR·GIT_CEILING 을 박아 ref·객체를 읽는다. 기록이 없으면(옛 실행) 공통 보호로만
+            var pin: [String: [String]] = [:], blocked: [String: String] = [:]
+            func gitPin(_ r: String) -> [String] { pin[r] ?? [] }
             for r in Set(m.repos + m.stories.flatMap { $0.repos.map(\.repo) + $0.tasks.map(\.repo) }) where !r.isEmpty && FileManager.default.fileExists(atPath: r) {
+                let rec = gitRec[r] ?? APGitRecord(commonDir: nil, commonIno: nil, workGitDir: nil, workGitIno: nil)
+                let live = apGit(["rev-parse", "--git-common-dir"], r).map { $0.hasPrefix("/") ? apCanonical($0) : apCanonical(r + "/" + $0) }
+                if let why = apBoardGitChanged(rec, liveCommon: live, liveCommonIno: live.flatMap(apGitStat)) {
+                    blocked[r] = why; continue   // 바꿔치기 의심: 이 저장소의 가지를 읽지 않는다(시트가 까닭을 보이고 단추를 잠근다)
+                }
+                pin[r] = apBoardRefsPin(rec, repoRoot: r)
                 var hs: [String: String] = [:]
-                for line in (apGit(["for-each-ref", "--format=%(refname)\t%(objectname)", "refs/heads/"], r) ?? "").split(separator: "\n") {
+                for line in (apGit(["for-each-ref", "--format=%(refname)\t%(objectname)", "refs/heads/"], r, env: gitPin(r)) ?? "").split(separator: "\n") {
                     let f = line.split(separator: "\t")
                     if f.count == 2, f[0].hasPrefix("refs/heads/") { hs[String(f[0].dropFirst(11))] = String(f[1]) }
                 }
                 heads[r] = hs
                 have[r] = Set(hs.keys)
-                wts[r] = APMerge.checkedOut(r)
+                wts[r] = APMerge.checkedOut(r)   // worktree list 는 공통 보호로만(작업 트리 자리를 GIT_DIR 로 박지 않는다)
             }
             // 엔진 finish 와 같은 기준: 실행 끝의 머리와 지금 머리가 다르면 이 실행의 가지가 아니다
             for s in m.stories {
@@ -5194,23 +5232,23 @@ struct APRepoPlan: Identifiable { let repo: String; let plan: APMergePlan?; var 
             for st in steps {
                 for (r, src) in st.refs {
                     let base = apCarriesBase(source: st.source, after: st.after, base: m.run.bases[r]) ? m.baseHeads[r] : nil   // 규칙 AutopilotRules/Branches.swift
-                    plans[st.id + "|" + r] = have[r] == nil ? APMergePlan(state: "nosrc") : APMerge.plan(r, src: src, into: st.into, wts: wts[r] ?? [:], baseHead: base)
+                    plans[st.id + "|" + r] = have[r] == nil ? APMergePlan(state: "nosrc") : APMerge.plan(r, src: src, into: st.into, wts: wts[r] ?? [:], baseHead: base, env: gitPin(r))
                 }
             }
             if !m.run.work.isEmpty {
-                for r in m.repos where have[r] != nil { if let b = m.baseHeads[r] { spans["all|" + r] = APMerge.span(r, b, m.run.work) } }
+                for r in m.repos where have[r] != nil { if let b = m.baseHeads[r] { spans["all|" + r] = APMerge.span(r, b, m.run.work, env: gitPin(r)) } }
             }
             for s in m.stories {
                 // 작업 가지는 그 저장소의 스토리 가지에서 본다. 스토리 가지를 지운 뒤(합친 가지 지우기)에는 마지막 자율주행 단계의 가지(live)에 없는 커밋을 센다(엔진 cleanup 과 같은 기준)
                 for t in s.tasks where !t.branch.isEmpty && have[t.repo]?.contains(t.branch) == true && t.merge != "merged" {
                     let sb = s.storyBranch(t.repo) ?? s.branch
-                    spans[t.spanKey] = APMerge.span(t.repo, have[t.repo]?.contains(sb) == true ? sb : (lastAuto ?? sb), t.branch)
+                    spans[t.spanKey] = APMerge.span(t.repo, have[t.repo]?.contains(sb) == true ? sb : (lastAuto ?? sb), t.branch, env: gitPin(t.repo))
                 }
                 guard let live = lastAuto else { continue }
                 for r in Set(s.pairs.map(\.repo)) where have[r] != nil {
-                    guard let lh = apGit(["rev-parse", "-q", "--verify", "refs/heads/\(live)^{commit}"], r), !lh.isEmpty else { continue }
+                    guard let lh = apGit(["rev-parse", "-q", "--verify", "refs/heads/\(live)^{commit}"], r, env: gitPin(r)), !lh.isEmpty else { continue }
                     for (_, b) in s.pairs.filter({ $0.repo == r }) where have[r]?.contains(b) == true {
-                        if apGitRun(["merge-base", "--is-ancestor", "refs/heads/" + b, lh], r).code == 0 { contained.insert(r + "|" + b) }
+                        if apGitRun(["merge-base", "--is-ancestor", "refs/heads/" + b, lh], r, env: gitPin(r)).code == 0 { contained.insert(r + "|" + b) }
                     }
                 }
             }
@@ -5218,6 +5256,7 @@ struct APRepoPlan: Identifiable { let repo: String; let plan: APMergePlan?; var 
                 MainActor.assumeIsolated {
                     guard self.gen == g else { return }
                     self.plans = plans; self.spans = spans; self.existing = have; self.contained = contained; self.foreign = foreign
+                    if var vv = self.v { vv.gitBlocked = blocked; self.v = vv }
                     self.reading = false
                 }
             }
@@ -5232,28 +5271,29 @@ struct APRepoPlan: Identifiable { let repo: String; let plan: APMergePlan?; var 
         }
         return m
     }
-    nonisolated static func head(_ r: String, _ b: String) -> String? {
-        apGit(["rev-parse", "-q", "--verify", "refs/heads/\(b)^{commit}"], r).flatMap { $0.isEmpty ? nil : $0 }
+    // env: 실행 기록이 있는 저장소면 GIT_DIR·GIT_CEILING 을 박는다(⑦ 보드 git 받침). ref·객체만 다루므로 GIT_WORK_TREE 는 넣지 않는다
+    nonisolated static func head(_ r: String, _ b: String, env: [String] = []) -> String? {
+        apGit(["rev-parse", "-q", "--verify", "refs/heads/\(b)^{commit}"], r, env: env).flatMap { $0.isEmpty ? nil : $0 }
     }
-    nonisolated static func numstat(_ r: String, _ a: String, _ b: String) -> [APDiffFile] {
-        (apGit(["diff", "--numstat", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", "\(a)...\(b)"], r) ?? "").split(separator: "\n").compactMap { l in
+    nonisolated static func numstat(_ r: String, _ a: String, _ b: String, env: [String] = []) -> [APDiffFile] {
+        (apGit(["diff", "--numstat", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", "--ignore-submodules=all", "\(a)...\(b)"], r, env: env) ?? "").split(separator: "\n").compactMap { l in
             let f = l.split(separator: "\t", maxSplits: 2).map(String.init)
             return f.count == 3 ? APDiffFile(path: f[2], add: f[0], del: f[1]) : nil
         }
     }
     // 합치기 미리 보기 — 엔진 mergeRefs 와 같은 판단(같은 merge-tree 명령이라 미리 본 것과 엔진 판정이 어긋나지 않는다. merge-tree 는 ref 를 움직이지 않고
-    // 이름 없는 tree 객체만 남긴다)
-    nonisolated static func plan(_ r: String, src: String, into: String, wts: [String: String], baseHead: String?) -> APMergePlan {
+    // 이름 없는 tree 객체만 남긴다). env 는 받는 가지 저장소의 GIT_DIR 박기(ref·객체). 작업 트리 status 는 그 작업 트리 자리에서 공통 보호로만 돈다
+    nonisolated static func plan(_ r: String, src: String, into: String, wts: [String: String], baseHead: String?, env: [String] = []) -> APMergePlan {
         var p = APMergePlan()
-        guard let sh = head(r, src) else { p.state = "nosrc"; return p }
-        guard let ih = head(r, into) else { p.state = "nointo"; return p }
+        guard let sh = head(r, src, env: env) else { p.state = "nosrc"; return p }
+        guard let ih = head(r, into, env: env) else { p.state = "nointo"; return p }
         p.a = ih; p.b = sh
-        p.commits = Int(apGit(["rev-list", "--count", "\(ih)..\(sh)"], r) ?? "") ?? 0
-        p.behind = Int(apGit(["rev-list", "--count", "\(sh)..\(ih)"], r) ?? "") ?? 0
+        p.commits = Int(apGit(["rev-list", "--count", "\(ih)..\(sh)"], r, env: env) ?? "") ?? 0
+        p.behind = Int(apGit(["rev-list", "--count", "\(sh)..\(ih)"], r, env: env) ?? "") ?? 0
         if p.commits == 0 { p.state = "same" }
         else if p.behind == 0 { p.state = "ff" }
         else {
-            let mt = apGitRun(["merge-tree", "--write-tree", "--name-only", "--no-messages", ih, sh], r)
+            let mt = apGitRun(["merge-tree", "--write-tree", "--name-only", "--no-messages", ih, sh], r, env: env)
             let lines = mt.out.split(separator: "\n").map(String.init)
             switch mt.code {
             case 0: p.state = "merge"
@@ -5261,22 +5301,23 @@ struct APRepoPlan: Identifiable { let repo: String; let plan: APMergePlan?; var 
             default: p.state = "error"; p.error = lines.first ?? "종료 코드 \(mt.code)"
             }
         }
-        if p.state != "same" { p.files = numstat(r, ih, sh) }
+        if p.state != "same" { p.files = numstat(r, ih, sh, env: env) }
         if let w = wts[into] {
             p.wt = w
-            if p.state != "same" { p.wtDirty = !(apGit(["status", "--porcelain", "--untracked-files=no"], w) ?? "x").isEmpty }
+            // 받는 가지가 걸린 작업 트리의 더러움 — 그 작업 트리는 이 실행의 자리가 아닐 수 있어(승격 대상 가지) GIT_DIR 로 박지 않고 그 자리에서 공통 보호로만 돈다
+            if p.state != "same" { p.wtDirty = !(apGit(["status", "--porcelain", "--untracked-files=no", "--ignore-submodules=all"], w) ?? "x").isEmpty }
         }
-        if let bh = baseHead { p.withBase = Int(apGit(["rev-list", "--count", "\(ih)..\(bh)"], r) ?? "") ?? 0 }
+        if let bh = baseHead { p.withBase = Int(apGit(["rev-list", "--count", "\(ih)..\(bh)"], r, env: env) ?? "") ?? 0 }
         return p
     }
     // 바뀐 파일 범위(a...b) — 커밋 수와 파일마다 더한 줄·뺀 줄
-    nonisolated static func span(_ r: String, _ a: String, _ b: String) -> APMergePlan {
+    nonisolated static func span(_ r: String, _ a: String, _ b: String, env: [String] = []) -> APMergePlan {
         var p = APMergePlan()
-        guard let bh = head(r, b) else { p.state = "nosrc"; return p }
-        let ah = head(r, a) ?? a
+        guard let bh = head(r, b, env: env) else { p.state = "nosrc"; return p }
+        let ah = head(r, a, env: env) ?? a
         p.state = "span"; p.a = ah; p.b = bh
-        p.commits = Int(apGit(["rev-list", "--count", "\(ah)..\(bh)"], r) ?? "") ?? 0
-        p.files = numstat(r, ah, bh)
+        p.commits = Int(apGit(["rev-list", "--count", "\(ah)..\(bh)"], r, env: env) ?? "") ?? 0
+        p.files = numstat(r, ah, bh, env: env)
         return p
     }
 
@@ -5287,7 +5328,7 @@ struct APRepoPlan: Identifiable { let repo: String; let plan: APMergePlan?; var 
         let pk = key + "|" + file
         guard patches[pk] == nil, !p.a.isEmpty, !p.b.isEmpty else { return }
         queue.async {
-            let t = apGit(["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", "\(p.a)...\(p.b)", "--", file], repo) ?? ""
+            let t = apGit(["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", "--ignore-submodules=all", "\(p.a)...\(p.b)", "--", file], repo) ?? ""
             let lines = t.split(separator: "\n", omittingEmptySubsequences: false)
             let text = t.isEmpty ? "(바뀐 줄을 읽지 못했습니다)" : lines.prefix(400).joined(separator: "\n") + (lines.count > 400 ? "\n… \(lines.count - 400)줄 더 있음" : "")
             DispatchQueue.main.async { MainActor.assumeIsolated { self.patches[pk] = text } }
@@ -5397,6 +5438,13 @@ struct APMergeSheet: View {
                 apNote("이 실행에는 엔진이 만든 가지가 없습니다(git 저장소에서 돌지 않았거나 가지 기능 전의 실행).", APColor.limit)
             } else if !v.repos.allSatisfy({ FileManager.default.fileExists(atPath: $0) }) {
                 apNote("저장소를 찾지 못했습니다: " + v.repos.filter { !FileManager.default.fileExists(atPath: $0) }.map(apHome).joined(separator: ", "), APColor.fail)
+            }
+            if !v.gitBlocked.isEmpty {   // ⑦ 보드 git 받침: 바꿔치기·하위 모듈로 보드가 git 을 돌리지 않은 저장소
+                APBox(title: "보드가 git 을 돌리지 않은 저장소 \(v.gitBlocked.count)", note: "git 폴더가 출발 때와 다르거나 하위 모듈이 있습니다. 승격이 잠깁니다. 사람이 확인하세요", tint: APColor.fail, axid: "ap-merge-gitblocked") {
+                    ForEach(v.gitBlocked.sorted(by: { $0.key < $1.key }), id: \.key) { r, why in
+                        Text("\((r as NSString).lastPathComponent): \(why)").boardFont(11).foregroundStyle(APColor.fail).fixedSize(horizontal: false, vertical: true)
+                    }
+                }
             }
             summaryBox(v)
             harnessBox(v)
