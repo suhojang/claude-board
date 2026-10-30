@@ -3465,8 +3465,7 @@ final class Engine {
         killGroup(c.pid)   // 끝났어도 명령이 뒤에 남긴 프로세스(띄운 서버 등)까지 치운다
         _ = c.wait(3)
         u["procs"] = [:] as [String: Any]
-        var tail = String(decoding: (fm.contents(atPath: log) ?? Data()).suffix(4000), as: UTF8.self)
-        tail = tail.split(separator: "\n", omittingEmptySubsequences: false).suffix(40).joined(separator: "\n")
+        var tail = apOutputTail(fm.contents(atPath: log) ?? Data())   // 마지막 4000 바이트의 마지막 40줄(규칙 apOutputTail)
         if timedOut { tail += "\n(시간 상한 \(dur(limit))에 닿아 엔진이 멈췄습니다)" }
         let code: Int32 = interrupt != nil || timedOut ? -1 : (c.code ?? -1)
         let files = ((fm.enumerator(atPath: ev)?.allObjects as? [String]) ?? []).filter { !isDir(ev + "/" + $0) }.sorted()
@@ -3485,8 +3484,7 @@ final class Engine {
         let finished = c.wait(limit)
         killGroup(c.pid)   // 끝났어도 뒤에 남긴 프로세스까지
         _ = c.wait(3)
-        let tail = String(decoding: (fm.contents(atPath: log) ?? Data()).suffix(4000), as: UTF8.self)
-            .split(separator: "\n", omittingEmptySubsequences: false).suffix(40).joined(separator: "\n")
+        let tail = apOutputTail(fm.contents(atPath: log) ?? Data())
         return (finished ? (c.code ?? -1) : -1, tail, now() - start, !finished)
     }
 
@@ -4377,11 +4375,7 @@ func cmdPrerun(_ args: [String]) -> Never {
         units.append(o)
         if r.code == 0 {
             passing.append(n)
-            cards.append(["id": "prerun-\(d["id"] ?? "u\(n)")", "unit": n, "kind": "prerun",
-                          "title": "「\(t)」 의 판정이 일하기 전부터 통과합니다",
-                          "why": "이미 끝난 일이거나 판정이 약하다는 뜻입니다. 그대로 두면 모델이 일하지 않아도 통과로 기록됩니다.",
-                          "options": [["key": "drop", "label": "빼기"], ["key": "fix_check", "label": "판정 고치기"], ["key": "keep", "label": "그대로"]],
-                          "recommended": "drop"])
+            cards.append(apPrerunCard(n: n, id: d["id"] as? String ?? "u\(n)", title: t))   // 규칙 apPrerunCard
             say("일하기 전부터 통과합니다(\(dur(r.sec))). 출발 카드 감: 빼기(추천) · 판정 고치기 · 그대로")
         } else {
             say("실패(종료 코드 \(r.code)\(r.timedOut ? ", 시간 상한" : ""), \(dur(r.sec))). 일하기 전이라 맞습니다")

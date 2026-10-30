@@ -52,3 +52,19 @@ public func apCheckFailReason(tries: Int, timedOut: Double? = nil) -> String {
 public func apCheckLimitNote(minutes: Double?) -> String {
     " (\(minutes.map { apLimitText(sec: $0 * 60) } ?? "?분") 상한)"
 }
+
+// 판정·고정 단계 출력의 끝부분(2026-10-30 ⑪-1 시험 실행기에서 엔진 fixedCommand·plainCommand 에서 옮김): 마지막 4000 바이트를 UTF-8 로 풀어
+// 마지막 40줄. 모델에게 넘기는 실패 글·engine.json 의 tail·prerun.json 의 tail 이 이 글이다
+public func apOutputTail(_ data: Data) -> String {
+    String(decoding: data.suffix(4000), as: UTF8.self)
+        .split(separator: "\n", omittingEmptySubsequences: false).suffix(40).joined(separator: "\n")
+}
+
+// 판정 미리 돌리기에서 일하기 전부터 통과한 단위의 출발 카드 감(prerun.json 의 cards, ⑪-1 에서 엔진 cmdPrerun 에서 옮김)
+public func apPrerunCard(n: Int, id: String, title: String) -> [String: Any] {
+    ["id": "prerun-\(id)", "unit": n, "kind": "prerun",
+     "title": "「\(title)」 의 판정이 일하기 전부터 통과합니다",
+     "why": "이미 끝난 일이거나 판정이 약하다는 뜻입니다. 그대로 두면 모델이 일하지 않아도 통과로 기록됩니다.",
+     "options": [["key": "drop", "label": "빼기"], ["key": "fix_check", "label": "판정 고치기"], ["key": "keep", "label": "그대로"]],
+     "recommended": "drop"]
+}
