@@ -171,8 +171,10 @@ func mkdirPrivate(_ p: String) {
 // 시스템·전역 설정과 전역 attributes·replace 객체도 읽지 않는다 — 모델이 저장소 설정·attributes·replace 에 명령을 심어도 밖의 git 이 실행하지 않게
 let gitHardenEnv = ["GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_ATTR_NOSYSTEM=1", "GIT_NO_REPLACE_OBJECTS=1"]
 // safe.bareRepository=explicit(2026-10-30 5-4 보안): 작업 폴더가 bare 저장소 꼴(HEAD·objects·refs)이어도 git 이 스스로 그것을 저장소로 쓰지 않게
+// diff.ignoreSubmodules=all(2026-10-30 ⑦ 보안): 모델이 작업 폴더에 심은 중첩 git(gitlink)으로 status·diff·switch 가 들어가 그 저장소의 filter 를
+// 돌리지 않게(Gitlinks.swift). 자율주행은 git 하위 모듈을 쓰지 않아 통째로 무시해도 된다. add·stash 는 경로를 빼는 pathspec 으로 따로 막는다
 let gitHardenC = ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false", "-c", "core.attributesFile=/dev/null",
-                  "-c", "safe.bareRepository=explicit"]
+                  "-c", "safe.bareRepository=explicit", "-c", "diff.ignoreSubmodules=all"]
 // env: 더 넣을 환경 변수("이름=값") — 모델이 쓸 수 있던 자리에서 도는 git 은 엔진이 GIT_DIR·GIT_WORK_TREE 를 출발 때 기록한 자리로 박는다(Engine.pin)
 func safeGit(_ args: [String], cwd: String, env: [String] = []) -> String {
     runTool("/usr/bin/env", gitHardenEnv + env + ["/usr/bin/git", "--no-optional-locks"] + gitHardenC + args, cwd: cwd).out
@@ -2126,6 +2128,10 @@ final class Engine {
     }
     // 저장소의 작업 트리 자리: 따로 작업 트리 모드면 그 작업 트리, 아니면 원래 저장소. 작업 트리 쪽 git(switch·status·커밋)은 이 자리에서 돈다
     func wt(_ r: String) -> String { repoInfo(r)["work_tree"] as? String ?? r }
+    // 색인에 든 중첩 git(gitlink)을 add·stash 에서 빼는 pathspec(⑦ 보안, Gitlinks.swift). ls-files -s 는 색인만 읽어 filter 를 돌리지 않는다
+    func gitlinkExcludes(_ w: String, _ env: [String]) -> [String] {
+        apGitlinkExcludes(lsFilesStage: safeGit(["ls-files", "-s"], cwd: w, env: env))
+    }
     func repoOf(_ path: String) -> String? {
         repos.filter { r in let w = wt(r); return path == r || path.hasPrefix(r + "/") || path == w || path.hasPrefix(w + "/") }.max { $0.count < $1.count }
     }
@@ -2333,7 +2339,9 @@ final class Engine {
             guard currentBranch(w, env: p) == on else { continue }   // 보관 바로 앞에서 가지를 한 번 더 본다
             let msg = apStashMessage(run: id, unit: unit, repo: repoName(r), branch: on)
             let before = gitOut(["rev-parse", "-q", "--verify", "refs/stash"], cwd: w, env: p)
-            let c = gitRun(["stash", "push", "--include-untracked", "-m", msg] + (paths.map { ["--"] + $0.map { ":(literal)" + $0 } } ?? []), cwd: w, commit: true, env: p)
+            // paths 가 있으면 그 경로만, 없으면 gitlink 를 뺀 전부(gitlink 의 filter 를 돌리지 않게, ⑦ 보안)
+            let spec = paths.map { ["--"] + $0.map { ":(literal)" + $0 } } ?? (gitlinkExcludes(w, p).isEmpty ? [] : ["--", ":(literal)."] + gitlinkExcludes(w, p))
+            let c = gitRun(["stash", "push", "--include-untracked", "-m", msg] + spec, cwd: w, commit: true, env: p)
             let after = gitOut(["rev-parse", "-q", "--verify", "refs/stash"], cwd: w, env: p)
             let k = dirty.filter { !start.contains($0) }.count
             guard c.code == 0, let sha = after, sha != before else {
@@ -2380,7 +2388,7 @@ final class Engine {
         case .refuse(.dirty):
             return "\(repoName(r)) 에 커밋하지 않은 변경 \(dirty.count)개가 있어 \(want) 로 바꾸지 않았습니다"
         case .commit:
-            let a = gitRun(["add", "-A"], cwd: w, env: p)
+            let a = gitRun(["add", "-A", "--"] + ([":(literal)."] + gitlinkExcludes(w, p)), cwd: w, env: p)
             let c = a.code == 0 ? gitRun(["commit", "-q", "--no-verify", "-m", "자율주행 \(id): \(on) 에 커밋하지 않고 남은 변경(다음 단위로 가지를 바꾸기 전에 엔진이 남김)"], cwd: w, commit: true, env: p) : a
             guard c.code == 0 else { return "\(repoName(r)) 에 남은 변경을 \(on) 에 커밋하지 못해 \(want) 로 바꾸지 않았습니다: \(firstLine(c.out))" }
             event("board", "앞 단위가 커밋하지 않고 남긴 변경 \(dirty.count)개를 그 가지(\(on))에 커밋해 두었습니다.")
@@ -2927,9 +2935,12 @@ final class Engine {
         e["GIT_CONFIG_VALUE_\(k + 1)"] = "false"
         // bare 저장소 꼴 폴더를 git 이 스스로 저장소로 쓰지 않게(5-4 보안): claude 가 세션을 열 때 부르는 git, 모델의 git, 판정 명령의 git 모두.
         // 명령줄 무게의 설정이라 저장소 설정이 덮지 못한다(git 의 보호 설정). 저장소 뿌리 위로는 저장소를 찾지 않는다(GIT_CEILING_DIRECTORIES, 받침)
-        e["GIT_CONFIG_COUNT"] = String(k + 3)
         e["GIT_CONFIG_KEY_\(k + 2)"] = "safe.bareRepository"
         e["GIT_CONFIG_VALUE_\(k + 2)"] = "explicit"
+        // 하위 모듈(모델이 심은 gitlink)로 claude·판정·고정 단계의 git status·diff 가 들어가 그 filter 를 돌리지 않게(5-4 보안에 ⑦ 로 더함)
+        e["GIT_CONFIG_COUNT"] = String(k + 4)
+        e["GIT_CONFIG_KEY_\(k + 3)"] = "diff.ignoreSubmodules"
+        e["GIT_CONFIG_VALUE_\(k + 3)"] = "all"
         let ceil = Set(repos.map { (canonical(wt($0)) as NSString).deletingLastPathComponent }).filter { $0 != "/" && !$0.isEmpty }.sorted()
         if !ceil.isEmpty { e["GIT_CEILING_DIRECTORIES"] = ceil.joined(separator: ":") }
         return e
