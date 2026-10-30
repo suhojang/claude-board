@@ -40,7 +40,7 @@
 #  6) 세트 이어 쓰기 세션(5단계 ⑪-3, 첫 줄 "Claude Board 자율주행의 세트 이어 쓰기 세션입니다."): "FAKE REVISE <견본 폴더>" 줄의 units.json·autopilot.md 를 복사, 기록은 .fake-revise.json
 #  7) 가져오기 세션(7단계 ⑫-7a, 같은 인자 꼴, 첫 줄 "Claude Board 자율주행의 가져오기 세션입니다."): 글 안의 "FAKE IMPORT <견본 폴더>" 줄(출발 준비 1단계의
 #     "덧붙일 말"에 넣음)의 units.json·cards.json·skipped.json·autopilot.md 를 결과 폴더(import/out/)에 복사한다. 견본 줄이 없으면 오류 결과로 끝낸다. 기록은 .fake-import.json
-#     견본의 "item" 은 "@<제목>" 으로 써도 된다: 글의 항목 줄("- i3 [open] <제목> …")에서 제목이 같은 것, 없으면 제목에 그 글이 든 첫 항목의 id 로 바꾼다.
+#     견본의 "item" 은 "@<제목>" 으로 써도 된다: 글의 항목 줄("- i3 [open] <제목> …")에서 제목이 꼭 같은 항목의 id 로 바꾼다.
 #     찾지 못한 칸(이번 가져오기에 없는 항목)은 빼고, 뺀 단위를 가리키는 depends·카드 units 도 지운다(한 견본으로 첫 가져오기·다시 가져오기·되살리기를 다 돌리려고)
 #     5)·6) 은 견본 줄이 없으면 찾은 것이 없다고 끝낸다(비판은 빈 findings.json). 4)~6) 의 견본 폴더가 절대 경로가 아니면 이 파일이 있는 폴더(시험 도구/) 기준으로 찾는다(견본 단위 글에 "FAKE CRITIC 견본 비판" 처럼 쓰려고)
 # 남기는 것(단위 폴더 $CLAUDE_BOARD_UNIT_DIR): fake-args.log(띄울 때 인자 한 줄), fake-in.log(표준 입력 줄 원문, 띄울 때마다 머리 줄),
@@ -180,9 +180,6 @@ if "--input-format" not in args and "--tools" in args:
             want = v[1:]
             for i, t in items.items():
                 if t == want:
-                    return i
-            for i, t in items.items():
-                if want in t:
                     return i
             return None
         dropped = set()
