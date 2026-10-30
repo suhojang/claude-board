@@ -470,7 +470,7 @@ private func unitSection(_ u: APReportUnit, _ w: inout Writer) {
         } else {
             w.add("<ul>")
             for c in u.checks {
-                var s = "\(c.n)번째: " + (c.exit.map { $0 == 0 ? "통과(종료 코드 0)" : "종료 코드 \($0)" } ?? "끝나지 않음") + " · " + apReportDur(c.sec)
+                var s = "\(c.n)번째: " + (c.exit.map { $0 == 0 ? "통과(종료 코드 0)" : "종료 코드 \($0)" } ?? "끝나지 않음") + " · " + (c.sec < 1 ? "1초 안" : apReportDur(c.sec))
                 if c.timedOut { s += " · 시간 상한에서 멈춤" }
                 if c.interrupted { s += " · 도중에 끊김" }
                 w.add("<li>\(s)</li>")

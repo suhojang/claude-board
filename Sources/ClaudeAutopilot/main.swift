@@ -9,6 +9,8 @@
 //        claude-autopilot records import [--dev|--db <파일>] [--project <이름>] [--unit-key <칸 경로>] <원본…>
 //                                                                   실행 기록 저장소(SQLite)에 실행 폴더·일반 꼴 대기열을 옮겨 담기
 //        claude-autopilot prerun <실행 폴더> [--dev]                  출발 전 판정 미리 돌리기(prerun.json)
+//        claude-autopilot report <실행 폴더> [--out <파일>|-]         보고서 다시 그리기(report.html·units/<n>/report.html, 모델을 부르지 않음).
+//                                                                   도는 엔진은 단위 판정 뒤·건너뛴 뒤·끝 정리 때 같은 틀(AutopilotRules)로 스스로 그린다
 //        claude-autopilot finish <실행 폴더> merge --into <가지> [--story <키>] | promote <가지> --into <가지> | discard [--story <키>]
 //                                            | cleanup --story <키> [--unmerged]
 //                                                                   끝난 실행의 가지 승격과 합친 가지 지우기(사람이 부른다. 엔진이 스스로 부르지 않는다).
@@ -1542,6 +1544,63 @@ struct EngineInboxFiles: APInboxFiles {
 }
 struct EngineClock: APClock { var now: Date { Date() } }
 
+// 보고서(3단계, 설계 6장)의 진짜 어댑터 — 규칙 apDrawReports(AutopilotRules/Report.swift)가 이 포트로만 읽고 쓴다.
+// 읽을 곳: 엔진이 쥔 run·queue(도는 엔진) 또는 실행 폴더의 run.json·queue.json(report 하위 명령), 단위 상태는 엔진 비공개 사본 먼저,
+// 결과 기록은 모델이 쓰는 자리라 보통 파일이고 상한 아래일 때만(modelFileData)
+struct EngineReportSource: APReportSource {
+    let dir: String
+    let runValue: [String: Any]?
+    let queueValue: [[String: Any]]
+    let unitState: (Int) -> [String: Any]?
+    var origin: APReportOrigin { .folder }
+    func run() -> [String: Any]? { runValue }
+    func queue() -> [[String: Any]] { queueValue }
+    func engine(_ n: Int) -> [String: Any]? { unitState(n) }
+    func result(_ n: Int) -> String? { modelFileData(dir + "/units/\(n)/result.json").map { String(decoding: $0, as: UTF8.self) } }
+    // 실행 폴더 파일에서(끝난 실행을 다시 그릴 때). 단위 상태는 엔진 비공개 사본, 없으면 단위 폴더 사본을 모델 자리처럼 읽는다
+    static func files(_ d: String) -> EngineReportSource {
+        EngineReportSource(dir: d, runValue: readJSON(d + "/run.json") as? [String: Any], queueValue: readJSON(d + "/queue.json") as? [[String: Any]] ?? [],
+                           unitState: { n in
+                               readJSON(d + "/engine/unit-\(n).json") as? [String: Any]
+                                   ?? modelFileData(d + "/units/\(n)/engine.json").flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Any] })
+    }
+}
+
+// 쓸 곳: 실행 보고서는 runs/<실행 id>/report.html(모델 쓰기 범위 밖), 단위 보고서는 units/<n>/report.html(모델이 쓸 수 있는 단위 폴더라
+// 샌드박스·파일 도구 거부 목록에 넣었고, 그래도 모델이 심어 둔 링크를 따라가지 않게 엔진 전용 폴더 engine/ 에 새로 만든 임시 파일을 rename 으로 바꿔 끼운다)
+struct EngineReportSink: APReportSink {
+    let dir: String
+    func write(_ file: APReportFile, _ html: String) -> String? {
+        let dest: String
+        switch file {
+        case .run: dest = dir + "/report.html"
+        case .unit(let n):
+            let u = dir + "/units/\(n)"
+            guard isDir(u), !isLink(u) else { return "단위 폴더가 없거나 링크입니다" }
+            dest = u + "/report.html"
+        }
+        let tmpDir = dir + "/engine"
+        guard isDir(tmpDir), !isLink(tmpDir) else { return "엔진 전용 폴더(engine/)가 없습니다" }
+        let tmp = tmpDir + "/.report-\(getpid())-\(UUID().uuidString).tmp"
+        let fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o644)
+        guard fd >= 0 else { return "임시 파일을 만들지 못했습니다: " + String(cString: strerror(errno)) }
+        let ok = Data(html.utf8).withUnsafeBytes { p -> Bool in
+            var off = 0
+            while off < p.count {
+                let w = Darwin.write(fd, p.baseAddress! + off, p.count - off)
+                if w <= 0 { return false }
+                off += w
+            }
+            return true
+        }
+        close(fd)
+        guard ok else { unlink(tmp); return "임시 파일에 쓰지 못했습니다" }
+        // rename 은 그 이름에 있는 것이 링크여도 따라가지 않고 이름째 바꿔 끼운다. 그 자리가 폴더면 실패한다
+        guard rename(tmp, dest) == 0 else { let e = String(cString: strerror(errno)); unlink(tmp); return "제자리에 두지 못했습니다: " + e }
+        return nil
+    }
+}
+
 final class Engine {
     let dir: String
     let id: String
@@ -1869,6 +1928,16 @@ final class Engine {
         cleanupAndExit()
     }
 
+    // 보고서(3단계): 단위 판정 뒤·건너뛴 뒤(그 단위와 실행)·끝 정리 때(실행) 결과 기록과 엔진 기록으로 다시 그린다(모델 토큰 0).
+    // 보드 창이 꺼져 있어도 엔진이 쓴다. 실패해도 실행은 이어 가고 engine.log 에만 남긴다
+    @discardableResult
+    func drawReports(_ units: [Int]) -> APReportDraw {
+        let src = EngineReportSource(dir: dir, runValue: run, queueValue: queue, unitState: { [unowned self] n in self.loadUnit(n) })
+        let d = apDrawReports(id: id, source: src, sink: EngineReportSink(dir: dir), units: units, clock: EngineClock(), tz: .current, home: home)
+        for e in d.errors { elog("보고서: " + e) }
+        return d
+    }
+
     // 끝(완료·중단·오류)의 정리: 하네스를 다시 재어 출발 때와 같은지 적고, 출발 때 없던 빈 .claude/.cc-writes 를 치우고, 기록 저장소에 끝을 쓴다.
     // 출발 때 남긴 지문(manifest.json)만 읽으므로 고정 설정을 못 읽은 오류 끝에서도 돈다
     // 차례(설계 4장 시작과 끝): 하네스 끝 검사·빈 자리 치우기 → 가지 끝 머리 → 기록 저장소 → 출발 때 가지로 되돌리기 → 한 번 더 기록 → wrapped.
@@ -1907,6 +1976,12 @@ final class Engine {
         saveRun()
         record("끝")
         if restoreBranches() { record("되돌린 뒤") }
+        let rep = drawReports([])
+        if rep.written.contains(.run) {
+            event("engine", "실행 보고서를 그렸습니다(실행 폴더의 report.html, 단위 \(total)개). 보드의 지난 실행에서 봅니다.")
+        } else {
+            event("engine", "실행 보고서를 그리지 못했습니다: \(rep.errors.first ?? "까닭 모름")")
+        }
         run["wrapped"] = r3(now())
         saveRun()
     }
@@ -2455,6 +2530,7 @@ final class Engine {
         noteUnmerged(n, "건너뜀: " + why)
         event("board", "단위 \(n)/\(total) 건너뜀: \(why)")
         record("단위 \(n) 건너뜀")
+        drawReports([n])
     }
 
     // 판정을 통과한 Jira 작업 가지를 스토리 가지로 합친다(사용자 결정: 판정 통과 때 엔진이 바로). 체크아웃 없이 한다 — 순차 실행이라 스토리 머리가
@@ -2732,6 +2808,7 @@ final class Engine {
         event("board", "단위 \(n)/\(total) \(unitLabel[status] ?? status): \(reason) (\(spent))")
         if !ok, status != "stopped" { event("board", "모델이 결과 기록(result.json)을 남기지 않았습니다.") }
         record("단위 \(n) 판정 뒤")
+        drawReports([n])
     }
 
     func runUnit(_ n: Int) {
@@ -2873,8 +2950,8 @@ final class Engine {
             + writable.map { "Edit(/\($0)/**)" }
         var denied = alwaysDenied + ((cfg["disallowed_tools"] as? [String]) ?? [])
         denied += ["run.json", "queue.json", "control.json", "events.jsonl", "context.jsonl", "starts.log", "engine.log",
-                   "cards.json", "answers.json", ".engine.lock", "pinned/**", "engine/**", "inbox/**", "outbox/**"].map { "Edit(/\(dir)/\($0))" }
-        denied += ["engine.json", "stream.jsonl", "stderr.log", "evidence/**", "context/**"].map { "Edit(/\(unitDir(n))/\($0))" }
+                   "cards.json", "answers.json", ".engine.lock", "pinned/**", "engine/**", "inbox/**", "outbox/**", "report.html"].map { "Edit(/\(dir)/\($0))" }
+        denied += ["engine.json", "stream.jsonl", "stderr.log", "evidence/**", "context/**", "report.html"].map { "Edit(/\(unitDir(n))/\($0))" }
         denied += (1...total).filter { $0 != n }.map { "Edit(/\(unitDir($0))/**)" }
         // 엔진 전용 폴더(복원 전 백업 등)와 read_deny 는 파일 도구로도 읽지 못하게(샌드박스 denyRead 는 Read 도구를 막지 않는다)
         for p in engineDeny + readDenyPaths { denied += ["Read(/\(p)/**)", "Read(/\(p))", "Edit(/\(p)/**)"] }
@@ -2898,7 +2975,7 @@ final class Engine {
     // 쓰기는 작업 폴더·write_roots·단위 폴더·임시 폴더, 그 안에서도 하네스 자리는 쓰기 금지, 네트워크는 허용 목록만(git 원격 없음)
     func sandboxSettings(_ n: Int) -> String {
         var deny = harnessDeny([cwd(n)] + writeRoots)
-        deny += ["engine.json", "stream.jsonl", "stderr.log", "evidence", "context"].map { unitDir(n) + "/" + $0 }
+        deny += ["engine.json", "stream.jsonl", "stderr.log", "evidence", "context", "report.html"].map { unitDir(n) + "/" + $0 }   // report.html: 단위 보고서(엔진이 그림, 3단계)
         deny += protectDeny()   // 지금 작업 가지 밖의 가지·HEAD·packed-refs(단위마다, 엔진이 가지를 바꾼 뒤 다시 계산)
         let readDeny = engineDeny + readDenyPaths
         let s: [String: Any] = ["sandbox": [
@@ -3425,6 +3502,8 @@ func usage() -> Never {
              원본: 실행 폴더(run.json·queue.json 이 있는 폴더) 또는 일반 꼴 대기열 파일(format "claude-board-queue")
            claude-autopilot prerun <실행 폴더> [--dev]
              출발 전: 판정을 한 번씩 미리 돌려 일하기 전부터 통과하는 단위를 prerun.json 에(출발 카드 감)
+           claude-autopilot report <실행 폴더> [--out <파일>|-]
+             보고서 다시 그리기(모델 0): 실행 폴더의 report.html·units/<n>/report.html. --out 이면 실행 보고서 하나만 그 파일에(- 는 표준 출력)
            claude-autopilot finish <실행 폴더> merge --into <가지> [--story <키>]
            claude-autopilot finish <실행 폴더> promote <가지> --into <가지>
            claude-autopilot finish <실행 폴더> discard [--story <키>]
@@ -3995,6 +4074,37 @@ func statusBeforeStart(_ dir: String, _ run: [String: Any], dev devFlag: Bool, j
 }
 
 extension String { func ifEmpty(_ s: String) -> String { isEmpty ? s : self } }
+
+// 보고서 다시 그리기(3단계, 화면 없는 그리기 모드): 실행 폴더의 기록으로 report.html 과 단위 폴더가 있는 단위마다 units/<n>/report.html 을 쓴다.
+// 도는 엔진도 단위 판정 뒤·끝 정리 때 같은 틀로 그리므로, 이것은 3단계 전에 끝난 실행이나 사람이 다시 그리고 싶을 때 쓴다.
+// --out <파일> 이면 실행 보고서 하나만 그 파일에(- 이면 표준 출력) 쓰고 실행 폴더에는 쓰지 않는다. 모델을 부르지 않는다
+func cmdReport(_ args: [String]) -> Never {
+    var rest = args, out: String?
+    if let i = rest.firstIndex(of: "--out") {
+        guard i + 1 < rest.count else { usage() }
+        out = rest[i + 1]
+        rest.removeSubrange(i...(i + 1))
+    }
+    guard rest.count == 1 else { usage() }
+    let d = runDir(rest.first)
+    let id = (d as NSString).lastPathComponent
+    let src = EngineReportSource.files(d)
+    if let out {
+        guard let r = apReportRun(id: id, source: src) else { fail("실행 기록(run.json)을 읽지 못했습니다: \(d)") }
+        let html = apReportHTML(r, at: now(), tz: .current, home: home)
+        if out == "-" { FileHandle.standardOutput.write(Data(html.utf8)); exit(0) }
+        do { try Data(html.utf8).write(to: URL(fileURLWithPath: out), options: .atomic) } catch { fail("보고서를 쓰지 못했습니다: \(out): \(error.localizedDescription)") }
+        print("실행 보고서를 썼습니다: \(out)")
+        exit(0)
+    }
+    let units = src.queue().indices.map { $0 + 1 }.filter { isDir(d + "/units/\($0)") && !isLink(d + "/units/\($0)") }
+    let r = apDrawReports(id: id, source: src, sink: EngineReportSink(dir: d), units: units, clock: EngineClock(), tz: .current, home: home)
+    if r.written.contains(.run) { print("실행 보고서: \(d)/report.html") }
+    let n = r.written.filter { $0 != .run }.count
+    if n > 0 { print("단위 보고서 \(n)개: \(d)/units/<n>/report.html") }
+    for e in r.errors { FileHandle.standardError.write(Data(("보고서: " + e + "\n").utf8)) }
+    exit(r.errors.isEmpty ? 0 : 1)
+}
 
 func cmdStatus(_ args: [String]) -> Never {
     let dir = runDir(args.first)
@@ -4578,6 +4688,7 @@ func mergeRefs(_ label: String, _ refs: [(repo: String, branch: String)], _ into
 
 let argv = Array(CommandLine.arguments.dropFirst())
 switch argv.first {
+case "report": cmdReport(Array(argv.dropFirst()))
 case "start": cmdStart(Array(argv.dropFirst()))
 case "run": cmdRun(Array(argv.dropFirst()))
 case "control": cmdControl(Array(argv.dropFirst()))
