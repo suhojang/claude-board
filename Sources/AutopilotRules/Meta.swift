@@ -472,7 +472,8 @@ public func apChunked(_ chunks: [APTextChunk], want: [String], prompt: String) -
 private let redactRules: [(String, String, String)] = [   // (꼴, 바꿀 글, 종류)
     ("-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\\s\\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----", "[가림:개인 키]", "key"),
     ("(?i)\\b(https?://)[^/\\s:@\"'<>]+:[^/\\s@\"'<>]+@", "$1[가림:주소 암호]@", "userinfo"),
-    ("(?i)\\bhttps?://(hooks\\.slack\\.com/(services|workflows|triggers)|discord(app)?\\.com/api/webhooks|chat\\.googleapis\\.com/v1/spaces|hook\\.dooray\\.com/services|[a-z0-9.-]*\\.webhook\\.office\\.com|outlook\\.office\\.com/webhook)/[^\\s\"'<>)\\]]+", "[가림:webhook 주소]", "webhook"),
+    ("(?i)\\bhttps?://(hooks\\.slack\\.com/(services|workflows|triggers)|discord(app)?\\.com/api/webhooks|chat\\.googleapis\\.com/v1/spaces|[a-z0-9.-]*\\.webhook\\.office\\.com|outlook\\.office\\.com/webhook)/[^\\s\"'<>)\\]]+", "[가림:webhook 주소]", "webhook"),
+    ("(?i)\\bhttps?://(hooks?|webhooks?)\\.[a-z0-9.-]+/[^\\s\"'<>)\\]]{8,}", "[가림:webhook 주소]", "webhook"),   // hook.<메신저 호스트>/… 꼴(호스트 이름이 hook 으로 시작)
     ("(?i)\\bhttps?://[^\\s\"'<>/]+/[^\\s\"'<>]*\\b(hooks?|webhooks?)/[A-Za-z0-9_./-]{16,}[^\\s\"'<>)\\]]*", "[가림:webhook 주소]", "webhook"),
     ("\\beyJ[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{6,}", "[가림:JWT]", "jwt"),
     ("\\bAT(ATT|CTT)[A-Za-z0-9_=-]{20,}", "[가림:Atlassian 토큰]", "atlassian"),

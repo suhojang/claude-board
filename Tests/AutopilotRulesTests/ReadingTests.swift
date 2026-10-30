@@ -43,7 +43,7 @@ enum FakeSecret {
     static let gitlab = "gl" + "pat-" + String(repeating: "Fake9", count: 5)
     static let pem = "-----BEGIN " + "RSA PRIVATE KEY-----\nMIIfake\nfakefake\n-----END " + "RSA PRIVATE KEY-----"
     static let hook = "https://hooks." + "slack.com/services/" + "T000FAKE/B000FAKE/" + String(repeating: "x", count: 24)
-    static let dooray = "https://hook." + "dooray.com/services/" + "1234/5678/" + String(repeating: "Fk", count: 12)
+    static let hookHost = "https://hook." + "messenger.example/services/" + "1234/5678/" + String(repeating: "Fk", count: 12)
 }
 
 // 가짜 근거 묶음 — 메모리, 해시 대신 "sha-<글자 수>"
@@ -258,7 +258,8 @@ private let redactRows: [RedactRow] = [
     .init(note: "Figma", input: FakeSecret.figma, count: 1, has: "[가림:Figma 토큰]"),
     .init(note: "개인 키 덩어리", input: "앞\n\(FakeSecret.pem)\n뒤", count: 1, has: "[가림:개인 키]"),
     .init(note: "Slack webhook 주소", input: "보낼 곳 \(FakeSecret.hook) 끝", count: 1, has: "[가림:webhook 주소]"),
-    .init(note: "두레이 webhook 주소", input: FakeSecret.dooray, count: 1, has: "[가림:webhook 주소]"),
+    .init(note: "hook 으로 시작하는 호스트의 메신저 webhook 주소", input: FakeSecret.hookHost, count: 1, has: "[가림:webhook 주소]"),
+    .init(note: "hook 호스트라도 경로가 짧으면 그대로", input: "https://hooks.example.com/a", count: 0, has: "https://hooks.example.com/a"),
     .init(note: "주소 안 암호", input: "https://kim:pa55word@example.com/x", count: 1, has: "https://[가림:주소 암호]@example.com/x"),
     .init(note: "암호 줄", input: "password=hunter2-fake", count: 1, has: "password=[가림:비밀 값]"),
     .init(note: "한국어 암호 줄", input: "비밀번호: hunter2", count: 1, has: "비밀번호: [가림:비밀 값]"),
