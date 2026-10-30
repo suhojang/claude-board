@@ -1457,6 +1457,24 @@ struct EngineClaimProbe: APClaimProbe {
     }
 }
 
+// 실행이 잡을 같은 경로 자리 — 고정 설정의 저장소(원래 저장소), 저장소 밖 작업 폴더는 그 폴더. 실제 경로로(6단계 ⑫-6)
+func claimPathsOf(_ f: [String: Any]) -> [String] {
+    let unitCwds = (f["units"] as? [[String: Any]] ?? []).compactMap { $0["cwd"] as? String }.map(canonical)
+    let repoList = (f["repos"] as? [String] ?? []).map(canonical)
+    return repoList + unitCwds.filter { c in !repoList.contains { c == $0 || c.hasPrefix($0 + "/") } }
+}
+// 출발 전 확인용 — 자리 표를 읽기만 하고 바꿈은 버린다
+struct ReadOnlyClaimBook: APClaimBook {
+    let path: String
+    func update(_ body: ([APClaim]) -> (put: [APClaim], drop: [String])) throws {
+        let rows = readOnlyRows(path, "SELECT key, path, run_id, run_dir, label, pid, claimed FROM path_claims").map { r -> APClaim in
+            APClaim(key: r[0] as? String ?? "", path: r[1] as? String ?? "", run: r[2] as? String ?? "", runDir: r[3] as? String ?? "",
+                    label: r[4] as? String ?? "", pid: inum(r[5]).map(Int32.init), claimed: num(r[6]) ?? 0)
+        }
+        _ = body(rows)
+    }
+}
+
 // 기록 저장소를 읽기만 하는 질의(status) — 파일이 없거나 판이 낮아 표가 없으면 빈 목록
 func readOnlyRows(_ path: String, _ sql: String, _ args: [String] = []) -> [[Any?]] {
     guard fm.fileExists(atPath: path) else { return [] }
@@ -4512,9 +4530,7 @@ func cmdStart(_ args: [String]) -> Never {
     // 같은 경로의 두 번째 출발 거부(6단계 ⑫-6, 규칙 apClaimPaths): 저장소 경로(저장소 밖 작업 폴더는 그 폴더)를 실제 경로로 풀어 기록 저장소의 경로 자리 표에
     // 한 transaction 으로 잡는다. 겹치는 자리의 실행이 살아 있으면 거부, 끝났거나 엔진·LaunchAgent 가 없으면 그 자리를 치우고 잡는다. 표를 못 쓰면 출발하지 않는다(닫힌 쪽).
     // 가지·작업 트리를 만들기 전에 잡아, 거의 같은 때 온 두 출발 가운데 하나만 지나간다. 잡은 뒤 실패하면 fail 이 푼다
-    let unitCwds = (frozen["units"] as? [[String: Any]] ?? []).compactMap { $0["cwd"] as? String }.map(canonical)
-    let repoList = (frozen["repos"] as? [String] ?? []).map(canonical)
-    let claimPaths = repoList + unitCwds.filter { c in !repoList.contains { c == $0 || c.hasPrefix($0 + "/") } }
+    let claimPaths = claimPathsOf(frozen)
     if !fm.fileExists(atPath: privateRoot(dev: dev)) { mkdirPrivate(privateRoot(dev: dev)) }
     let claimBook = EngineClaimBook(path: recordsPath(dev: dev))
     let claimed = apClaimPaths(run: id, runDir: dir, label: label, pid: getpid(), paths: claimPaths, home: home, book: claimBook, probe: EngineClaimProbe(), clock: EngineClock())
@@ -4687,7 +4703,13 @@ func cmdControl(_ args: [String]) -> Never {
 // 출발 전 실행 폴더: 확인 결과와 고정될 값, 출발 명령 한 줄
 func statusBeforeStart(_ dir: String, _ run: [String: Any], dev devFlag: Bool, json: Bool = false) -> Never {
     let dev = devFlag || run["claude_args"] != nil || run["claude_path"] != nil
-    let (problems, f, _) = prepare(dir, dev: dev)
+    var (problems, f, _) = prepare(dir, dev: dev)
+    // 같은 경로에서 도는 실행(6단계 ⑫-6): 출발할 때와 같은 규칙(apClaimPaths)을 읽기만 하는 자리 표로 미리 본다 — 보드의 출발 준비가 고칠 것으로 보인다.
+    // 거부는 출발(start)이 한 transaction 으로 다시 한다(그사이 다른 출발이 잡을 수 있어서)
+    if let why = apClaimBusyText(apClaimPaths(run: (dir as NSString).lastPathComponent, runDir: dir, label: "", pid: nil, paths: claimPathsOf(f), home: home,
+                                              book: ReadOnlyClaimBook(path: recordsPath(dev: dev)), probe: EngineClaimProbe(), clock: EngineClock()), home: home) {
+        problems.append(why)
+    }
     // 보드의 출발 화면이 읽는 꼴(2단계 5-2a): 같은 확인(prepare)의 고칠 것과, 보드가 다시 셈할 수 없는 고정될 값(어디서와 그 까닭, 저장소, Jira 단위의 가지)만.
     // 지금 가지·가지 목록·커밋 안 한 변경은 보드가 git 으로 직접 읽는다
     if json {
