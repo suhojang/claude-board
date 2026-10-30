@@ -5,8 +5,11 @@ struct BoardGitRow: Row {
     let note: String
     let commonDir: String?
     let commonIno: String?
+    var workGitDir: String? = nil
+    var workGitIno: String? = nil
     let liveCommon: String?
     let liveCommonIno: String?
+    var liveWorkIno: String? = nil
     let changed: String?
 }
 
@@ -17,13 +20,16 @@ private let boardRows: [BoardGitRow] = [
     .init(note: "inode 가 다름(바꿔치기) → 막음", commonDir: "/r/.git", commonIno: "1:2", liveCommon: "/r/.git", liveCommonIno: "9:9", changed: "git 폴더가 출발 때와 달라져"),
     .init(note: "지금 공통 폴더를 못 읽음(nil) → 경로가 다른 것으로 막음", commonDir: "/r/.git", commonIno: "1:2", liveCommon: nil, liveCommonIno: nil, changed: "git 폴더가 출발 때와 달라져"),
     .init(note: "출발 때 inode 기록이 없으면 경로만 본다(지금 inode 를 못 읽어도 통과)", commonDir: "/r/.git", commonIno: nil, liveCommon: "/r/.git", liveCommonIno: nil, changed: nil),
+    .init(note: "보안 검토 4: inode 를 기록했는데 지금 nil 이면(못 읽음) 다르다고 본다(전에는 nil 이면 통과)", commonDir: "/r/.git", commonIno: "1:2", liveCommon: "/r/.git", liveCommonIno: nil, changed: "git 폴더가 출발 때와 달라져"),
+    .init(note: "보안 검토 4: 따로 작업 트리 git 폴더 inode 가 다름 → 막음", commonDir: "/r/.git", commonIno: "1:2", workGitDir: "/r/.git/worktrees/x", workGitIno: "3:4", liveCommon: "/r/.git", liveCommonIno: "1:2", liveWorkIno: "9:9", changed: "작업 트리 git 폴더가 출발 때와 달라져"),
+    .init(note: "따로 작업 트리 git 폴더 inode 가 같음 → 통과", commonDir: "/r/.git", commonIno: "1:2", workGitDir: "/r/.git/worktrees/x", workGitIno: "3:4", liveCommon: "/r/.git", liveCommonIno: "1:2", liveWorkIno: "3:4", changed: nil),
 ]
 
 @Suite("자율주행 보드 git 받침") struct BoardGitTests {
     @Test("git 폴더가 출발 때와 다르면 막는다", arguments: boardRows)
     func 바뀜(_ r: BoardGitRow) {
-        let rec = APGitRecord(commonDir: r.commonDir, commonIno: r.commonIno, workGitDir: nil, workGitIno: nil)
-        #expect(apBoardGitChanged(rec, liveCommon: r.liveCommon, liveCommonIno: r.liveCommonIno) == r.changed)
+        let rec = APGitRecord(commonDir: r.commonDir, commonIno: r.commonIno, workGitDir: r.workGitDir, workGitIno: r.workGitIno)
+        #expect(apBoardGitChanged(rec, liveCommon: r.liveCommon, liveCommonIno: r.liveCommonIno, liveWorkIno: r.liveWorkIno) == r.changed)
     }
     @Test("ref·객체를 읽을 때 박는 env: GIT_DIR·GIT_CEILING")
     func 박기() {

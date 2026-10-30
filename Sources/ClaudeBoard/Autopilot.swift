@@ -4873,6 +4873,7 @@ struct APMergeView: Equatable {
     var promotionSaved = false
     var repos: [String] = []                 // 엔진이 가지를 만든 저장소(branches.repos)
     var gitRec: [String: APGitRecord] = [:]  // 저장소 → 출발 때 git 자리(⑦ 보드 git 받침, GIT_DIR 박기·바꿔치기 가리기)
+    var runWorktree: [String: String] = [:]  // 이 실행의 작업 트리 경로 → 저장소(finding 5: 그 자리 status 는 기록된 git dir 로 박아 돌린다)
     var gitBlocked: [String: String] = [:]   // 출발 때와 git 폴더가 달라져 보드가 돌리지 않은 저장소 → 까닭(readGit 가 채움)
     var baseHeads: [String: String] = [:]
     var restored: [String: Bool] = [:]
@@ -5000,6 +5001,7 @@ struct APRepoPlan: Identifiable { let repo: String; let plan: APMergePlan?; var 
             m.made[k] = apStrings(i["made"])
             m.gitRec[k] = APGitRecord(commonDir: apText(i["common_dir"]), commonIno: apText(i["common_ino"]),
                                       workGitDir: apText(i["work_git_dir"]), workGitIno: apText(i["work_git_ino"]))
+            if let wt = apText(i["work_tree"]) { m.runWorktree[wt] = k }   // 이 실행의 작업 트리(모델이 쓸 수 있던 자리) → 저장소. finding 5: 그 자리 status 는 박아 돌린다
         }
         for (k, val) in br["end"] as? [String: Any] ?? [:] { m.endHeads[k] = (val as? [String: Any] ?? [:]).compactMapValues { $0 as? String } }
         for (k, val) in br["stories"] as? [String: Any] ?? [:] {
@@ -5197,21 +5199,26 @@ struct APRepoPlan: Identifiable { let repo: String; let plan: APMergePlan?; var 
         reading = true
         // 앞 읽기 값(앞 실행이나 엔진이 한 일 전의 가지)을 그대로 보이지 않게 비운다(5-3b ⑦) — 읽는 동안 단계·저장소 줄·지우기 글은 "읽는 중"
         plans = [:]; spans = [:]; existing = [:]; contained = []; foreign = []
-        let gitRec = m.gitRec
+        let gitRec = m.gitRec, runWorktree = m.runWorktree
         queue.async {
             var plans: [String: APMergePlan] = [:], spans: [String: APMergePlan] = [:], have: [String: Set<String>] = [:], contained = Set<String>()
             var wts: [String: [String: String]] = [:], heads: [String: [String: String]] = [:], foreign = Set<String>()
-            // 저장소마다 git 자리를 박는 env 와 막은 까닭(⑦ 보드 git 받침). 실행 기록(gitRec)이 있으면 그때 공통 git 폴더가 지금과 같은지 보고,
+            // 저장소마다 git 자리를 박는 env 와 막은 까닭(⑦ 보드 git 받침). 실행 기록(gitRec)이 있으면 그때 git 폴더가 지금과 같은지 보고(공통·작업 트리 둘 다, 보안 검토 4),
             // 다르면 그 저장소는 돌리지 않는다(사람이 확인). 같으면 GIT_DIR·GIT_CEILING 을 박아 ref·객체를 읽는다. 기록이 없으면(옛 실행) 공통 보호로만
             var pin: [String: [String]] = [:], blocked: [String: String] = [:]
+            var wtPin: [String: [String]] = [:]   // 이 실행의 작업 트리 경로 → status 를 박을 env(finding 5)
             func gitPin(_ r: String) -> [String] { pin[r] ?? [] }
             for r in Set(m.repos + m.stories.flatMap { $0.repos.map(\.repo) + $0.tasks.map(\.repo) }) where !r.isEmpty && FileManager.default.fileExists(atPath: r) {
                 let rec = gitRec[r] ?? APGitRecord(commonDir: nil, commonIno: nil, workGitDir: nil, workGitIno: nil)
                 let live = apGit(["rev-parse", "--git-common-dir"], r).map { $0.hasPrefix("/") ? apCanonical($0) : apCanonical(r + "/" + $0) }
-                if let why = apBoardGitChanged(rec, liveCommon: live, liveCommonIno: live.flatMap(apGitStat)) {
+                if let why = apBoardGitChanged(rec, liveCommon: live, liveCommonIno: live.flatMap(apGitStat), liveWorkIno: rec.workGitDir.flatMap(apGitStat)) {
                     blocked[r] = why; continue   // 바꿔치기 의심: 이 저장소의 가지를 읽지 않는다(시트가 까닭을 보이고 단추를 잠근다)
                 }
                 pin[r] = apBoardRefsPin(rec, repoRoot: r)
+                // finding 5: 이 실행의 작업 트리(모델이 쓸 수 있던 자리)에서 status 를 돌릴 때는 기록된 git dir 로 GIT_DIR·GIT_WORK_TREE 를 박는다 —
+                // 그러면 설정은 엔진이 믿는 .git 의 것만 읽혀, 모델이 쓴 .gitattributes 는 이미 있는 filter 이름을 고를 수만 있고 filter 를 새로 정의하지 못한다.
+                // 승격 대상 가지가 걸린 사람의 작업 트리는 박지 않고 공통 보호로 둔다(사람이 자기 저장소에서 git status 를 치는 것과 같다, 진행 상황.md 설계 판단)
+                if let wg = rec.workGitDir { for (wtPath, repo) in runWorktree where repo == r { wtPin[wtPath] = ["GIT_DIR=" + wg, "GIT_WORK_TREE=" + wtPath] } }
                 var hs: [String: String] = [:]
                 for line in (apGit(["for-each-ref", "--format=%(refname)\t%(objectname)", "refs/heads/"], r, env: gitPin(r)) ?? "").split(separator: "\n") {
                     let f = line.split(separator: "\t")
@@ -5232,7 +5239,7 @@ struct APRepoPlan: Identifiable { let repo: String; let plan: APMergePlan?; var 
             for st in steps {
                 for (r, src) in st.refs {
                     let base = apCarriesBase(source: st.source, after: st.after, base: m.run.bases[r]) ? m.baseHeads[r] : nil   // 규칙 AutopilotRules/Branches.swift
-                    plans[st.id + "|" + r] = have[r] == nil ? APMergePlan(state: "nosrc") : APMerge.plan(r, src: src, into: st.into, wts: wts[r] ?? [:], baseHead: base, env: gitPin(r))
+                    plans[st.id + "|" + r] = have[r] == nil ? APMergePlan(state: "nosrc") : APMerge.plan(r, src: src, into: st.into, wts: wts[r] ?? [:], baseHead: base, env: gitPin(r), wtPin: wtPin)
                 }
             }
             if !m.run.work.isEmpty {
@@ -5283,7 +5290,7 @@ struct APRepoPlan: Identifiable { let repo: String; let plan: APMergePlan?; var 
     }
     // 합치기 미리 보기 — 엔진 mergeRefs 와 같은 판단(같은 merge-tree 명령이라 미리 본 것과 엔진 판정이 어긋나지 않는다. merge-tree 는 ref 를 움직이지 않고
     // 이름 없는 tree 객체만 남긴다). env 는 받는 가지 저장소의 GIT_DIR 박기(ref·객체). 작업 트리 status 는 그 작업 트리 자리에서 공통 보호로만 돈다
-    nonisolated static func plan(_ r: String, src: String, into: String, wts: [String: String], baseHead: String?, env: [String] = []) -> APMergePlan {
+    nonisolated static func plan(_ r: String, src: String, into: String, wts: [String: String], baseHead: String?, env: [String] = [], wtPin: [String: [String]] = [:]) -> APMergePlan {
         var p = APMergePlan()
         guard let sh = head(r, src, env: env) else { p.state = "nosrc"; return p }
         guard let ih = head(r, into, env: env) else { p.state = "nointo"; return p }
@@ -5304,8 +5311,9 @@ struct APRepoPlan: Identifiable { let repo: String; let plan: APMergePlan?; var 
         if p.state != "same" { p.files = numstat(r, ih, sh, env: env) }
         if let w = wts[into] {
             p.wt = w
-            // 받는 가지가 걸린 작업 트리의 더러움 — 그 작업 트리는 이 실행의 자리가 아닐 수 있어(승격 대상 가지) GIT_DIR 로 박지 않고 그 자리에서 공통 보호로만 돈다
-            if p.state != "same" { p.wtDirty = !(apGit(["status", "--porcelain", "--untracked-files=no", "--ignore-submodules=all"], w) ?? "x").isEmpty }
+            // 받는 가지가 걸린 작업 트리의 더러움. 이 실행의 작업 트리(모델이 쓸 수 있던 자리)면 기록된 git dir 로 박아 돌리고(wtPin, finding 5),
+            // 승격 대상 가지가 걸린 사람의 작업 트리면 박지 않고 공통 보호로만 돈다
+            if p.state != "same" { p.wtDirty = !(apGit(["status", "--porcelain", "--untracked-files=no", "--ignore-submodules=all"], w, env: wtPin[w] ?? []) ?? "x").isEmpty }
         }
         if let bh = baseHead { p.withBase = Int(apGit(["rev-list", "--count", "\(ih)..\(bh)"], r, env: env) ?? "") ?? 0 }
         return p
