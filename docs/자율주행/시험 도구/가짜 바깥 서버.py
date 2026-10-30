@@ -34,7 +34,7 @@ TOKEN = os.environ.get("FAKE_TOKEN", "")
 if not TOKEN.startswith("fake-"):
     sys.exit("FAKE_TOKEN 은 fake- 로 시작하는 가짜 값만 받습니다")
 
-lock = threading.Lock()
+lock = threading.RLock()   # reply 안의 log 도 같은 잠금을 잡는다(429 갈래는 잠금 안에서 reply)
 state = {"n": 1000, "left429": A.fail429, "titles": set(), "comments": {}, "pages": {}, "attach": {}}
 
 
