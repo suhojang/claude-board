@@ -341,6 +341,127 @@ public func apForbiddenLines(_ text: String) -> [String] {
 private func jsonArray(_ d: Data?) -> [Any]? { d.flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [Any] }
 private func str(_ v: Any?) -> String { v as? String ?? "" }
 
+// 단위 하나(units.json 의 한 칸)의 기계 검사 — apDraftCheck 의 단위 줄(2026-10-30 7단계 ⑫-7a 에서 가져오기 세션 검사와 함께 쓰려고 그대로 떼어 냄).
+// earlier: 앞선 단위 id(depends·겹침 확인). 객체가 아니면 단위 없이(nil) 까닭만
+public func apDraftUnitParse(_ v: Any, n: Int, files: APDraftFiles, earlier unitIds: [String]) -> (unit: APDraftedUnit?, problems: [String], warnings: [String]) {
+    var problems: [String] = [], warnings: [String] = []
+    func bad(_ s: String) { problems.append(s) }
+    func secretIn(_ s: String, _ where_: String) { if apRedact(s).count > 0 { bad("\(where_) 에 비밀 꼴(토큰·키 등)이 있습니다") } }
+    func plainText(_ s: String, _ where_: String, _ max: Int) {
+        if s.count > max { bad("\(where_) 가 \(max)자보다 깁니다(\(s.count)자)") }
+        if apHasTag(s) { bad("\(where_) 에 HTML 태그가 있습니다") }
+    }
+    guard let o = v as? [String: Any] else { bad("단위 \(n) 이 JSON 객체가 아닙니다"); return (nil, problems, warnings) }
+    // 받는 칸은 허용 목록뿐(⑪-2 보안 검토): 샌드박스 밖에서 돌거나(precheck·action) 판정·세션 범위를 넓히는(check_sandbox·local_binding·쓰기 범위·
+    // 근거 묶음 자리·작업 폴더) 칸은 모델이 쓸 수 없다. 그런 칸이 있으면 기계 검사 실패 줄로 보이고 준비가 멈춘다(사람이 넣는 길은 대기열·출발 확인)
+    for k in o.keys.sorted() where !apDraftUnitKeys.contains(k) {
+        bad(apDraftWideningKeys.contains(k) ? "단위 \(n) 의 \(k) 는 초안 세션이 쓸 수 없는 칸입니다(샌드박스 밖에서 돌거나 범위를 넓힘, 사람만 넣음)"
+                                             : "단위 \(n) 에 형식 밖 칸 \(k) 가 있습니다")
+    }
+    let id = str(o["id"])
+    if id.range(of: apDraftUnitIdPattern, options: .regularExpression) == nil { bad("단위 \(n) 의 id 는 u1 꼴이어야 합니다(\(id.prefix(20)))") }
+    if unitIds.contains(id) { bad("단위 id \(id) 가 두 번 있습니다") }
+    var u = APDraftedUnit(id: id, title: str(o["title"]), kind: str(o["kind"]), folder: str(o["folder"]), prompt: str(o["prompt"]), check: str(o["check"]))
+    if u.title.isEmpty { bad("단위 \(n) 에 제목이 없습니다") }
+    plainText(u.title, "단위 \(n) 제목", APDraftLimit.title)
+    if u.prompt.isEmpty { bad("단위 \(n) 에 할 일(prompt)이 없습니다") }
+    plainText(u.prompt, "단위 \(n) 할 일", APDraftLimit.prompt)
+    if !apDraftKinds.contains(u.kind) { bad("단위 \(n) 의 종류(kind)는 \(apDraftKinds.sorted().joined(separator: "·")) 가운데 하나입니다") }
+    if !u.folder.isEmpty, !apScenarioPathOK(u.folder) { bad("단위 \(n) 의 작업 폴더(folder)는 저장소 안 상대 경로입니다") }
+    for (t, w) in [(u.title, "제목"), (u.prompt, "할 일"), (u.check, "판정 명령")] {
+        secretIn(t, "단위 \(n) \(w)")
+        for l in apForbiddenLines(t) { bad("단위 \(n) \(w)에 다른 가지 맞추기·push·바깥 쓰기를 시키는 줄이 있습니다: \(l)") }
+    }
+    if u.check.count > 2000 { bad("단위 \(n) 의 판정 명령이 2,000자보다 깁니다") }
+    if let e = (o["est_min"] as? NSNumber)?.doubleValue, e >= 1, e <= 120 { u.estMin = e } else { bad("단위 \(n) 의 예상(est_min)은 1~120 분입니다") }
+    if let deps = o["depends"] {
+        if let a = deps as? [String] {
+            for x in a where !unitIds.contains(x) { bad("단위 \(n) 의 depends 에 적은 \(x) 는 앞선 단위 id 가 아닙니다") }
+            u.depends = a
+        } else { bad("단위 \(n) 의 depends 는 앞선 단위 id 배열입니다") }
+    }
+    let (crs, cp) = apParseCriteria(o["criteria"], unit: n)
+    problems += cp
+    if crs.count > APDraftLimit.criteriaPerUnit { bad("단위 \(n) 의 수용 기준이 \(APDraftLimit.criteriaPerUnit)개보다 많습니다") }
+    u.criteria = crs
+    if let ports = o["check_ports"] {
+        if let a = ports as? [Int], a.allSatisfy({ (1024...65535).contains($0) }), a.count <= 8 { u.checkPorts = a }
+        else { bad("단위 \(n) 의 check_ports 는 1024~65535 포트 배열(8개까지)입니다") }
+    }
+    if let scs = o["scenarios"] {
+        guard let a = scs as? [Any] else { bad("단위 \(n) 의 scenarios 는 배열입니다"); return (u, problems, warnings) }
+        if a.count > APDraftLimit.scenariosPerUnit { bad("단위 \(n) 의 시나리오가 \(APDraftLimit.scenariosPerUnit)개보다 많습니다") }
+        let present = Set(files.list("scenarios/" + id))
+        for x in a.prefix(APDraftLimit.scenariosPerUnit) {
+            guard let so = x as? [String: Any] else { bad("단위 \(n) 의 시나리오 칸이 객체가 아닙니다"); continue }
+            let f = str(so["file"])
+            guard f.range(of: apDraftFileNamePattern, options: .regularExpression) != nil else { bad("단위 \(n) 의 시나리오 파일 이름 꼴이 틀렸습니다(\(f.prefix(40)))"); continue }
+            guard let kind = APScenarioKind(rawValue: so["kind"] as? String ?? "shell") else { bad("단위 \(n) 의 시나리오 \(f) 종류는 shell·browser 입니다"); continue }
+            let crit = so["criterion"] as? String
+            if let c = crit, !crs.contains(where: { $0.id == c }) { bad("단위 \(n) 의 시나리오 \(f) 가 이 단위에 없는 수용 기준 \(c) 를 가리킵니다") }
+            if u.scenarios.contains(where: { $0.file == f }) { bad("단위 \(n) 의 시나리오 \(f) 가 두 번 있습니다"); continue }
+            guard present.contains(f), let data = files.read("scenarios/\(id)/\(f)") else { bad("단위 \(n) 의 시나리오 파일 scenarios/\(id)/\(f) 가 없습니다"); continue }
+            if data.count > APDraftLimit.scenarioBytes { bad("단위 \(n) 의 시나리오 \(f) 가 256 KB 보다 큽니다"); continue }
+            let text = String(decoding: data, as: UTF8.self)
+            if !text.hasPrefix("#!") { bad("단위 \(n) 의 시나리오 \(f) 첫 줄이 #! 이 아닙니다") }
+            secretIn(text, "단위 \(n) 의 시나리오 \(f)")
+            u.scenarios.append(APDraftScenario(file: f, kind: kind, criterion: crit))
+        }
+        for extra in present.subtracting(u.scenarios.map(\.file)) where !extra.hasPrefix(".") {
+            warnings.append("단위 \(n) 의 시나리오 폴더에 목록에 없는 파일 \(extra) 가 있어 넣지 않습니다")
+        }
+    }
+    if u.check.isEmpty, u.scenarios.isEmpty { bad("단위 \(n) 에 판정이 없습니다(판정 명령 check 나 시나리오가 있어야 합니다)") }
+    return (u, problems, warnings)
+}
+
+// 출발 카드 초안 하나(cards.json 의 한 칸)의 기계 검사 — apDraftCheck 의 카드 줄(⑫-7a 에서 그대로 떼어 냄). unitIds·units: 앞에서 받은 단위, earlier: 앞 카드
+public func apDraftCardParse(_ v: Any, n: Int, unitIds: [String], units: [APDraftedUnit], earlier: [APDraftCard]) -> (card: APDraftCard?, problems: [String]) {
+    var problems: [String] = []
+    func bad(_ s: String) { problems.append(s) }
+    func plainText(_ s: String, _ where_: String, _ max: Int) {
+        if s.count > max { bad("\(where_) 가 \(max)자보다 깁니다(\(s.count)자)") }
+        if apHasTag(s) { bad("\(where_) 에 HTML 태그가 있습니다") }
+    }
+    guard let o = v as? [String: Any] else { bad("카드 \(n) 이 JSON 객체가 아닙니다"); return (nil, problems) }
+    let id = str(o["id"])
+    if id.range(of: "^[A-Za-z0-9._-]{1,40}$", options: .regularExpression) == nil { bad("카드 \(n) 의 id 꼴이 틀렸습니다") }
+    let opts = (o["options"] as? [[String: Any]] ?? []).map { APDraftOption(key: str($0["key"]), label: str($0["label"]), note: str($0["note"])) }
+    var c = APDraftCard(id: id, title: str(o["title"]), why: str(o["why"]), options: opts, recommended: str(o["recommended"]),
+                        units: o["units"] as? [String] ?? [], criterion: o["criterion"] as? String)
+    plainText(c.title, "카드 \(n) 물음", APDraftLimit.cardTitle); plainText(c.why, "카드 \(n) 까닭", APDraftLimit.cardWhy)
+    if c.title.isEmpty { bad("카드 \(n) 에 물음이 없습니다") }
+    if !(2...5).contains(opts.count) { bad("카드 \(n) 의 선택지는 2~5개입니다") }
+    if Set(opts.map(\.key)).count != opts.count || opts.contains(where: { $0.key.range(of: "^[A-Za-z0-9._-]{1,40}$", options: .regularExpression) == nil || $0.label.isEmpty }) {
+        bad("카드 \(n) 의 선택지 key·label 꼴이 틀렸습니다")
+    }
+    for o2 in opts { plainText(o2.label, "카드 \(n) 선택지", APDraftLimit.option); plainText(o2.note, "카드 \(n) 선택지 설명", APDraftLimit.cardWhy) }
+    if !opts.contains(where: { $0.key == c.recommended }) { bad("카드 \(n) 의 추천이 선택지에 없습니다") }
+    for x in c.units where !unitIds.contains(x) { bad("카드 \(n) 이 없는 단위 \(x) 를 가리킵니다") }
+    if let cr = c.criterion {
+        let p = cr.split(separator: "/").map(String.init)
+        if p.count != 2 || !(units.first { $0.id == p[0] }?.criteria.contains { $0.id == p[1] } ?? false) { bad("카드 \(n) 의 criterion \(cr) 가 단위의 수용 기준이 아닙니다") }
+        c.units = p.count == 2 ? [p[0]] : c.units
+    }
+    if earlier.contains(where: { $0.id == c.id }) { bad("카드 id \(c.id) 가 두 번 있습니다") }
+    return (c, problems)
+}
+
+// 자율주행 지시 초안(autopilot.md 글)의 기계 검사 — apDraftCheck 의 지시 줄(⑫-7a 에서 그대로 떼어 냄): 상한·HTML·비밀 꼴·첫 줄·금지 줄, 다루지 않은 하네스 확인 지점
+public func apInstructionCheck(_ t: String, harness: [APHarnessPoint]) -> (instruction: String, problems: [String], missing: [APHarnessPoint], warnings: [String]) {
+    var problems: [String] = [], warnings: [String] = []
+    let instruction = t.trimmingCharacters(in: .whitespacesAndNewlines)
+    if instruction.count > APDraftLimit.instruction { problems.append("자율주행 지시(autopilot.md)가 2만 자보다 깁니다") }
+    if apHasTag(t) { problems.append("자율주행 지시(autopilot.md)에 HTML 태그가 있습니다") }
+    if apRedact(t).count > 0 { problems.append("자율주행 지시(autopilot.md)에 비밀 꼴(토큰·키 등)이 있습니다") }
+    let first = t.components(separatedBy: "\n").map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "# ").union(.whitespaces)) }.first { !$0.isEmpty } ?? ""
+    if !first.hasPrefix(apInstructionHeadLine) { problems.append("자율주행 지시의 첫 줄이 \"\(apInstructionHeadLine)\" 가 아닙니다") }
+    for l in apForbiddenLines(t) { problems.append("자율주행 지시에 바깥 쓰기·하네스 고치기·push 를 시키는 줄이 있습니다: \(l)") }
+    let missing = apHarnessMissing(harness, instruction: t)
+    if !missing.isEmpty { warnings.append("하네스 확인 지점 \(missing.count)곳을 지시가 다루지 않아 출발 카드로 묻습니다") }
+    return (instruction, problems, missing, warnings)
+}
+
 // 결과 폴더의 기계 검사(설계 2장 "기계 검사", ⑪-2). 못 지나면 problems(준비 줄 실패와 까닭), 막지 않는 것은 warnings,
 // 지시가 다루지 않은 하네스 확인 지점은 harnessMissing(출발 카드로 묻는다). firstUnit: 직접 입력 스택이라 첫 단위가 "프로젝트 구성"이어야 함
 public func apDraftCheck(files: APDraftFiles, harness: [APHarnessPoint], firstUnit: Bool) -> APDraftCheck {
@@ -364,69 +485,10 @@ public func apDraftCheck(files: APDraftFiles, harness: [APHarnessPoint], firstUn
         if arr.isEmpty { bad("단위 목록(units.json)이 비었습니다") }
         if arr.count > apDraftUnitMax { bad("단위가 \(apDraftUnitMax)개보다 많습니다(\(arr.count)개)") }
         for (i, v) in arr.prefix(apDraftUnitMax).enumerated() {
-            let n = i + 1
-            guard let o = v as? [String: Any] else { bad("단위 \(n) 이 JSON 객체가 아닙니다"); continue }
-            // 받는 칸은 허용 목록뿐(⑪-2 보안 검토): 샌드박스 밖에서 돌거나(precheck·action) 판정·세션 범위를 넓히는(check_sandbox·local_binding·쓰기 범위·
-            // 근거 묶음 자리·작업 폴더) 칸은 모델이 쓸 수 없다. 그런 칸이 있으면 기계 검사 실패 줄로 보이고 준비가 멈춘다(사람이 넣는 길은 대기열·출발 확인)
-            for k in o.keys.sorted() where !apDraftUnitKeys.contains(k) {
-                bad(apDraftWideningKeys.contains(k) ? "단위 \(n) 의 \(k) 는 초안 세션이 쓸 수 없는 칸입니다(샌드박스 밖에서 돌거나 범위를 넓힘, 사람만 넣음)"
-                                                     : "단위 \(n) 에 형식 밖 칸 \(k) 가 있습니다")
-            }
-            let id = str(o["id"])
-            if id.range(of: apDraftUnitIdPattern, options: .regularExpression) == nil { bad("단위 \(n) 의 id 는 u1 꼴이어야 합니다(\(id.prefix(20)))") }
-            if unitIds.contains(id) { bad("단위 id \(id) 가 두 번 있습니다") }
-            var u = APDraftedUnit(id: id, title: str(o["title"]), kind: str(o["kind"]), folder: str(o["folder"]), prompt: str(o["prompt"]), check: str(o["check"]))
-            if u.title.isEmpty { bad("단위 \(n) 에 제목이 없습니다") }
-            plainText(u.title, "단위 \(n) 제목", APDraftLimit.title)
-            if u.prompt.isEmpty { bad("단위 \(n) 에 할 일(prompt)이 없습니다") }
-            plainText(u.prompt, "단위 \(n) 할 일", APDraftLimit.prompt)
-            if !apDraftKinds.contains(u.kind) { bad("단위 \(n) 의 종류(kind)는 \(apDraftKinds.sorted().joined(separator: "·")) 가운데 하나입니다") }
-            if !u.folder.isEmpty, !apScenarioPathOK(u.folder) { bad("단위 \(n) 의 작업 폴더(folder)는 저장소 안 상대 경로입니다") }
-            for (t, w) in [(u.title, "제목"), (u.prompt, "할 일"), (u.check, "판정 명령")] {
-                secretIn(t, "단위 \(n) \(w)")
-                for l in apForbiddenLines(t) { bad("단위 \(n) \(w)에 다른 가지 맞추기·push·바깥 쓰기를 시키는 줄이 있습니다: \(l)") }
-            }
-            if u.check.count > 2000 { bad("단위 \(n) 의 판정 명령이 2,000자보다 깁니다") }
-            if let e = (o["est_min"] as? NSNumber)?.doubleValue, e >= 1, e <= 120 { u.estMin = e } else { bad("단위 \(n) 의 예상(est_min)은 1~120 분입니다") }
-            if let deps = o["depends"] {
-                if let a = deps as? [String] {
-                    for x in a where !unitIds.contains(x) { bad("단위 \(n) 의 depends 에 적은 \(x) 는 앞선 단위 id 가 아닙니다") }
-                    u.depends = a
-                } else { bad("단위 \(n) 의 depends 는 앞선 단위 id 배열입니다") }
-            }
-            let (crs, cp) = apParseCriteria(o["criteria"], unit: n)
-            r.problems += cp
-            if crs.count > APDraftLimit.criteriaPerUnit { bad("단위 \(n) 의 수용 기준이 \(APDraftLimit.criteriaPerUnit)개보다 많습니다") }
-            u.criteria = crs
-            if let ports = o["check_ports"] {
-                if let a = ports as? [Int], a.allSatisfy({ (1024...65535).contains($0) }), a.count <= 8 { u.checkPorts = a }
-                else { bad("단위 \(n) 의 check_ports 는 1024~65535 포트 배열(8개까지)입니다") }
-            }
-            if let scs = o["scenarios"] {
-                guard let a = scs as? [Any] else { bad("단위 \(n) 의 scenarios 는 배열입니다"); r.units.append(u); unitIds.append(id); continue }
-                if a.count > APDraftLimit.scenariosPerUnit { bad("단위 \(n) 의 시나리오가 \(APDraftLimit.scenariosPerUnit)개보다 많습니다") }
-                let present = Set(files.list("scenarios/" + id))
-                for x in a.prefix(APDraftLimit.scenariosPerUnit) {
-                    guard let so = x as? [String: Any] else { bad("단위 \(n) 의 시나리오 칸이 객체가 아닙니다"); continue }
-                    let f = str(so["file"])
-                    guard f.range(of: apDraftFileNamePattern, options: .regularExpression) != nil else { bad("단위 \(n) 의 시나리오 파일 이름 꼴이 틀렸습니다(\(f.prefix(40)))"); continue }
-                    guard let kind = APScenarioKind(rawValue: so["kind"] as? String ?? "shell") else { bad("단위 \(n) 의 시나리오 \(f) 종류는 shell·browser 입니다"); continue }
-                    let crit = so["criterion"] as? String
-                    if let c = crit, !crs.contains(where: { $0.id == c }) { bad("단위 \(n) 의 시나리오 \(f) 가 이 단위에 없는 수용 기준 \(c) 를 가리킵니다") }
-                    if u.scenarios.contains(where: { $0.file == f }) { bad("단위 \(n) 의 시나리오 \(f) 가 두 번 있습니다"); continue }
-                    guard present.contains(f), let data = files.read("scenarios/\(id)/\(f)") else { bad("단위 \(n) 의 시나리오 파일 scenarios/\(id)/\(f) 가 없습니다"); continue }
-                    if data.count > APDraftLimit.scenarioBytes { bad("단위 \(n) 의 시나리오 \(f) 가 256 KB 보다 큽니다"); continue }
-                    let text = String(decoding: data, as: UTF8.self)
-                    if !text.hasPrefix("#!") { bad("단위 \(n) 의 시나리오 \(f) 첫 줄이 #! 이 아닙니다") }
-                    secretIn(text, "단위 \(n) 의 시나리오 \(f)")
-                    u.scenarios.append(APDraftScenario(file: f, kind: kind, criterion: crit))
-                }
-                for extra in present.subtracting(u.scenarios.map(\.file)) where !extra.hasPrefix(".") {
-                    r.warnings.append("단위 \(n) 의 시나리오 폴더에 목록에 없는 파일 \(extra) 가 있어 넣지 않습니다")
-                }
-            }
-            if u.check.isEmpty, u.scenarios.isEmpty { bad("단위 \(n) 에 판정이 없습니다(판정 명령 check 나 시나리오가 있어야 합니다)") }
-            unitIds.append(id)
+            let p = apDraftUnitParse(v, n: i + 1, files: files, earlier: unitIds)
+            r.problems += p.problems; r.warnings += p.warnings
+            guard let u = p.unit else { continue }
+            unitIds.append(u.id)
             r.units.append(u)
         }
     } else { bad("단위 목록(units.json)이 없거나 JSON 배열이 아닙니다") }
@@ -438,29 +500,9 @@ public func apDraftCheck(files: APDraftFiles, harness: [APHarnessPoint], firstUn
         guard let arr = jsonArray(d) else { bad("출발 카드(cards.json)가 JSON 배열이 아닙니다"); return finishCheck(r, harness: harness, files: files) }
         if arr.count > apDraftCardMax { bad("출발 카드가 \(apDraftCardMax)개보다 많습니다") }
         for (i, v) in arr.prefix(apDraftCardMax).enumerated() {
-            let n = i + 1
-            guard let o = v as? [String: Any] else { bad("카드 \(n) 이 JSON 객체가 아닙니다"); continue }
-            let id = str(o["id"])
-            if id.range(of: "^[A-Za-z0-9._-]{1,40}$", options: .regularExpression) == nil { bad("카드 \(n) 의 id 꼴이 틀렸습니다") }
-            let opts = (o["options"] as? [[String: Any]] ?? []).map { APDraftOption(key: str($0["key"]), label: str($0["label"]), note: str($0["note"])) }
-            var c = APDraftCard(id: id, title: str(o["title"]), why: str(o["why"]), options: opts, recommended: str(o["recommended"]),
-                                units: o["units"] as? [String] ?? [], criterion: o["criterion"] as? String)
-            plainText(c.title, "카드 \(n) 물음", APDraftLimit.cardTitle); plainText(c.why, "카드 \(n) 까닭", APDraftLimit.cardWhy)
-            if c.title.isEmpty { bad("카드 \(n) 에 물음이 없습니다") }
-            if !(2...5).contains(opts.count) { bad("카드 \(n) 의 선택지는 2~5개입니다") }
-            if Set(opts.map(\.key)).count != opts.count || opts.contains(where: { $0.key.range(of: "^[A-Za-z0-9._-]{1,40}$", options: .regularExpression) == nil || $0.label.isEmpty }) {
-                bad("카드 \(n) 의 선택지 key·label 꼴이 틀렸습니다")
-            }
-            for o2 in opts { plainText(o2.label, "카드 \(n) 선택지", APDraftLimit.option); plainText(o2.note, "카드 \(n) 선택지 설명", APDraftLimit.cardWhy) }
-            if !opts.contains(where: { $0.key == c.recommended }) { bad("카드 \(n) 의 추천이 선택지에 없습니다") }
-            for x in c.units where !unitIds.contains(x) { bad("카드 \(n) 이 없는 단위 \(x) 를 가리킵니다") }
-            if let cr = c.criterion {
-                let p = cr.split(separator: "/").map(String.init)
-                if p.count != 2 || !(r.units.first { $0.id == p[0] }?.criteria.contains { $0.id == p[1] } ?? false) { bad("카드 \(n) 의 criterion \(cr) 가 단위의 수용 기준이 아닙니다") }
-                c.units = p.count == 2 ? [p[0]] : c.units
-            }
-            if r.cards.contains(where: { $0.id == c.id }) { bad("카드 id \(c.id) 가 두 번 있습니다") }
-            r.cards.append(c)
+            let p = apDraftCardParse(v, n: i + 1, unitIds: unitIds, units: r.units, earlier: r.cards)
+            r.problems += p.problems
+            if let c = p.card { r.cards.append(c) }
         }
     } else { r.warnings.append("출발 카드 초안(cards.json)이 없습니다(모호한 점이 없다고 봅니다)") }
     return finishCheck(r, harness: harness, files: files)
@@ -481,16 +523,8 @@ private func finishCheck(_ r0: APDraftCheck, harness: [APHarnessPoint], files: A
     }
     // 5) 지시
     if let d = files.read("autopilot.md") {
-        let t = String(decoding: d, as: UTF8.self)
-        r.instruction = t.trimmingCharacters(in: .whitespacesAndNewlines)
-        if r.instruction.count > APDraftLimit.instruction { r.problems.append("자율주행 지시(autopilot.md)가 2만 자보다 깁니다") }
-        if apHasTag(t) { r.problems.append("자율주행 지시(autopilot.md)에 HTML 태그가 있습니다") }
-        if apRedact(t).count > 0 { r.problems.append("자율주행 지시(autopilot.md)에 비밀 꼴(토큰·키 등)이 있습니다") }
-        let first = t.components(separatedBy: "\n").map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "# ").union(.whitespaces)) }.first { !$0.isEmpty } ?? ""
-        if !first.hasPrefix(apInstructionHeadLine) { r.problems.append("자율주행 지시의 첫 줄이 \"\(apInstructionHeadLine)\" 가 아닙니다") }
-        for l in apForbiddenLines(t) { r.problems.append("자율주행 지시에 바깥 쓰기·하네스 고치기·push 를 시키는 줄이 있습니다: \(l)") }
-        r.harnessMissing = apHarnessMissing(harness, instruction: t)
-        if !r.harnessMissing.isEmpty { r.warnings.append("하네스 확인 지점 \(r.harnessMissing.count)곳을 지시가 다루지 않아 출발 카드로 묻습니다") }
+        let ic = apInstructionCheck(String(decoding: d, as: UTF8.self), harness: harness)
+        r.instruction = ic.instruction; r.problems += ic.problems; r.harnessMissing = ic.missing; r.warnings += ic.warnings
     } else {
         r.problems.append("자율주행 지시 초안(autopilot.md)이 없습니다")
         r.harnessMissing = harness
