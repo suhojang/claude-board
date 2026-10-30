@@ -1,0 +1,11 @@
+[
+ {"id": "u1", "title": "할 일 만들기·목록 API", "kind": "dev", "folder": "app",
+  "prompt": "할 일 만들기(POST /todos)와 목록(GET /todos) 경로를 app/ 에 만든다.\n- FAKE WRITE app/todos.py ROUTES = ['POST /todos', 'GET /todos']\n- FAKE COMMIT 할 일 경로",
+  "est_min": 30,
+  "criteria": [{"id": "AC-1", "text": "POST /todos 가 있다"}, {"id": "AC-2", "text": "GET /todos 가 있다"}],
+  "scenarios": [{"file": "routes.py", "kind": "shell", "criterion": "AC-1"}, {"file": "list.sh", "kind": "shell", "criterion": "AC-2"}]},
+ {"id": "u2", "title": "README 안내", "kind": "docs", "folder": "",
+  "prompt": "README 에 할 일 API 를 띄우는 법을 쉽게 적는다.\n- FAKE WRITE NOTES.md 할 일 API 를 띄우는 법: README 를 보세요\n- FAKE COMMIT 안내",
+  "check": "grep -q '할 일' NOTES.md", "est_min": 15, "depends": ["u1"],
+  "criteria": [{"id": "AC-3", "text": "띄우는 법이 쉽게 읽힌다"}]}
+]

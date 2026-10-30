@@ -29,6 +29,11 @@
 #     MCP 서버는 띄우지 않고 바깥으로 아무것도 보내지 않는다. 질문의 "주소:" 줄 주소에 ?fake=<꼴> 이 있으면 그 꼴로 답한다:
 #       ok(기본) · html(절 글에 태그) · extra(형식 밖 칸) · long(요약 400자) · secret(요약에 가짜 토큰) · text(JSON 앞에 다른 글) · fence(```json 울타리)
 #       · write(쓰기 도구를 부르려 했다고 치고, 그 이름이 --disallowedTools 의 어느 꼴에 걸리는지 남김) · slow(600초 기다림, 엔진 시간 상한 시험) · error(오류 결과)
+#  4) 초안 세션(인자에 --input-format 이 없고 --tools 가 있을 때, 5단계 ⑪-2 주제로 시작): `claude -p --output-format json` 처럼 표준 입력의 글을 받는다.
+#     첫 줄이 "Claude Board 자율주행의 초안 세션입니다." 이고 글 안에 "FAKE DRAFT <견본 폴더 절대 경로>" 줄(주제 글에 넣음)이 있으면 그 폴더의
+#     결과 파일(spec.md·units.json·cards.json·autopilot.md·scenarios/<단위 id>/…)을 지금 폴더(엔진이 정한 결과 폴더 draft/)에 그대로 복사한다.
+#     "FAKE DRAFT_SLEEP <초>" 줄이 있으면 그만큼 기다린 뒤(시간 상한 시험), "FAKE DRAFT_ERROR" 면 오류 결과로 끝낸다.
+#     받은 인자·--settings 파일 내용·글 앞부분을 결과 폴더의 숨은 파일 .fake-draft.json 에 남긴다(기계 검사는 숨은 파일을 보지 않음). 바깥으로 아무것도 보내지 않는다
 # 남기는 것(단위 폴더 $CLAUDE_BOARD_UNIT_DIR): fake-args.log(띄울 때 인자 한 줄), fake-in.log(표준 입력 줄 원문, 띄울 때마다 머리 줄),
 # fake-signals.log(받은 신호와 시각), fake-runs.count(이 단위에서 띄운 횟수). 뜰 때 진짜 claude 처럼 작업 폴더에서 git status 를 한 번 부른다
 # (샌드박스 밖에서 도는 claude 의 git, 2026-10-30 5-4 실측 흉내)
@@ -103,6 +108,41 @@ if "--mcp-config" in args:
     res = {"type": "result", "subtype": "success", "is_error": False, "result": text, "total_cost_usd": 0, "num_turns": 1, "session_id": "fake-read"}
     if mode == "error":
         res = {"type": "result", "subtype": "error_during_execution", "is_error": True, "total_cost_usd": 0}
+    sys.stdout.write(json.dumps(res, ensure_ascii=False) + "\n")
+    sys.exit(0)
+
+if "--input-format" not in args and "--tools" in args:
+    import re as _re, shutil
+    def after(k):
+        return args[args.index(k) + 1] if k in args and args.index(k) + 1 < len(args) else None
+    prompt = sys.stdin.read()
+    try:
+        settings = json.load(open(after("--settings")))
+    except Exception as ex:
+        settings = "읽지 못함: %s" % ex
+    rec = {"argv": args, "settings": settings, "cwd": os.getcwd(), "env_draft": os.environ.get("CLAUDE_BOARD_DRAFT"),
+           "prompt_head": prompt[:1500], "prompt_chars": len(prompt), "first_line": prompt.split("\n", 1)[0]}
+    m = _re.search(r"^\s*(?:- )?FAKE DRAFT (/.+?)\s*$", prompt, _re.M)   # 견본 폴더 경로에 빈칸이 있어도 줄 끝까지
+    copied = []
+    ok = prompt.startswith("Claude Board 자율주행의 초안 세션입니다.") and m is not None
+    sl = _re.search(r"^\s*(?:- )?FAKE DRAFT_SLEEP (\d+)", prompt, _re.M)
+    if sl:
+        time.sleep(int(sl.group(1)))
+    if ok and os.path.isdir(m.group(1)):
+        src = m.group(1)
+        for root, dirs, names in os.walk(src):
+            for n in names:
+                a = os.path.join(root, n)
+                rel = os.path.relpath(a, src)
+                os.makedirs(os.path.dirname(rel) or ".", exist_ok=True)
+                shutil.copyfile(a, rel)
+                copied.append(rel)
+    rec["copied"] = sorted(copied)
+    json.dump(rec, open(".fake-draft.json", "w"), ensure_ascii=False, indent=1)
+    if _re.search(r"^\s*(?:- )?FAKE DRAFT_ERROR", prompt, _re.M) or not ok:
+        res = {"type": "result", "subtype": "error_during_execution", "is_error": True, "total_cost_usd": 0}
+    else:
+        res = {"type": "result", "subtype": "success", "is_error": False, "result": "결과 파일 %d개를 썼습니다." % len(copied), "total_cost_usd": 0, "num_turns": 1, "session_id": "fake-draft"}
     sys.stdout.write(json.dumps(res, ensure_ascii=False) + "\n")
     sys.exit(0)
 
