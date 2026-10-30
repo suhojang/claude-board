@@ -950,6 +950,43 @@ enum APRecords {
         }
         return d
     }
+
+    // 보고서를 그릴 기록(3단계) — 원문을 지운 실행도 그리도록 행을 run.json·queue.json·engine.json 꼴 사전으로 바꾼다(결과 기록은 전문).
+    // 판정 출력·거부한 일의 자세한 줄은 실행 폴더에만 있어 이 바탕에서는 마지막 판정 종료 코드와 거부한 일 목록까지다
+    static func reportSource(_ path: String, run id: String) -> APRecordsReportSource? {
+        guard let db = open(path) else { return nil }
+        defer { sqlite3_close_v2(db) }
+        var err: String?
+        let rsql = """
+            SELECT r.title, COALESCE(p.name, r.project_id), r.model, r.state, r.reason, r.started, r.ended, r.worktree, r.branches, r.harness, r.epic
+            FROM runs r LEFT JOIN projects p ON p.id = r.project_id WHERE r.id = ?
+            """
+        guard let c = rows(db, rsql, [id], error: &err).first else { return nil }
+        var run: [String: Any] = [:]
+        for (k, i) in [("title", 0), ("project", 1), ("model", 2), ("state", 3), ("reason", 4), ("started", 5), ("ended", 6), ("epic", 10)] { run[k] = c[i] ?? nil }
+        for (k, i) in [("worktree", 7), ("branches", 8), ("harness", 9)] { run[k] = json(c[i]) }
+        let usql = """
+            SELECT n, title, kind, story_key, task_key, branch, status, merged, active_sec, cost_usd, turns, tries, check_exit, denials, result, started, ended
+            FROM units WHERE run_id = ? ORDER BY n
+            """
+        var queue: [[String: Any]] = [], engines: [Int: [String: Any]] = [:], results: [Int: String] = [:]
+        for u in rows(db, usql, [id], error: &err) {
+            let n = Int(u[0] as? Double ?? 0)
+            guard n == queue.count + 1 else { continue }   // 단위 번호는 1부터 빈틈 없이(엔진이 출발 때 모든 단위를 쓴다)
+            var q: [String: Any] = ["title": u[1] as? String ?? "", "kind": u[2] as? String ?? "", "status": u[6] as? String ?? "pending"]
+            if let st = u[3] as? String { q["story"] = st; if let t = u[4] as? String { q["tickets"] = [t] } }
+            if let b = u[5] as? String { q["branch"] = b }
+            queue.append(q)
+            var e: [String: Any] = [:]
+            for (k, i) in [("active_sec", 8), ("cost_usd", 9), ("turns", 10), ("try", 11), ("check_exit", 12), ("started", 15), ("ended", 16)] { if let v = u[i] as? Double { e[k] = v } }
+            if let m = u[7] as? String { e["merge"] = ["state": m] }
+            if let d = json(u[13]) { e["denials"] = d }
+            if let b = u[5] as? String { e["branch"] = b }
+            engines[n] = e
+            if let r = u[14] as? String { results[n] = r }
+        }
+        return APRecordsReportSource(runValue: run, queueValue: queue, engines: engines, results: results)
+    }
 }
 
 // MARK: 자율주행 · 작은 부품
@@ -2126,7 +2163,7 @@ struct APHistoryScreen: View {
         }
     }
 
-    // 이 실행 이어 가기(출발 준비를 이 실행으로 엶, 2단계 5-2a) · 원문 지우기(5-2b) · 보고서 보기(3단계 보고서 틀이라 잠금)
+    // 이 실행 이어 가기(출발 준비를 이 실행으로 엶, 2단계 5-2a) · 원문 지우기(5-2b) · 보고서 보기(3단계, 보고서 창 APReportViewer)
     private func actionButtons(_ r: APPastRun) -> some View {
         let pc = apPurgeCheck(ap.purgeInput(r))
         var purgeOK = false, purgeWhy = ""
@@ -2145,7 +2182,10 @@ struct APHistoryScreen: View {
                      help: r.hasBranches ? "바뀐 줄을 보고 승격 차례대로 합치거나 버립니다" : "엔진이 만든 가지가 없는 실행입니다(또는 실행 폴더를 지웠습니다)",
                      axid: "ap-merge-\(r.id)") { APMerge.shared.open(r.runDir) }
             APButton(title: "원문 지우기", icon: "trash", enabled: purgeOK && ap.purging == nil, help: purgeWhy, axid: "ap-purge-\(r.id)") { confirmPurge = r.id }
-            APButton(title: "보고서 보기", enabled: false, help: "아직 만들지 않았습니다(보고서 틀과 함께)") {}
+            APButton(title: "보고서 보기", icon: "doc.richtext",
+                     help: r.purged == nil ? "결과 기록과 엔진 기록으로 그린 보고서(흐름 그림·단위별 기록)를 엽니다. 파일 하나로 저장할 수 있습니다"
+                        : "원문을 지워 기록 저장소의 결과 기록으로 그립니다(판정 출력은 없습니다)",
+                     axid: "ap-report-\(r.id)") { APReportViewer.show(run: r.id, runDir: r.runDir, title: r.title.isEmpty ? r.projectName : r.title) }
         }
     }
 
@@ -4652,7 +4692,7 @@ struct APConfirm: View {
             ForEach(s.settingsProblems, id: \.self) { apNote("· " + $0, APColor.fail) }
             apNote("모델을 바꾸면 단위 예상(보정)도 그 모델의 지난 값으로 다시 셉니다.")
             row("게시 방식", "바깥 연결(4단계)과 함께 엽니다. 지금은 바깥에 올리는 글이 없습니다")
-            row("보고서·알림", "보고서 틀(3단계)·연결(4단계)과 함께 엽니다")
+            row("보고서·알림", "보고서는 엔진이 실행 폴더에 늘 그립니다(지난 실행의 보고서 보기). 받을 곳·알림은 바깥 연결(4단계)과 함께 엽니다")
             if s.jira { row("만들 티켓", "\(t.stories + t.tasks + t.moved)건 · 출발 확인 위 '만들 티켓' 나무") }
         }
     }
@@ -4672,7 +4712,7 @@ struct APConfirm: View {
             Text(k).boardFont(11, weight: .semibold).foregroundStyle(.secondary).frame(width: 70, alignment: .leading)
             Text(v).boardFont(11).fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 4)
-            APButton(title: "바꾸기", enabled: false, help: "게시 방식·보고서·알림은 바깥 연결(4단계)·보고서 틀(3단계)과 함께 엽니다") {}
+            APButton(title: "바꾸기", enabled: false, help: "게시 방식·보고서 받을 곳·알림은 바깥 연결(4단계)과 함께 엽니다") {}
         }
     }
 
@@ -5479,7 +5519,7 @@ struct APMergeSheet: View {
         }
     }
 
-    // ① 요약 — 단위 결과 수, 일한 시간, 비용, 보고서 보기(3단계라 잠금)
+    // ① 요약 — 단위 결과 수, 일한 시간, 비용, 보고서 보기(3단계, 보고서 창 APReportViewer)
     private func summaryBox(_ v: APMergeView) -> some View {
         let u = v.run.units
         func n(_ s: String) -> Int { u.filter { $0.status == s }.count }
@@ -5491,7 +5531,8 @@ struct APMergeSheet: View {
                 if n("skipped") > 0 { APChip(text: "건너뜀 \(n("skipped"))") }
                 if n("stopped") + n("pending") + n("running") > 0 { APChip(text: "끝까지 못 감 \(n("stopped") + n("pending") + n("running"))") }
                 Text("일한 시간 \(apDur(u.reduce(0) { $0 + $1.activeSec })) · \(apUSD(v.run.totalCost)) USD").boardFont(11).monospacedDigit().foregroundStyle(.secondary).fixedSize()
-                APButton(title: "보고서 보기", enabled: false, help: "아직 만들지 않았습니다(보고서 틀과 함께)") {}
+                APButton(title: "보고서 보기", icon: "doc.richtext", help: "결과 기록과 엔진 기록으로 그린 보고서(흐름 그림·단위별 기록)를 엽니다",
+                         axid: "ap-merge-report") { APReportViewer.show(run: v.run.id, runDir: v.run.dir, title: v.run.title.isEmpty ? v.run.name : v.run.title) }
             }
         }
     }
