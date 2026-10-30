@@ -1597,7 +1597,7 @@ func showBoard() {
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     let store = Store()
-    let usage = UsageStore()
+    let usage = usageOffline ? UsageStore(cache: ReadOnlyUsageCache(), credentials: NoLoginCredentials()) : UsageStore()
     let accounts = AccountStore()
     lazy var autoSwitcher = AutoSwitcher(store: store, usage: usage, accounts: accounts)
     var statusItem: NSStatusItem!
