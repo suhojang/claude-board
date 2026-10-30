@@ -1299,12 +1299,13 @@ final class RecordsDB {
         try exec("PRAGMA journal_mode=WAL")
         let v = Int32(try rows("PRAGMA user_version").first.flatMap { num($0[0]) } ?? 0)
         if v > RecordsDB.version { throw DBError(description: "저장소 판(\(v))이 이 엔진이 아는 판(\(RecordsDB.version))보다 새롭습니다. 보드를 업데이트하세요") }
-        if v < 1 {
+        if v < RecordsDB.version {
             try transaction {
-                // 다른 엔진이 먼저 만들었을 수 있다 — 잠금을 잡은 뒤 다시 본다
-                if (try rows("PRAGMA user_version").first.flatMap { num($0[0]) } ?? 0) < 1 {
-                    try exec(RecordsDB.schemaV1)
-                    try exec("PRAGMA user_version=1")
+                // 다른 엔진이 먼저 만들었거나 올렸을 수 있다 — 잠금을 잡은 뒤 다시 보고, 남은 판만 차례로(규칙 apRecordsSteps: 판 1 표, 판 2 판정 놓침 표)
+                let cur = Int32(try rows("PRAGMA user_version").first.flatMap { num($0[0]) } ?? 0)
+                for st in apRecordsSteps(from: cur) {
+                    try exec(st.sql)
+                    try exec("PRAGMA user_version=\(st.version)")
                 }
             }
         }
@@ -1419,6 +1420,13 @@ func commonRoot(_ paths: [String]) -> String? {
     }
     let r = "/" + parts.joined(separator: "/")
     return r == "/" || r == home || home.hasPrefix(r + "/") ? nil : r
+}
+
+// 단위 판정을 한 줄로(판정 놓침의 판정 칸): 판정 명령과 시나리오 경로
+func judgeLabelOf(_ d: [String: Any]) -> String {
+    let c = d["check"] as? String ?? ""
+    let sc = (d["scenarios"] as? [[String: Any]] ?? []).compactMap { $0["file"] as? String }
+    return ([c.isEmpty ? nil : "판정 명령 " + c] + [sc.isEmpty ? nil : "시나리오 " + sc.joined(separator: ", ")]).compactMap { $0 }.joined(separator: " · ")
 }
 
 // 판정 스크립트 지문(출발 때 고정한 pinned/checks/): 경로·sha256·크기와 글
@@ -1574,6 +1582,36 @@ extension RecordsDB {
                     """, [runId, n, t, project, key, runId, n])
             }
         }
+        // 판정 놓침(5단계 ⑪-3): 단위마다 신호(버림·통과했는데 미룬 몫·거부·묻기·보류·지시 밖 근거)와 출발 준비 때 확인된 지적(탐침·반례).
+        // 버리기 화면에서 까닭을 묻지 않고 판정 통과와 버림을 기계로 짝짓는다(규칙 apUnitMisses·apPrepMisses). 쓰인 세트에 넘긴 놓침은 used 로
+        if let project {
+            let gone = Set(((r["branches"] as? [String: Any])?["discarded"] as? [[String: Any]] ?? []).compactMap { $0["source"] as? String })
+            var ms: [APMiss] = []
+            var us: [(n: Int, id: String, sourceKey: String?, title: String)] = []
+            for (i, qq) in q.enumerated() {
+                let n = i + 1, d = def(i), e = eng[n] ?? [:]
+                let uid = d["id"] as? String ?? qq["id"] as? String ?? "u\(n)"
+                let key = d["source_key"] as? String
+                let title = d["title"] as? String ?? qq["title"] as? String ?? ""
+                us.append((n, uid, key, title))
+                let label = judgeLabelOf(d)
+                ms += apUnitMisses(project: project, run: runId, n: n, unitId: uid, sourceKey: key, title: title, status: qq["status"] as? String ?? "pending",
+                                   story: d["story"] as? String, discardedSources: gone,
+                                   result: resText[n].flatMap { (try? JSONSerialization.jsonObject(with: Data($0.utf8))) as? [String: Any] },
+                                   denials: e["denials"] as? [[String: Any]] ?? [], judge: label.isEmpty ? nil : label,
+                                   judgeDigest: label.isEmpty ? nil : sha256(Data(label.utf8)), setId: setId, at: num(e["ended"]) ?? t)
+            }
+            if r["state"] != nil {
+                ms += apPrepMisses(project: project, run: runId, prerun: readJSON(dir + "/prerun.json") as? [String: Any], critic: readJSON(dir + "/critic.json") as? [String: Any],
+                                   answers: readJSON(dir + "/answers.json") as? [String: Any] ?? [:], units: us, setId: setId, at: num(r["started"]) ?? t)
+            }
+            if !ms.isEmpty { written += try putMisses(ms) }
+            if let used = r["misses_used"] as? [String], !used.isEmpty {
+                for id in used.prefix(500) {
+                    written += try run("UPDATE judge_misses SET state='used', used_run=? WHERE id=? AND project_id=? AND state='open'", [runId, id, project])
+                }
+            }
+        }
         // 출발 카드와 고른 답
         let cardsAny = readJSON(dir + "/cards.json")
         if let cards = cardsAny as? [[String: Any]] ?? (cardsAny as? [String: Any])?["cards"] as? [[String: Any]] {
@@ -1589,6 +1627,33 @@ extension RecordsDB {
             }
         }
         return written
+    }
+
+    // 판정 놓침(5단계 ⑪-3, 규칙 Misses.swift): 같은 id 면 다시 쓰지 않는다(상태 used·fixed 를 지키려고). 프로젝트마다 apMissKeepPerProject 줄까지(오래된 것부터 지움)
+    func putMisses(_ ms: [APMiss]) throws -> Int {
+        var n = 0
+        for m in ms {
+            n += try run("""
+                INSERT INTO judge_misses(id,project_id,run_id,unit_n,unit_id,source_key,title,signal,side,judge,judge_digest,why,set_id,state,created,used_run)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL) ON CONFLICT(id) DO NOTHING
+                """, [m.id, m.project, m.run, m.unitN, m.unitId, m.sourceKey, m.title, m.signal.rawValue, m.side, m.judge, m.judgeDigest, m.why, m.setId, m.state, m.created])
+        }
+        for p in Set(ms.map(\.project)) {
+            try run("DELETE FROM judge_misses WHERE project_id=? AND id NOT IN (SELECT id FROM judge_misses WHERE project_id=? ORDER BY created DESC, id DESC LIMIT ?)",
+                    [p, p, apMissKeepPerProject])
+        }
+        return n
+    }
+    func misses(project: String, openOnly: Bool) throws -> [APMiss] {
+        try rows("""
+            SELECT id,project_id,run_id,unit_n,unit_id,source_key,title,signal,judge,judge_digest,why,set_id,state,created FROM judge_misses
+            WHERE project_id=? \(openOnly ? "AND state='open'" : "") ORDER BY created DESC, id DESC LIMIT 200
+            """, [project]).compactMap { r in
+            guard let id = r[0] as? String, let sig = (r[7] as? String).flatMap(APMissSignal.init(rawValue:)) else { return nil }
+            return APMiss(id: id, project: r[1] as? String ?? project, run: r[2] as? String ?? "", unitN: r[3] as? Int, unitId: r[4] as? String, sourceKey: r[5] as? String,
+                          signal: sig, judge: r[8] as? String, judgeDigest: r[9] as? String, why: r[10] as? String ?? "", setId: r[11] as? String,
+                          state: r[12] as? String ?? "open", created: num(r[13]) ?? 0, title: r[6] as? String ?? "")
+        }
     }
 
     // 일반 꼴 대기열 파일(설계 5장 7절)을 queue_items 로. 프로젝트 전용 꼴은 그 프로젝트의 변환 스크립트가 이 꼴로 바꿔 넘긴다
@@ -3831,8 +3896,6 @@ func usage() -> Never {
              출발 전 --json: 보드가 읽는 확인 결과(고칠 것·어디서·저장소·Jira 단위의 가지)
            claude-autopilot records import [--dev | --db <파일>] [--project <이름>] [--unit-key <칸 경로>] <원본…>
              원본: 실행 폴더(run.json·queue.json 이 있는 폴더) 또는 일반 꼴 대기열 파일(format "claude-board-queue")
-           claude-autopilot prerun <실행 폴더> [--dev]
-             출발 전: 판정을 한 번씩 미리 돌려 일하기 전부터 통과하는 단위를 prerun.json 에(출발 카드 감)
            claude-autopilot report <실행 폴더> [--out <파일>|-]
              보고서 다시 그리기(모델 0): 실행 폴더의 report.html·units/<n>/report.html. --out 이면 실행 보고서 하나만 그 파일에(- 는 표준 출력)
            claude-autopilot finish <실행 폴더> merge --into <가지> [--story <키>]
@@ -3863,9 +3926,19 @@ func usage() -> Never {
            claude-autopilot seed <출발 준비 폴더> base|scenarios|drop [--dev]
              주제로 시작(5단계): base 는 출발 가지에서 autopilot/<실행 id> 를 만들고 새 폴더면 뼈대(공식 생성기·보드 틀)를 커밋, scenarios 는 기계 검사를
              지난 판정 시나리오를 .autopilot/scenarios/<단위 id>/ 로 커밋, drop 은 준비가 만든 가지를 지움. 출발 때 엔진이 이 가지를 그대로 이어받는다
-           claude-autopilot draft <출발 준비 폴더> [--dev] [--max-sec <초>]
+           claude-autopilot draft <출발 준비 폴더> [--dev] [--max-sec <초>] [--fix <차례> --cards <카드 id,…> | --accept-fix <차례>]
              주제로 시작의 초안 세션: 명세·단위·판정 시나리오·출발 카드·지시 초안을 draft/ 에 쓰고(읽기 도구만, Bash·웹·MCP 없음) 기계 검사 결과를
-             draft-check.json 에. 시험 빌드만 --claude <가짜 claude>
+             draft-check.json 에. --fix: 판정 고치기(고른 확인된 지적을 막도록 고침, 약해지면 들이지 않음), --accept-fix: 약해진 고침을 사람이 받음.
+             시험 빌드만 --claude <가짜 claude>
+           claude-autopilot prerun <실행 폴더> [--dev] [--no-probes] [--keep-history]
+             출발 전: 판정을 한 번씩 미리 돌려 일하기 전부터 통과하는 단위와, 반대 탐침(망친 결과물을 버리는 작업 트리에 넣고 판정, 모델 0)에
+             걸린 판정을 prerun.json 에(출발 카드 감). --keep-history 는 앞 탐침 카드를 probe_history 에
+           claude-autopilot critic <출발 준비 폴더> [--dev] [--round <차례>] [--max-sec <초>]
+             판정 비판 세션(작성과 다른 모델, 읽기 도구만): 반례를 버리는 작업 트리에 넣고 판정을 돌려 확인. critic.json 의 rounds[]
+           claude-autopilot misses <출발 준비 폴더 | 실행 폴더> [--dev]
+             이 프로젝트의 열린 판정 놓침과 세션에 넘길 요약을 misses.json 에
+           claude-autopilot revise <출발 준비 폴더> [--dev] [--max-sec <초>]
+             세트 이어 쓰기(이어 가기, 판정 놓침이 있을 때): 이어 갈 단위의 판정 명령·지시를 고친 초안을 revise/ 에, 판정 차이를 revise.json 에
     """)
 }
 
@@ -4737,6 +4810,146 @@ func cmdRecords(_ args: [String]) -> Never {
     exit(bad == 0 ? 0 : 1)
 }
 
+// 시나리오 고정본(판정 미리 돌리기·반례 확인): 단위 작업 폴더의 시나리오를 pinDir/<차례>/ 로 복사(0444)하고 지문을 단다. 없어졌으면 지문이 맞지 않아 실패로 남는다
+func pinScenarios(_ d: [String: Any], into pinDir: String) -> [[String: Any]] {
+    var pins: [[String: Any]] = []
+    try? fm.removeItem(atPath: pinDir)
+    for (k, sc) in (d["scenarios"] as? [[String: Any]] ?? []).enumerated() {
+        let file = sc["file"] as? String ?? ""
+        var x = sc
+        if let data = scenarioSource(d["cwd"] as? String ?? "", file).data {
+            let pd = pinDir + "/\(k + 1)"
+            try? fm.createDirectory(atPath: pd, withIntermediateDirectories: true)
+            let dst = pd + "/" + (file as NSString).lastPathComponent
+            _ = fm.createFile(atPath: dst, contents: data, attributes: [.posixPermissions: 0o444])
+            x["pinned"] = dst; x["sha256"] = sha256(data)
+        } else { x["pinned"] = pinDir + "/\(k + 1)/(없음)" }
+        pins.append(x)
+    }
+    return pins
+}
+
+// 단위 판정의 꼴(규칙 APJudgeView): 판정 명령·고정본 시나리오 글·판정이 스스로 띄우는 포트
+func judgeViewOf(_ n: Int, _ d: [String: Any], pins: [[String: Any]]) -> APJudgeView {
+    let texts = pins.map { p in
+        APJudgeText(file: p["file"] as? String ?? "", text: (p["pinned"] as? String).flatMap { plainFile($0) }.map { String(decoding: $0, as: UTF8.self) } ?? "")
+    }
+    return APJudgeView(unit: n, unitId: d["id"] as? String ?? "u\(n)", title: d["title"] as? String ?? "단위 \(n)", check: d["check"] as? String ?? "",
+                       scenarios: texts, checkPorts: d["check_ports"] as? [Int] ?? [])
+}
+
+// 버리는 작업 트리(5단계 ⑪-3, 규칙 포트 APProbeWorkspace): 반대 탐침·반례 확인. 저장소마다 출발 기준(출발 전 자율주행 가지 머리 > 출발 가지 머리 > 지금 HEAD)의
+// 분리 작업 트리 하나(~/.claude-board/worktrees/.probe-<실행 id>-<저장소 이름>)를 만들고, 걸음마다 reset --hard·clean -fdq 로 되돌린다(무시 파일은 남김: 함께 둘 파일 사본).
+// 저장소의 가지·작업 트리는 건드리지 않는다(분리 HEAD). 쓰기는 그 작업 트리 안 상대 경로만: 조각마다 lstat(링크·파일이면 거절, safeDirIn), O_NOFOLLOW 로 열고,
+// 연 뒤 실제 자리(F_GETPATH, 대소문자를 가리지 않는 APFS 가 고른 진짜 이름)가 그 작업 트리 안이고 보호 자리(규칙 apProtectedJudgePath, 접은 꼴로 견줌)가 아닐 때만 쓴다
+// (⑪-3 자동 보안 검토 MEDIUM). 작업 트리의 .git 파일이 만들 때와 다르면 되돌리지 않는다. 판정은 ⑪-1 판정 샌드박스 안에서 고정본으로(plain)
+final class ProbeTrees: APProbeWorkspace {
+    let e: Engine, f: [String: Any], id: String, evRoot: String
+    let orig: [[String: Any]]
+    var pins: [Int: [[String: Any]]] = [:]
+    var pinDirs: [Int: String] = [:]
+    var trees: [String: String] = [:]
+    var gitFiles: [String: Data] = [:]
+    var failed: [String: String] = [:]
+    var stepLimit: Double = 120
+    init(_ e: Engine, f: [String: Any], id: String, evRoot: String, orig: [[String: Any]]) {
+        self.e = e; self.f = f; self.id = id; self.evRoot = evRoot; self.orig = orig
+    }
+    func repo(_ n: Int) -> String? {
+        guard orig.indices.contains(n - 1), let c = orig[n - 1]["cwd"] as? String, isDir(c) else { return nil }
+        return gitOut(["rev-parse", "--show-toplevel"], cwd: c).flatMap { $0.hasPrefix("/") ? canonical($0) : nil }
+    }
+    func basePoint(_ r: String) -> String? {
+        seededRepo(f, r)?.head ?? baseBranch(f, r).flatMap { headOf(r, "refs/heads/" + $0) } ?? headOf(r, "HEAD")
+    }
+    private func create(_ r: String) -> String? {
+        if let why = failed[r] { _ = why; return nil }
+        guard let base = basePoint(r) else { failed[r] = "출발 기준 머리를 읽지 못했습니다"; return nil }
+        let path = home + "/.claude-board/worktrees/.probe-\(id)-\(repoName(r))"
+        mkdirPrivate(home + "/.claude-board"); mkdirPrivate(home + "/.claude-board/worktrees")
+        if isDir(path) { _ = gitRun(["worktree", "remove", "--force", path], cwd: r); try? fm.removeItem(atPath: path) }
+        _ = gitRun(["worktree", "prune"], cwd: r)
+        let add = gitRun(["worktree", "add", "--detach", "-q", path, base], cwd: r)
+        guard add.code == 0, isDir(path), let gf = plainFile(path + "/.git", max: 4096) else { failed[r] = "버리는 작업 트리를 만들지 못했습니다: \(firstLine(add.out))"; return nil }
+        for item in f["worktree_files"] as? [Any] ?? [] {
+            let wp = (item as? String) ?? ((item as? [String: Any])?["path"] as? String) ?? ""
+            guard !wp.isEmpty, apScenarioPathOK(wp), fm.fileExists(atPath: r + "/" + wp), let parent = safeDirIn(path, (wp as NSString).deletingLastPathComponent) else { continue }
+            try? fm.copyItem(atPath: r + "/" + wp, toPath: parent + "/" + (wp as NSString).lastPathComponent)
+        }
+        trees[r] = path; gitFiles[r] = gf
+        return path
+    }
+    private func mapped(_ n: Int, _ r: String, _ t: String) -> String {
+        let c = canonical(orig[n - 1]["cwd"] as? String ?? r)
+        return c == r ? t : (c.hasPrefix(r + "/") ? t + String(c.dropFirst(r.count)) : t)
+    }
+    func treeOf(_ n: Int) -> String? { repo(n).flatMap { trees[$0] } }
+    func reset(unit n: Int) -> String? {
+        guard let r = repo(n) else { return "작업 폴더가 git 저장소 안이 아닙니다" }
+        guard let t = trees[r] ?? create(r) else { return failed[r] ?? "버리는 작업 트리를 만들지 못했습니다" }
+        // 보안: 작업 트리의 .git 파일(git 자리를 가리킴)이 만들 때와 다르면 그 git 을 돌리지 않는다
+        var st = stat()
+        guard lstat(t + "/.git", &st) == 0, st.st_mode & S_IFMT == S_IFREG, plainFile(t + "/.git", max: 4096) == gitFiles[r] else {
+            failed[r] = "버리는 작업 트리의 .git 이 바뀌어 되돌리지 않았습니다"; return failed[r]
+        }
+        let a = gitRun(["reset", "--hard", "-q"], cwd: t), b = gitRun(["clean", "-fdq"], cwd: t)
+        guard a.code == 0, b.code == 0 else { return "버리는 작업 트리를 되돌리지 못했습니다: \(firstLine(a.out + b.out))" }
+        e.defs[n - 1]["cwd"] = mapped(n, r, t)
+        return nil
+    }
+    func put(unit n: Int, _ rel: String, _ data: Data) -> String? {
+        guard let r = repo(n), let t = trees[r] else { return "버리는 작업 트리가 없습니다" }
+        let cwd = mapped(n, r, t)
+        let judgeFiles = (orig[n - 1]["scenarios"] as? [[String: Any]] ?? []).compactMap { $0["file"] as? String } + apJudgeRunScripts(orig[n - 1]["check"] as? String ?? "")
+        guard apCasePathOK(rel, judgeFiles: judgeFiles) else { return "판정·하네스·.git 자리라 쓰지 않았습니다(\(rel))" }
+        guard let parent = safeDirIn(cwd, (rel as NSString).deletingLastPathComponent) else { return "부모 폴더에 링크·파일이 있어 쓰지 않았습니다(\(rel))" }
+        let p = parent + "/" + (rel as NSString).lastPathComponent
+        var st0 = stat()
+        let existed = lstat(p, &st0) == 0
+        let fd = open(p, O_WRONLY | O_CREAT | O_NOFOLLOW, 0o644)
+        guard fd >= 0 else { return "열지 못했습니다(링크이거나 폴더, \(rel))" }
+        defer { Darwin.close(fd) }
+        var st = stat()
+        guard fstat(fd, &st) == 0, st.st_mode & S_IFMT == S_IFREG else { return "보통 파일이 아니라 쓰지 않았습니다(\(rel))" }
+        var buf = [CChar](repeating: 0, count: Int(MAXPATHLEN))
+        let real = fcntl(fd, F_GETPATH, &buf) == 0 ? String(cString: buf) : ""
+        let tr = realPathLoose(t), cr = realPathLoose(cwd)
+        // 실제 자리로 다시 본다: 대소문자를 가리지 않는 파일 시스템이 고른 진짜 이름이 보호 자리면(.git 파일·CLAUDE.md·시나리오 등) 쓰지 않는다
+        let relReal = real.hasPrefix(cr + "/") ? String(real.dropFirst(cr.count + 1)) : nil
+        let fromRoot = real.hasPrefix(tr + "/") ? String(real.dropFirst(tr.count + 1)) : nil
+        guard let rr = relReal, let fr = fromRoot, !apProtectedJudgePath(rr, judgeFiles: judgeFiles), !apProtectedJudgePath(fr, judgeFiles: []) else {
+            if !existed { unlink(p) }
+            return "실제 자리(\(real.isEmpty ? "알 수 없음" : apHomeTilde(real)))가 판정·하네스·.git 자리라 쓰지 않았습니다(\(rel))"
+        }
+        guard ftruncate(fd, 0) == 0, data.withUnsafeBytes({ Darwin.write(fd, $0.baseAddress, $0.count) }) == data.count else { return "쓰지 못했습니다(\(rel))" }
+        return nil
+    }
+    func judge(unit n: Int, label: String) -> APJudgeOutcome {
+        var dummy: [String: Any] = [:]
+        let steps = e.judgeSteps(n, pinned: pins[n] ?? [])
+        let limit = min((num(e.def(n)["check_timeout_min"]) ?? num(f["check_timeout_min"]) ?? 10) * 60, stepLimit)
+        return e.runJudge(n, &dummy, steps, ev: evRoot + "/\(n)/\(label)", limit: limit, plain: true, checksDir: pinDirs[n])
+    }
+    // 탐침이 쓴 파일을 증거 곁에 남긴다(판정 고치기 세션이 읽는 "막아야 할 틀린 결과물"). 증거 폴더 밖(<라벨>.files/)
+    func keep(_ n: Int, label: String, _ files: [APProbeFile]) {
+        let root = evRoot + "/\(n)/\(label).files"
+        try? fm.removeItem(atPath: root)
+        for x in files where apScenarioPathOK(x.path) {
+            guard let parent = safeDirIn({ try? fm.createDirectory(atPath: root, withIntermediateDirectories: true); return root }(), (x.path as NSString).deletingLastPathComponent) else { continue }
+            _ = fm.createFile(atPath: parent + "/" + (x.path as NSString).lastPathComponent, contents: Data(x.text.utf8), attributes: [.posixPermissions: 0o444])
+        }
+    }
+    func close() {
+        for (r, t) in trees {
+            _ = gitRun(["worktree", "remove", "--force", t], cwd: r); try? fm.removeItem(atPath: t)
+            _ = gitRun(["worktree", "prune"], cwd: r)
+        }
+        trees = [:]
+        for i in orig.indices { e.defs[i]["cwd"] = orig[i]["cwd"] }
+    }
+}
+func apHomeTilde(_ p: String) -> String { p.hasPrefix(home + "/") ? "~" + String(p.dropFirst(home.count)) : p }
+
 // 판정 미리 돌리기(설계 2장, 4장 prerun): 출발 전에 고정 단계가 없고 prerun 이 참인 단위의 판정을 한 번씩 돌려, 일하기 전부터 통과하는 단위를
 // 출발 카드 감(빼기·판정 고치기·그대로)으로 prerun.json 에 남긴다. 원래 작업 트리 모드라 지금 자리에서 돈다(출발 가지와 다르면 알림만, 작업 트리를 바꾸지 않음)
 func cmdPrerun(_ args: [String]) -> Never {
@@ -4750,6 +4963,12 @@ func cmdPrerun(_ args: [String]) -> Never {
     e.cfg = f; e.defs = f["units"] as? [[String: Any]] ?? []; e.queue = queue
     e.setupEnv()
     let id = (dir as NSString).lastPathComponent
+    // 반대 탐침(5단계 ⑪-3): 일하기 전 판정이 실패한 단위마다 망친 결과물을 버리는 작업 트리에 넣고 같은 판정을 돌린다(--no-probes 면 하지 않음).
+    // --keep-history: 판정 고치기 차례의 다시 돌리기 — 앞 prerun.json 의 탐침 카드를 probe_history 에 남긴다(고친 것을 기록 저장소에 fixed 로)
+    let probesOn = !args.contains("--no-probes")
+    let prevPre = args.contains("--keep-history") ? readJSON(dir + "/prerun.json") as? [String: Any] : nil
+    let trees = ProbeTrees(e, f: f, id: id, evRoot: dir + "/prerun/probes", orig: f["units"] as? [[String: Any]] ?? [])
+    var probeCards: [[String: Any]] = []
     var whereNotes: [[String: Any]] = []
     // 따로 작업 트리 모드면 출발 기준(고른 출발 가지)의 임시 분리 작업 트리에서 돌린다(설계 4장 prerun). 끝에 지운다. 명령 글은 바꾸지 않는다(cwd 만)
     var tempWt: (repo: String, path: String)?
@@ -4803,22 +5022,9 @@ func cmdPrerun(_ args: [String]) -> Never {
             }
         }
         let limit = (num(d["check_timeout_min"]) ?? num(f["check_timeout_min"]) ?? 10) * 60
-        // 시험 실행기(⑪-1): 시나리오를 그 자리(따로 작업 트리면 임시 작업 트리)에서 prerun/<n>/pinned/ 로 복사해 그 사본으로, 출발 뒤와 같은 판정 샌드박스 안에서
-        var pins: [[String: Any]] = []
+        // 시험 실행기(⑪-1): 시나리오를 그 자리(따로 작업 트리면 임시 작업 트리)에서 prerun/<n>.pinned/ 로 복사해 그 사본으로, 출발 뒤와 같은 판정 샌드박스 안에서
         let pinDir = ev + ".pinned"
-        try? fm.removeItem(atPath: pinDir)
-        for (k, sc) in (d["scenarios"] as? [[String: Any]] ?? []).enumerated() {
-            let file = sc["file"] as? String ?? ""
-            var x = sc
-            if let data = scenarioSource(d["cwd"] as? String ?? "", file).data {
-                let pd = pinDir + "/\(k + 1)"
-                try? fm.createDirectory(atPath: pd, withIntermediateDirectories: true)
-                let dst = pd + "/" + (file as NSString).lastPathComponent
-                _ = fm.createFile(atPath: dst, contents: data, attributes: [.posixPermissions: 0o444])
-                x["pinned"] = dst; x["sha256"] = sha256(data)
-            } else { x["pinned"] = pinDir + "/\(k + 1)/(없음)" }   // 없어졌으면 지문이 맞지 않아 실패로 남는다
-            pins.append(x)
-        }
+        let pins = pinScenarios(d, into: pinDir)
         var dummy: [String: Any] = [:]
         let steps = e.judgeSteps(n, pinned: pins)
         let r = e.runJudge(n, &dummy, steps, ev: ev, limit: limit, plain: true, checksDir: pinDir)
@@ -4844,15 +5050,37 @@ func cmdPrerun(_ args: [String]) -> Never {
                 say("  시나리오 \(st.file ?? "") 는 이미 통과합니다(일하기 전부터). 출발 카드 감: 판정 고치기(추천) · 그대로 · 빼기")
             }
         }
+        if probesOn, !r.passed, !r.interrupted {
+            trees.pins[n] = pins; trees.pinDirs[n] = pinDir
+            let keepCwd = e.defs[i]["cwd"]
+            let view = judgeViewOf(n, d, pins: pins)
+            let rep = apRunProbes(view, baseline: r, ws: trees, budgetSec: limit)
+            e.defs[i]["cwd"] = keepCwd
+            let plan = apProbePlan(view)
+            for run in rep.runs where !run.passedSteps.isEmpty {
+                if let pr = plan.probes.first(where: { $0.kind == run.kind }) { trees.keep(n, label: "probe-" + run.kind.rawValue, pr.files) }
+            }
+            var po: [String: Any] = ["targets": rep.targets, "literals": rep.literals, "runs": rep.runs.map(apProbeRunJSON), "hits": rep.hits.count,
+                                     "evidence": "prerun/probes/\(n)"]
+            if let nt = rep.note { po["note"] = nt }
+            if let k = units.lastIndex(where: { $0["n"] as? Int == n }) { units[k]["probes"] = po }
+            if let nt = rep.note { say("반대 탐침: " + nt) }
+            else { say("반대 탐침 \(rep.runs.count)개(대상 \(rep.targets.joined(separator: ", "))): " + (rep.hits.isEmpty ? "모두 판정이 막았습니다" : "판정 \(rep.hits.count)곳이 망친 결과물로도 통과합니다. 출발 카드 감: 판정 고치기(추천) · 그대로 · 빼기")) }
+            for h in rep.hits { probeCards.append(apProbeCard(n: n, unitId: d["id"] as? String ?? "u\(n)", title: t, hit: h, targets: rep.targets)) }
+        }
     }
+    trees.close()
     if let tw = tempWt {   // 임시 작업 트리를 지운다
         _ = gitRun(["worktree", "remove", "--force", tw.path], cwd: tw.repo)
         _ = gitRun(["worktree", "prune"], cwd: tw.repo); try? fm.removeItem(atPath: tw.path)
     }
+    var history = prevPre?["probe_history"] as? [[String: Any]] ?? []
+    if let pc = prevPre?["probe_cards"] as? [[String: Any]] { history.append(["at": prevPre?["at"] ?? NSNull(), "cards": pc]) }
     writeJSON(dir + "/prerun.json", ["at": r3(now()), "where": whereNotes, "units": units, "already_passing": passing, "cards": cards,
                                      "env": prepareEnvRows, "criteria_gaps": prepareGaps,
-                                     "judge_sandbox": e.defs.indices.contains { e.judgeSandboxOn($0 + 1) }])
-    print("결과: \(dir)/prerun.json (일하기 전부터 통과 \(passing.count)개)")
+                                     "judge_sandbox": e.defs.indices.contains { e.judgeSandboxOn($0 + 1) },
+                                     "probes": probesOn, "probe_cards": probeCards, "probe_history": history])
+    print("결과: \(dir)/prerun.json (일하기 전부터 통과 \(passing.count)개 · 반대 탐침이 걸린 판정 \(probeCards.count)곳)")
     exit(0)
 }
 
@@ -6193,7 +6421,10 @@ func cmdSeed(_ args: [String]) {
         }
         var head = sd.head
         if n > 0 {
-            let cm = gitRun(["commit", "-q", "--no-verify", "-m", apScenarioCommitMessage(units: c.units.filter { !$0.scenarios.isEmpty }.count, scenarios: n)], cwd: wt, commit: true, env: pin)
+            // 판정 고치기(⑪-3) 뒤 다시 커밋하면 고친 차례를 머리에(앞 초안은 draft-r<차례-1>/)
+            let fixed = ((try? fm.contentsOfDirectory(atPath: x.dir)) ?? []).filter { $0.range(of: "^draft-r[0-9]+$", options: .regularExpression) != nil }.count
+            let msg = (fixed > 0 ? "판정 고치기 \(fixed)차 · " : "") + apScenarioCommitMessage(units: c.units.filter { !$0.scenarios.isEmpty }.count, scenarios: n)
+            let cm = gitRun(["commit", "-q", "--no-verify", "-m", msg], cwd: wt, commit: true, env: pin)
             guard cm.code == 0, let h = headOf(wt, "HEAD", env: pin) else { reply(["ok": false, "problems": ["판정 시나리오를 커밋하지 못했습니다: \(firstLine(cm.out))"]], false) }
             head = h
         }
@@ -6214,65 +6445,78 @@ func cmdSeed(_ args: [String]) {
 
 // 초안 세션 — 고정한 세션 설정(0600, 엔진 전용 폴더)으로 claude -p 를 띄우고 글은 표준 입력으로. 결과는 파일(draft/)이고 표준 출력의 결과 줄은 비용·오류만 본다.
 // 시간 상한에 닿으면 group 을 통째로 끝낸다. 끝나면 기계 검사(apDraftCheck)를 돌려 draft-check.json 에 남긴다
-func cmdDraft(_ args: [String]) {
-    let x = topicPrep(args)
-    var claudePath: String?, maxSec = apDraftMaxSec
-    var i = 0
-    while i < args.count {
-        if args[i] == "--claude", i + 1 < args.count { claudePath = args[i + 1]; i += 1 }
-        else if args[i] == "--max-sec", i + 1 < args.count { maxSec = min(max(Double(args[i + 1]) ?? apDraftMaxSec, 10), 3600); i += 1 }
-        i += 1
-    }
-    if !x.dev, claudePath != nil { fail("--claude 는 시험 빌드(--dev)에서만 받습니다") }
-    if x.dev, claudePath == nil { claudePath = x.run["claude_path"] as? String }
-    func reply(_ o: [String: Any], _ ok: Bool) -> Never {
-        writeJSON(x.dir + "/draft-check.json", o)
-        print(jsonText(o)); exit(ok ? 0 : 1)
-    }
-    guard let seed = x.run["seed"] as? [String: Any], let wt = seed["worktree"] as? String, isDir(wt) else {
-        reply(["ok": false, "problems": ["뼈대·저장소 보기(seed base)가 아직 없습니다"]], false)
-    }
-    let out = x.dir + "/draft"
-    try? fm.removeItem(atPath: out)
-    guard (try? fm.createDirectory(atPath: out, withIntermediateDirectories: true)) != nil else { reply(["ok": false, "problems": ["결과 폴더를 만들지 못했습니다"]], false) }
-    let outC = canonical(out)
-    let bundle = x.dir + "/context/links"
-    let bundleFiles = isDir(bundle) ? ((try? fm.contentsOfDirectory(atPath: bundle)) ?? []).filter { !$0.hasPrefix(".") }.sorted() : []
-    let points = (readJSON(x.dir + "/harness-points.json") as? [[String: Any]] ?? []).compactMap(harnessPointOf)
-    let firstUnit = seed["first_unit"] as? Bool ?? false
-    let input = APDraftInput(topic: x.topic["text"] as? String ?? "", stack: x.stack, newFolder: x.newFolder, repo: canonical(wt),
-                             bundle: bundleFiles.isEmpty ? nil : canonical(bundle), bundleFiles: bundleFiles, out: outC,
-                             skeleton: seed["skeleton"] as? [String] ?? [], firstUnit: firstUnit, harness: points)
-    let deny = [home + "/Library/Keychains", privateRoot(dev: false), privateRoot(dev: true), home + "/.ssh", home + "/.aws", home + "/.gnupg",
-                home + "/.claude", home + "/.config", home + "/.claude/notifier/autopilot"]
-        + [false, true].map { autopilotRoot(dev: $0) + "/runs" }
-    let paths = APDraftPaths(out: outC, reads: [canonical(wt)] + (bundleFiles.isEmpty ? [] : [canonical(bundle)]), denyRead: deny)
-    let work = privateRoot(dev: x.dev) + "/draft/" + x.id
-    mkdirPrivate(privateRoot(dev: x.dev)); mkdirPrivate(privateRoot(dev: x.dev) + "/draft"); try? fm.removeItem(atPath: work); mkdirPrivate(work)
+// 짧은 읽기 세션 하나(초안·판정 고치기·비판·세트 이어 쓰기, 5단계 ⑪-2·⑪-3): 고정한 세션 설정(0600, 엔진 전용 폴더 <뿌리>/private/<종류>/<id>)으로
+// claude -p 를 띄우고 글은 표준 입력으로. 시간 상한에 닿으면 group 을 통째로 끝낸다. 결과는 파일(out)이고 표준 출력의 결과 줄은 비용·오류만 본다.
+// 받은 인자는 args.json 에 남긴다(비판 세션이 다른 모델로 돈 근거)
+struct SessionRun { var note = ""; var cost: Double?; var sec = 0.0; var argv: [String] = []; var work = "" }
+func readSession(kind: String, id: String, dev: Bool, claudePath: String?, paths: APDraftPaths, model: String, budget: Double, prompt: String,
+                 maxSec: Double, envKey: String) -> (run: SessionRun?, problem: String?) {
+    let work = privateRoot(dev: dev) + "/\(kind)/" + id
+    mkdirPrivate(privateRoot(dev: dev)); mkdirPrivate(privateRoot(dev: dev) + "/\(kind)"); try? fm.removeItem(atPath: work); mkdirPrivate(work)
     let setPath = work + "/settings.json"
-    guard writePrivate(setPath, Data(jsonText(apDraftSettingsJSON(paths), pretty: true).utf8)) else { reply(["ok": false, "problems": ["세션 설정 파일을 쓰지 못했습니다"]], false) }
+    guard writePrivate(setPath, Data(jsonText(apDraftSettingsJSON(paths), pretty: true).utf8)) else { return (nil, "세션 설정 파일을 쓰지 못했습니다") }
     let login = captureLoginEnv(loginShell()) ?? ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": home]
-    guard let claude = claudePath.flatMap({ access($0, X_OK) == 0 ? $0 : nil }) ?? findExecutable("claude", login) else {
-        reply(["ok": false, "problems": ["claude 를 찾지 못했습니다"]], false)
-    }
+    guard let claude = claudePath.flatMap({ access($0, X_OK) == 0 ? $0 : nil }) ?? findExecutable("claude", login) else { return (nil, "claude 를 찾지 못했습니다") }
     var env = passEnv(login, extra: [])
-    env["CLAUDE_BOARD_DRAFT"] = x.id
-    let model = (x.run["model"] as? String).flatMap { $0.range(of: "^[A-Za-z0-9._-]{1,60}$", options: .regularExpression) != nil ? $0 : nil } ?? apDraftModel
-    let argv = apDraftArgs(paths, settings: setPath, model: model)
+    env[envKey] = id
+    let argv = apDraftArgs(paths, settings: setPath, model: model, budgetUSD: budget)
     writeJSON(work + "/args.json", argv)
+    var r = SessionRun(argv: argv, work: work)
     let t0 = now()
-    guard let c = Child(claude, argv, env: env, cwd: outC, stdinPipe: true, stdoutPipe: true, rawOut: true, errFile: work + "/stderr.log", newGroup: true) else {
-        reply(["ok": false, "problems": ["claude 를 띄우지 못했습니다(\(claude))"]], false)
+    guard let c = Child(claude, argv, env: env, cwd: paths.out, stdinPipe: true, stdoutPipe: true, rawOut: true, errFile: work + "/stderr.log", newGroup: true) else {
+        return (nil, "claude 를 띄우지 못했습니다(\(claude))")
     }
-    c.send(apDraftPrompt(input))
+    c.send(prompt)
     c.closeInput()
-    var note = ""
-    if !c.wait(maxSec) { killGroup(c.pid); _ = c.wait(3); note = "시간 상한(\(Int(maxSec))초)에 닿아 세션을 끝냈습니다" }
+    if !c.wait(maxSec) { killGroup(c.pid); _ = c.wait(3); r.note = "시간 상한(\(Int(maxSec))초)에 닿아 세션을 끝냈습니다" }
     for _ in 0..<20 where !c.atEOF { usleep(50_000) }
     _ = writePrivate(work + "/out.json", c.rawData)
     let o = apMCPOutput(c.rawData)
-    if note.isEmpty, let e = o.error { note = e }
-    let chk = apDraftCheck(files: EngineDraftFiles(root: outC), harness: points, firstUnit: firstUnit)
+    if r.note.isEmpty, let e = o.error { r.note = e }
+    r.cost = o.cost; r.sec = now() - t0
+    return (r, nil)
+}
+
+// 세션이 읽지 못하게 막는 자리(초안·비판·세트 이어 쓰기 공통): 키체인·엔진 전용 뿌리 둘·모든 실행 폴더·비밀이 흔한 자리
+func sessionDenyRead() -> [String] {
+    [home + "/Library/Keychains", privateRoot(dev: false), privateRoot(dev: true), home + "/.ssh", home + "/.aws", home + "/.gnupg",
+     home + "/.claude", home + "/.config", home + "/.claude/notifier/autopilot"] + [false, true].map { autopilotRoot(dev: $0) + "/runs" }
+}
+
+func sessionClaudePath(_ args: [String], dev: Bool, run: [String: Any]) -> String? {
+    var claudePath: String?
+    if let i = args.firstIndex(of: "--claude"), i + 1 < args.count { claudePath = args[i + 1] }
+    if !dev, claudePath != nil { fail("--claude 는 시험 빌드(--dev)에서만 받습니다") }
+    if dev, claudePath == nil { claudePath = run["claude_path"] as? String }
+    return claudePath
+}
+func argValue(_ args: [String], _ k: String) -> String? { args.firstIndex(of: k).flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil } }
+func modelName(_ v: Any?) -> String? { (v as? String).flatMap { $0.range(of: "^[A-Za-z0-9._-]{1,60}$", options: .regularExpression) != nil ? $0 : nil } }
+// 출발 준비 폴더의 판정 놓침 요약(엔진 misses 가 쓴 misses.json)
+func prepMissDigest(_ dir: String) -> String? { ((readJSON(dir + "/misses.json") as? [String: Any])?["digest"] as? String).flatMap { $0.isEmpty ? nil : $0 } }
+
+// 출발 전 자율주행 가지의 임시 작업 트리(초안 세션이 읽는 저장소 보기). 판정 고치기 차례에는 seed scenarios 가 지운 뒤라 가지 머리에 다시 만든다
+func ensureSeedTree(_ x: TopicPrep) -> String? {
+    guard var seed = x.run["seed"] as? [String: Any], let sd = apSeedParse(seed) else { return nil }
+    let wt = seedTree(x.id, x.repo)
+    if isDir(wt), let w = seed["worktree"] as? String, w == wt { return wt }
+    guard headOf(x.repo, "refs/heads/" + sd.branch) == sd.head, !branchUsedElsewhere(x.repo, sd.branch, except: wt) else { return nil }
+    mkdirPrivate(home + "/.claude-board"); mkdirPrivate(home + "/.claude-board/worktrees"); mkdirPrivate((wt as NSString).deletingLastPathComponent)
+    if isDir(wt) { _ = gitRun(["worktree", "remove", "--force", wt], cwd: x.repo); try? fm.removeItem(atPath: wt) }
+    _ = gitRun(["worktree", "prune"], cwd: x.repo)
+    guard gitRun(["worktree", "add", "-q", wt, sd.branch], cwd: x.repo).code == 0, isDir(wt) else { return nil }
+    seed["worktree"] = wt
+    writeSeed(x, seed)
+    return wt
+}
+
+// 초안 결과 폴더의 기계 검사와 보드가 읽는 답(draft-check.json 꼴)
+func draftReport(_ x: TopicPrep, folder: String, note: String, cost: Double?, sec: Double, model: String) -> (o: [String: Any], ok: Bool, check: APDraftCheck) {
+    let bundle = x.dir + "/context/links"
+    let bundleFiles = isDir(bundle) ? ((try? fm.contentsOfDirectory(atPath: bundle)) ?? []).filter { !$0.hasPrefix(".") }.sorted() : []
+    let points = (readJSON(x.dir + "/harness-points.json") as? [[String: Any]] ?? []).compactMap(harnessPointOf)
+    let firstUnit = (x.run["seed"] as? [String: Any])?["first_unit"] as? Bool ?? false
+    let chk = apDraftCheck(files: EngineDraftFiles(root: folder), harness: points, firstUnit: firstUnit)
     let ctx = bundleFiles.isEmpty ? nil : canonical(bundle)
     let queue = chk.units.map { apDraftQueueUnit($0, repo: x.repo, context: ctx, prep: x.id, stack: x.stack) }
     let cards = chk.cards.map { c -> [String: Any] in
@@ -6287,11 +6531,302 @@ func cmdDraft(_ args: [String]) {
                                             "options": t.options.map { ["key": $0.key, "label": $0.label, "note": $0.note] }]) { a, _ in a }
     }
     let ok = note.isEmpty && chk.ok
-    reply(["ok": ok, "session": note.isEmpty, "note": note.isEmpty ? (chk.ok ? "기계 검사를 지났습니다" : "기계 검사에 걸렸습니다") : note,
-           "problems": (note.isEmpty ? [] : [note]) + chk.problems, "warnings": chk.warnings, "cost_usd": o.cost ?? NSNull(), "sec": r3(now() - t0),
-           "units": queue, "cards": cards, "harness_points": points.count, "harness_missing": missing,
-           "spec": ["requirements": chk.spec.requirements, "criteria": chk.spec.criteria.map(apCriterionJSON), "chars": chk.specText.count],
-           "instruction_chars": chk.instruction.count, "scenarios": chk.scenarioCount, "model": model, "at": r3(now())], ok)
+    return (["ok": ok, "session": note.isEmpty, "note": note.isEmpty ? (chk.ok ? "기계 검사를 지났습니다" : "기계 검사에 걸렸습니다") : note,
+             "problems": (note.isEmpty ? [] : [note]) + chk.problems, "warnings": chk.warnings, "cost_usd": cost ?? NSNull(), "sec": r3(sec),
+             "units": queue, "cards": cards, "harness_points": points.count, "harness_missing": missing,
+             "spec": ["requirements": chk.spec.requirements, "criteria": chk.spec.criteria.map(apCriterionJSON), "chars": chk.specText.count],
+             "instruction_chars": chk.instruction.count, "scenarios": chk.scenarioCount, "model": model, "at": r3(now())], ok, chk)
+}
+
+// 판정 고치기(⑪-3)에 넘길 고칠 것: 사람이 "판정 고치기"를 고른 카드 id 로 prerun.json(탐침 카드)·critic.json(마지막 차례의 확인된 지적)에서 찾고,
+// 판정이 막아야 할 틀린 결과물(탐침이 쓴 파일·반례 파일)을 고칠 것 폴더 <i>/<경로> 로 복사한다(준비 폴더 안의 보통 파일만, 64 KB 까지)
+func fixItems(_ dir: String, cards: [String], into fixIn: String) -> [APFixItem] {
+    try? fm.removeItem(atPath: fixIn)
+    try? fm.createDirectory(atPath: fixIn, withIntermediateDirectories: true)
+    let pre = readJSON(dir + "/prerun.json") as? [String: Any] ?? [:]
+    let crit = ((readJSON(dir + "/critic.json") as? [String: Any])?["rounds"] as? [[String: Any]])?.last ?? [:]
+    var out: [APFixItem] = []
+    func copy(_ from: String, _ rel: String, _ k: Int) -> String? {
+        let src = canonical(from)
+        let pr = (rel as NSString).deletingLastPathComponent
+        guard src.hasPrefix(canonical(dir) + "/"), let d = plainFile(src, max: apCaseFileBytes), apScenarioPathOK(rel),
+              let parent = safeDirIn(fixIn, pr.isEmpty ? "\(k)" : "\(k)/\(pr)") else { return nil }
+        _ = fm.createFile(atPath: parent + "/" + (rel as NSString).lastPathComponent, contents: d, attributes: [.posixPermissions: 0o444])
+        return "\(k)/\(rel)"
+    }
+    for cid in cards {
+        let k = out.count + 1
+        if let c = (pre["probe_cards"] as? [[String: Any]] ?? []).first(where: { $0["id"] as? String == cid }), let uid = c["unit_id"] as? String {
+            let n = c["unit"] as? Int ?? 0
+            var files: [String] = []
+            if let kind = (c["probes"] as? [String])?.first {
+                let root = dir + "/prerun/probes/\(n)/probe-\(kind).files"
+                for rel in (fm.enumerator(atPath: root)?.allObjects as? [String] ?? []).sorted() where !isDir(root + "/" + rel) {
+                    if let r = copy(root + "/" + rel, rel, k) { files.append(r) }
+                }
+            }
+            out.append(APFixItem(source: "probe", unit: uid, judge: c["file"] as? String ?? "check", why: c["why"] as? String ?? "", files: files))
+        } else if cid.hasPrefix("critic-"), let r = (crit["results"] as? [[String: Any]] ?? []).first(where: { "critic-" + ($0["id"] as? String ?? "") == cid }),
+                  let uid = r["unit"] as? String, let fid = r["id"] as? String {
+            let rd = dir + "/critic/r\(crit["round"] as? Int ?? 0)/out/cases/\(fid)"
+            let files = (r["files"] as? [String] ?? []).compactMap { copy(rd + "/" + $0, $0, k) }
+            out.append(APFixItem(source: "critic", unit: uid, judge: r["judge"] as? String, why: r["why"] as? String ?? "", files: files))
+        }
+    }
+    return out
+}
+
+func swapFix(_ x: TopicPrep, round: Int) -> Bool {
+    let prev = x.dir + "/draft-r\(round - 1)"
+    try? fm.removeItem(atPath: prev)
+    guard rename(x.dir + "/draft", prev) == 0 else { return false }
+    guard rename(x.dir + "/draft-fix", x.dir + "/draft") == 0 else { _ = rename(prev, x.dir + "/draft"); return false }
+    try? fm.removeItem(atPath: x.dir + "/draft-fix-weak.json")
+    return true
+}
+
+// 초안 세션 — 주제로 시작(⑪-2). 판정 고치기(⑪-3): --fix <차례> --cards <카드 id,…> 면 지금 초안을 draft-fix/ 에 넣고 고칠 것과 함께 다시 돌려,
+// 기계 검사를 지나고 판정이 약해지지 않았을 때만 draft/ 로 바꿔 끼운다(앞 초안은 draft-r<차례-1>/). 약해졌으면 그대로 두고 draft-fix-weak.json(카드),
+// --accept-fix <차례> 는 사람이 그 카드에서 "받기"를 고른 뒤 바꿔 끼우기만 한다(모델 0)
+func cmdDraft(_ args: [String]) {
+    let x = topicPrep(args)
+    let maxSec = argValue(args, "--max-sec").flatMap(Double.init).map { min(max($0, 10), 3600) } ?? apDraftMaxSec
+    let claudePath = sessionClaudePath(args, dev: x.dev, run: x.run)
+    let fixRound = argValue(args, "--fix").flatMap(Int.init), acceptRound = argValue(args, "--accept-fix").flatMap(Int.init)
+    let model = modelName(x.run["model"]) ?? apDraftModel
+    // 판정 고치기가 바꿔 끼우지 않았으면(기계 검사 실패·약해짐) draft-check.json(지금 초안의 결과)은 그대로 두고 draft-fix-check.json 에
+    func reply(_ o: [String: Any], _ ok: Bool) -> Never {
+        let keep = fixRound != nil && !ok
+        writeJSON(x.dir + (keep ? "/draft-fix-check.json" : "/draft-check.json"), o)
+        print(jsonText(o)); exit(ok ? 0 : 1)
+    }
+    if let k = acceptRound {
+        guard isDir(x.dir + "/draft-fix"), let weak = readJSON(x.dir + "/draft-fix-weak.json") as? [String: Any], weak["round"] as? Int == k else {
+            reply(["ok": false, "problems": ["받을 판정 고치기 \(k)차 결과가 없습니다"]], false)
+        }
+        guard swapFix(x, round: k) else { reply(["ok": false, "problems": ["고친 초안으로 바꿔 끼우지 못했습니다"]], false) }
+        var (o, ok, _) = draftReport(x, folder: x.dir + "/draft", note: "", cost: 0, sec: 0, model: model)
+        o["fix_round"] = k; o["accepted_weak"] = weak["reasons"] ?? []
+        reply(o, ok)
+    }
+    let fixing = fixRound != nil
+    guard (x.run["seed"] as? [String: Any]) != nil, let wt = fixing ? ensureSeedTree(x) : ((x.run["seed"] as? [String: Any])?["worktree"] as? String).flatMap({ isDir($0) ? $0 : nil }) else {
+        reply(["ok": false, "problems": [fixing ? "출발 전 자율주행 가지의 저장소 보기를 다시 만들지 못했습니다" : "뼈대·저장소 보기(seed base)가 아직 없습니다"]], false)
+    }
+    let out = x.dir + (fixing ? "/draft-fix" : "/draft")
+    try? fm.removeItem(atPath: out)
+    if fixing {   // 지금 초안을 넣어 두고 고칠 곳만 고치게 한다(숨은 파일은 빼고)
+        guard isDir(x.dir + "/draft") else { reply(["ok": false, "problems": ["고칠 초안(draft/)이 없습니다"]], false) }
+        try? fm.createDirectory(atPath: out, withIntermediateDirectories: true)
+        for rel in (fm.enumerator(atPath: x.dir + "/draft")?.allObjects as? [String] ?? []).sorted() where !rel.split(separator: "/").contains(where: { $0.hasPrefix(".") }) {
+            let src = x.dir + "/draft/" + rel
+            if isDir(src) { try? fm.createDirectory(atPath: out + "/" + rel, withIntermediateDirectories: true) }
+            else if !isLink(src) { try? fm.copyItem(atPath: src, toPath: out + "/" + rel) }
+        }
+    } else {
+        guard (try? fm.createDirectory(atPath: out, withIntermediateDirectories: true)) != nil else { reply(["ok": false, "problems": ["결과 폴더를 만들지 못했습니다"]], false) }
+    }
+    let outC = canonical(out)
+    let bundle = x.dir + "/context/links"
+    let bundleFiles = isDir(bundle) ? ((try? fm.contentsOfDirectory(atPath: bundle)) ?? []).filter { !$0.hasPrefix(".") }.sorted() : []
+    let points = (readJSON(x.dir + "/harness-points.json") as? [[String: Any]] ?? []).compactMap(harnessPointOf)
+    let seed = x.run["seed"] as? [String: Any] ?? [:]
+    let input = APDraftInput(topic: x.topic["text"] as? String ?? "", stack: x.stack, newFolder: x.newFolder, repo: canonical(wt),
+                             bundle: bundleFiles.isEmpty ? nil : canonical(bundle), bundleFiles: bundleFiles, out: outC,
+                             skeleton: seed["skeleton"] as? [String] ?? [], firstUnit: seed["first_unit"] as? Bool ?? false, harness: points,
+                             misses: prepMissDigest(x.dir))
+    var reads = [canonical(wt)] + (bundleFiles.isEmpty ? [] : [canonical(bundle)])
+    var prompt = apDraftPrompt(input)
+    var items: [APFixItem] = []
+    if let k = fixRound {
+        let cards = (argValue(args, "--cards") ?? "").split(separator: ",").map(String.init).filter { !$0.isEmpty }
+        let fixIn = x.dir + "/draft-fix-in"
+        items = fixItems(x.dir, cards: cards, into: fixIn)
+        guard !items.isEmpty else { reply(["ok": false, "problems": ["고칠 것(판정 고치기를 고른 확인된 지적)이 없습니다"]], false) }
+        reads.append(canonical(fixIn))
+        prompt = apDraftFixPrompt(input, round: k, items: items, inputDir: canonical(fixIn))
+    }
+    let paths = APDraftPaths(out: outC, reads: reads, denyRead: sessionDenyRead())
+    let (sr, problem) = readSession(kind: "draft", id: x.id, dev: x.dev, claudePath: claudePath, paths: paths, model: model, budget: apDraftBudgetUSD,
+                                    prompt: prompt, maxSec: maxSec, envKey: "CLAUDE_BOARD_DRAFT")
+    guard let sr else { reply(["ok": false, "problems": [problem ?? "세션을 띄우지 못했습니다"]], false) }
+    guard let k = fixRound else {
+        let (o, ok, _) = draftReport(x, folder: out, note: sr.note, cost: sr.cost, sec: sr.sec, model: model)
+        reply(o, ok)
+    }
+    // 판정 고치기: 기계 검사·약해짐을 보고 바꿔 끼운다
+    var (o, ok, chk) = draftReport(x, folder: out, note: sr.note, cost: sr.cost, sec: sr.sec, model: model)
+    o["fix_round"] = k; o["fix_items"] = items.map { ["source": $0.source, "unit": $0.unit, "judge": $0.judge ?? NSNull(), "why": $0.why, "files": $0.files] as [String: Any] }
+    guard ok else { o["note"] = "판정 고치기 \(k)차 결과가 기계 검사에 걸려 앞 초안 그대로 둡니다"; reply(o, false) }
+    let old = apDraftCheck(files: EngineDraftFiles(root: x.dir + "/draft"), harness: points, firstUnit: seed["first_unit"] as? Bool ?? false)
+    let weak = apJudgeWeakening(old: old.units, new: chk.units)
+    if !weak.isEmpty {
+        writeJSON(x.dir + "/draft-fix-weak.json", ["round": k, "reasons": weak, "card": apWeakCard(round: k, reasons: weak)])
+        o["ok"] = false; o["weak"] = weak; o["weak_card"] = apWeakCard(round: k, reasons: weak)
+        o["note"] = "판정 고치기 \(k)차에서 판정이 약해져 자동으로 들이지 않았습니다(카드로)"
+        reply(o, false)
+    }
+    guard swapFix(x, round: k) else { o["ok"] = false; o["note"] = "고친 초안으로 바꿔 끼우지 못했습니다"; reply(o, false) }
+    var o2 = draftReport(x, folder: x.dir + "/draft", note: "", cost: sr.cost, sec: sr.sec, model: model).o
+    o2["fix_round"] = k; o2["fix_items"] = o["fix_items"]
+    reply(o2, true)
+}
+
+// 판정 비판 세션(5단계 ⑪-3, 설계 2장 "② 비판 세션"): 출발 전 확인을 지난 준비 폴더(주제로 시작·이어 가기 모두)에서, 작성 세션과 다른 모델이
+// 단위 글·수용 기준·판정 사본·근거 묶음만 읽고 반례(파일)와 한 줄 까닭을 쓴다. 엔진이 반례를 버리는 작업 트리에 넣고 판정 샌드박스 안에서 판정을 돌려
+// 확인된 지적·확인 안 됨·해석 고르기로 나눈다(critic.json 의 rounds[], 카드). 반례는 그 단위 판정이 보는 자리만(허용 목록). 저장소·하네스에는 쓰지 않는다(앞뒤로 견줌)
+func cmdCritic(_ args: [String]) -> Never {
+    let dir = runDir(args.first { !$0.hasPrefix("--") && !["--claude", "--round", "--max-sec"].contains($0) })
+    guard let run = readJSON(dir + "/run.json") as? [String: Any] else { fail("run.json 을 읽지 못했습니다") }
+    guard run["state"] == nil else { fail("이미 출발한 실행입니다. 비판 세션은 출발 전에만 합니다.") }
+    let dev = args.contains("--dev") || run["claude_args"] != nil || run["claude_path"] != nil
+    let claudePath = sessionClaudePath(args, dev: dev, run: run)
+    let round = argValue(args, "--round").flatMap(Int.init) ?? 0
+    let maxSec = argValue(args, "--max-sec").flatMap(Double.init).map { min(max($0, 10), 3600) } ?? apCriticMaxSec
+    let id = (dir as NSString).lastPathComponent
+    var rounds = ((readJSON(dir + "/critic.json") as? [String: Any])?["rounds"] as? [[String: Any]] ?? []).filter { ($0["round"] as? Int ?? 0) < round }
+    func reply(_ o: [String: Any], _ ok: Bool) -> Never {
+        rounds.append(o)
+        writeJSON(dir + "/critic.json", ["rounds": rounds, "at": r3(now())])
+        print(jsonText(o)); exit(ok ? 0 : 1)
+    }
+    let (problems, f, queue) = prepare(dir, dev: dev)
+    guard problems.isEmpty else { reply(["round": round, "ok": false, "problems": ["출발 준비 확인에 고칠 것이 있어 돌리지 않았습니다"] + problems], false) }
+    let e = Engine(dir)
+    e.cfg = f; e.defs = f["units"] as? [[String: Any]] ?? []; e.queue = queue
+    e.setupEnv()
+    let orig = e.defs
+    let author = modelName(f["model"]) ?? apDraftModel
+    let pick = apCriticModelPick(author: author, asked: run["critic_model"] as? String)
+    let rdir = dir + "/critic/r\(round)"
+    try? fm.removeItem(atPath: rdir)
+    try? fm.createDirectory(atPath: rdir + "/in/judge", withIntermediateDirectories: true)
+    try? fm.createDirectory(atPath: rdir + "/out", withIntermediateDirectories: true)
+    let ws = ProbeTrees(e, f: f, id: id + "-critic", evRoot: rdir + "/verify", orig: orig)
+    var cunits: [APCriticUnit] = [], views: [String: APJudgeView] = [:], baseline: [String: APJudgeOutcome] = [:], targets: [String: [String]] = [:]
+    var skipped: [String] = [], tree: String?, ns: [String: Int] = [:], titles: [String: String] = [:]
+    let repos = Array(Set(orig.indices.compactMap { ws.repo($0 + 1) })).sorted()
+    func repoState() -> [String: Any] { Dictionary(uniqueKeysWithValues: repos.map { r in (r, ["porcelain": porcelain(r), "harness": scanHarness(harnessFolders([r])).base] as [String: Any]) }) }
+    let before = repoState()
+    for (i, d) in orig.enumerated() {
+        let n = i + 1, uid = d["id"] as? String ?? "u\(n)"
+        if d["prerun"] as? Bool == false || !(d["action"] as? String ?? "").isEmpty || !(d["precheck"] as? String ?? "").isEmpty {
+            skipped.append("\(uid): 부작용이 있거나 시험 환경 확인이 있는 단위라 넣지 않았습니다"); continue
+        }
+        if let why = ws.reset(unit: n) { skipped.append("\(uid): \(why)"); continue }
+        let pd = rdir + "/pins/\(n)"
+        let pins = pinScenarios(e.defs[i], into: pd)   // 버리는 작업 트리(출발 기준)의 시나리오를 반례 넣기 전에 고정
+        ws.pins[n] = pins; ws.pinDirs[n] = pd
+        let v = judgeViewOf(n, e.defs[i], pins: pins)
+        var cs: [APCriticScenario] = []
+        for (k, p) in pins.enumerated() {
+            let file = p["file"] as? String ?? "", rel = "judge/\(uid)/\(k + 1)-\((file as NSString).lastPathComponent)"
+            try? fm.createDirectory(atPath: rdir + "/in/judge/\(uid)", withIntermediateDirectories: true)
+            _ = fm.createFile(atPath: rdir + "/in/" + rel, contents: Data(v.scenarios[k].text.utf8), attributes: [.posixPermissions: 0o444])
+            cs.append(APCriticScenario(file: file, kind: APScenarioKind(rawValue: p["kind"] as? String ?? "shell") ?? .shell, criterion: p["criterion"] as? String,
+                                       copy: canonical(rdir + "/in/" + rel)))
+        }
+        views[uid] = v; targets[uid] = apProbeTargets(v); ns[uid] = n; titles[uid] = v.title
+        baseline[uid] = ws.judge(unit: n, label: "baseline")
+        cunits.append(APCriticUnit(id: uid, title: v.title, prompt: d["prompt"] as? String ?? "", criteria: apParseCriteria(d["criteria"], unit: n).items,
+                                   check: v.check, scenarios: cs))
+        if tree == nil, let t = ws.treeOf(n) {
+            let ls = gitRun(["ls-files"], cwd: t, withErr: false).out.split(separator: "\n").prefix(2000).joined(separator: "\n")
+            _ = fm.createFile(atPath: rdir + "/in/tree.txt", contents: Data((ls + "\n").utf8), attributes: [.posixPermissions: 0o444])
+            tree = canonical(rdir + "/in/tree.txt")
+        }
+    }
+    guard !cunits.isEmpty else { ws.close(); reply(["round": round, "ok": true, "note": "비판할 단위가 없습니다", "skipped": skipped, "results": [], "cards": []], true) }
+    let ctx = orig.compactMap { $0["context"] as? String }.first.flatMap { isDir($0) ? canonical($0) : nil }
+    let bundleFiles = ctx.map { ((try? fm.contentsOfDirectory(atPath: $0)) ?? []).filter { !$0.hasPrefix(".") }.sorted() } ?? []
+    let out = canonical(rdir + "/out"), inDir = canonical(rdir + "/in")
+    let topic = (readJSON(dir + "/topic.json") as? [String: Any])?["text"] as? String
+    let input = APCriticInput(units: cunits, topic: topic, judgeDir: inDir, tree: tree, bundle: ctx, bundleFiles: bundleFiles, out: out, misses: prepMissDigest(dir))
+    // 작성 세션이 쓴 것(초안·고친 초안)은 읽지 못하게(문맥 분리) — 세션 허용 규칙도 판정 폴더·근거 묶음·결과 폴더뿐
+    let paths = APDraftPaths(out: out, reads: [inDir] + (ctx.map { [$0] } ?? []),
+                             denyRead: sessionDenyRead() + ["draft", "draft-fix", "draft-fix-in", "revise"].map { canonical(dir) + "/" + $0 })
+    let (sr, problem) = readSession(kind: "critic", id: id + "-r\(round)", dev: dev, claudePath: claudePath, paths: paths, model: pick.model,
+                                    budget: apCriticBudgetUSD, prompt: apCriticPrompt(input), maxSec: maxSec, envKey: "CLAUDE_BOARD_CRITIC")
+    guard let sr else { ws.close(); reply(["round": round, "ok": false, "problems": [problem ?? "세션을 띄우지 못했습니다"], "model": pick.model, "author_model": author], false) }
+    let files = EngineDraftFiles(root: out)
+    let (findings, parseProblems) = sr.note.isEmpty ? apCriticParse(files, units: cunits, targets: targets) : ([], [])
+    let results = apVerifyFindings(findings, views: views, baseline: baseline, read: { files.read($0) }, ws: ws)
+    ws.close()
+    let after = repoState()
+    let cards = results.compactMap { apCriticCard($0, n: ns[$0.finding.unit] ?? 0, unitTitle: titles[$0.finding.unit] ?? $0.finding.unit) }
+    let count = { (k: String) in results.filter { apVerdictKey($0.verdict) == k }.count }
+    var o: [String: Any] = ["round": round, "ok": sr.note.isEmpty, "at": r3(now()), "note": sr.note.isEmpty ? "비판 세션이 지적 \(findings.count)개를 썼습니다" : sr.note,
+                            "model": pick.model, "author_model": author, "tools": apDraftTools, "args": sr.argv, "cost_usd": sr.cost ?? NSNull(), "sec": r3(sr.sec),
+                            "results": results.map(apCriticResultJSON), "cards": cards, "problems": parseProblems, "skipped": skipped,
+                            "counts": ["confirmed": count("confirmed"), "refuted": count("refuted"), "unverified": count("unverified"), "reading": count("reading")],
+                            "targets": targets, "repo_same": NSDictionary(dictionary: before).isEqual(to: after),
+                            "evidence": "critic/r\(round)/verify"]
+    if let n = pick.note { o["model_note"] = n }
+    reply(o, sr.note.isEmpty)
+}
+
+// 판정 놓침(5단계 ⑪-3): 출발 준비 폴더(또는 실행 폴더)의 프로젝트에서 열린 판정 놓침을 읽어 misses.json(요약 digest·열린 줄)에 쓴다. 기록 저장소는 엔진만 쓴다
+func cmdMisses(_ args: [String]) -> Never {
+    let dir = runDir(args.first { !$0.hasPrefix("--") })
+    guard let run = readJSON(dir + "/run.json") as? [String: Any] else { fail("run.json 을 읽지 못했습니다") }
+    let dev = args.contains("--dev") || run["dev"] as? Bool == true || run["claude_path"] != nil || run["claude_args"] != nil
+    guard let project = run["project"] as? String, validName(project) else {
+        let o: [String: Any] = ["project": NSNull(), "open": 0, "rows": [], "digest": "", "at": r3(now())]
+        writeJSON(dir + "/misses.json", o); print(jsonText(o)); exit(0)
+    }
+    mkdirPrivate(privateRoot(dev: dev))
+    let db: RecordsDB
+    do { db = try RecordsDB(recordsPath(dev: dev)) } catch { fail("실행 기록 저장소를 열지 못했습니다: \(error)") }
+    let open = (try? db.misses(project: project, openOnly: true)) ?? []
+    let all = (try? db.misses(project: project, openOnly: false)) ?? []
+    db.close()
+    let rows = open.prefix(50).map { m -> [String: Any] in
+        ["id": m.id, "run": m.run, "unit": m.unitId ?? NSNull(), "n": m.unitN ?? NSNull(), "source_key": m.sourceKey ?? NSNull(), "title": m.title, "signal": m.signal.rawValue,
+         "label": apMissLabel(m.signal), "side": m.side, "judge": m.judge ?? NSNull(), "why": m.why, "created": m.created]
+    }
+    let o: [String: Any] = ["project": project, "open": open.count, "open_judge": open.filter { $0.side == "judge" }.count, "total": all.count, "rows": rows,
+                            "digest": apMissDigest(all), "at": r3(now())]
+    writeJSON(dir + "/misses.json", o)
+    print(jsonText(o)); exit(0)
+}
+
+// 세트 이어 쓰기 세션(5단계 ⑪-3, 이어 가기 길): 판정 놓침이 있으면(규칙 apSetRewrite) 작성 쪽 모델(실행 설정의 모델)이 이어 갈 단위의 판정 명령·지난 지시·
+// 놓친 기록만 읽고 고친 판정 명령과 지시를 revise/ 에 쓴다. 결과 검사(판정 명령만, 지우기 막음)를 지난 것만 보드가 출발 확인에 판정 차이로 보인다
+func cmdRevise(_ args: [String]) -> Never {
+    let dir = runDir(args.first { !$0.hasPrefix("--") && $0 != "--claude" && $0 != "--max-sec" })
+    guard let run = readJSON(dir + "/run.json") as? [String: Any] else { fail("run.json 을 읽지 못했습니다") }
+    guard run["state"] == nil else { fail("이미 출발한 실행입니다. 세트 이어 쓰기는 출발 전에만 합니다.") }
+    let dev = args.contains("--dev") || run["claude_args"] != nil || run["claude_path"] != nil
+    let claudePath = sessionClaudePath(args, dev: dev, run: run)
+    let maxSec = argValue(args, "--max-sec").flatMap(Double.init).map { min(max($0, 10), 3600) } ?? apReviseMaxSec
+    func reply(_ o: [String: Any], _ ok: Bool) -> Never { writeJSON(dir + "/revise.json", o); print(jsonText(o)); exit(ok ? 0 : 1) }
+    let mj = readJSON(dir + "/misses.json") as? [String: Any] ?? [:]
+    let openN = mj["open"] as? Int ?? 0
+    let need = apSetRewrite(harnessChanged: false, newRequest: false, openMisses: openN)
+    guard need.rewrite else { reply(["ok": true, "skipped": true, "note": "판정 놓침·하네스 바뀜·새 요구가 없어 지난 세트를 그대로 씁니다(모델 0)", "changes": []], true) }
+    guard let q = readJSON(dir + "/queue.json") as? [[String: Any]], !q.isEmpty else { reply(["ok": false, "problems": ["이어 갈 단위(queue.json)가 없습니다"]], false) }
+    let units = q.map { d in APReviseUnit(id: d["id"] as? String ?? "", title: d["title"] as? String ?? "", prompt: d["prompt"] as? String ?? "",
+                                           check: d["check"] as? String ?? "", scenarios: (d["scenarios"] as? [[String: Any]] ?? []).compactMap { $0["file"] as? String }) }
+    let project = run["project"] as? String ?? ""
+    let instruction = validName(project) ? (try? String(contentsOfFile: setDir(project: project, dev: dev) + "/autopilot.md", encoding: .utf8)) : nil
+    let out = dir + "/revise"
+    try? fm.removeItem(atPath: out)
+    try? fm.createDirectory(atPath: out, withIntermediateDirectories: true)
+    let outC = canonical(out)
+    let model = modelName(run["model"]) ?? apDraftModel
+    let prompt = apRevisePrompt(units: units, instruction: instruction, misses: mj["digest"] as? String ?? "", reasons: need.reasons, out: outC)
+    let paths = APDraftPaths(out: outC, reads: [], denyRead: sessionDenyRead())
+    let (sr, problem) = readSession(kind: "revise", id: (dir as NSString).lastPathComponent, dev: dev, claudePath: claudePath, paths: paths, model: model,
+                                    budget: apReviseBudgetUSD, prompt: prompt, maxSec: maxSec, envKey: "CLAUDE_BOARD_REVISE")
+    guard let sr else { reply(["ok": false, "problems": [problem ?? "세션을 띄우지 못했습니다"]], false) }
+    guard sr.note.isEmpty else { reply(["ok": false, "problems": [sr.note], "model": model, "cost_usd": sr.cost ?? NSNull(), "sec": r3(sr.sec)], false) }
+    let r = apReviseCheck(EngineDraftFiles(root: outC), units: units)
+    var newQ = q
+    for i in newQ.indices { if let id = newQ[i]["id"] as? String, let c = r.checks[id] { newQ[i]["check"] = c } }
+    let changes = apJudgeChanges(old: q, new: newQ).map { ["unit": $0.unit, "title": $0.title, "field": $0.field, "old": $0.old, "new": $0.new, "why": r.whys[$0.unit] ?? ""] }
+    reply(["ok": r.ok, "problems": r.problems, "checks": r.checks, "whys": r.whys, "instruction": r.instruction ?? NSNull(), "changes": changes, "reasons": need.reasons,
+           "misses": (mj["rows"] as? [[String: Any]] ?? []).compactMap { $0["id"] as? String }, "model": model, "args": sr.argv,
+           "cost_usd": sr.cost ?? NSNull(), "sec": r3(sr.sec), "at": r3(now())], r.ok)
 }
 
 let argv = Array(CommandLine.arguments.dropFirst())
@@ -6311,5 +6846,8 @@ case "tickets": cmdTickets(Array(argv.dropFirst()))
 case "notify": cmdNotify(Array(argv.dropFirst()))
 case "seed": cmdSeed(Array(argv.dropFirst()))
 case "draft": cmdDraft(Array(argv.dropFirst()))
+case "critic": cmdCritic(Array(argv.dropFirst()))
+case "misses": cmdMisses(Array(argv.dropFirst()))
+case "revise": cmdRevise(Array(argv.dropFirst()))
 default: usage()
 }
