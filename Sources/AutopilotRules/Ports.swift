@@ -126,3 +126,15 @@ public protocol APOutboxStore {
     /// 첨부할 실행 폴더 파일(report.html) — 링크가 아닌 보통 파일이고 상한 아래일 때만
     func attachment(_ name: String) -> Data?
 }
+
+// MARK: - 바깥 읽기와 근거 묶음 (Reading.swift·Evidence.swift, 4단계 ⑩-2)
+// 읽기 요청은 위 APHTTP·APSecrets·APWaiter 를 그대로 쓴다(리다이렉트 안 따라감·응답 크기 상한·인증 머리는 보내기 직전에만)
+
+// 근거 묶음 폴더 하나(<묶음>/MANIFEST.json 과 메타·그림 파일) — 이름은 규칙이 만든 꼴만(폴더 밖을 가리키지 않음).
+// 쓰기는 임시 파일 + rename 이고 파일은 0444(세션에는 읽기 전용), 링크를 따라가지 않는다. 해시는 어댑터가 쓴 글자로 낸다
+public protocol APEvidenceStore {
+    func read(_ name: String) -> Data?
+    /// 쓴 글자의 sha256(16진수). 못 쓰면 nil
+    func write(_ name: String, _ data: Data) -> String?
+    func remove(_ name: String)
+}
