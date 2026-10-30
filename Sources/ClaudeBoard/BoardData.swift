@@ -466,6 +466,18 @@ final class UsageStore: ObservableObject {
 // MARK: 사용량의 진짜 어댑터 — 규칙은 BoardRules/Usage.swift, 포트는 BoardRules/Ports.swift(가짜 어댑터는 Tests 에만).
 // 셋 다 상태가 없는 struct 라 그대로 Sendable 이다
 
+// 시험 빌드만(보드 설정 usageOffline): 사용량 API·키체인 로그인 정보를 부르지 않고 공용 캐시를 읽기만 한다 — 자율주행 멈출 선 시험(6단계 ⑫-6)이
+// 설치된 보드·상태줄과 함께 쓰는 캐시와 사용량 API 를 건드리지 않게. 설치판은 이 설정을 보지 않는다
+let usageOffline = Bundle.main.bundleIdentifier == "com.claude.board.dev" && UserDefaults.standard.bool(forKey: "usageOffline")
+struct ReadOnlyUsageCache: UsageCache {
+    let inner = UsageCacheFile()
+    func modifiedAt() -> Date? { inner.modifiedAt() }
+    func read() -> Data? { inner.read() }
+    func write(_ data: Data) {}
+    func remove() {}
+}
+struct NoLoginCredentials: LoginCredentials { func read() -> Data? { nil } }
+
 // 사용량 캐시 — 상태줄 스크립트와 함께 쓰는 파일. 자리·형식을 바꾸지 않는다
 struct UsageCacheFile: UsageCache {
     let path = "/tmp/.claude-usage-cache.json"

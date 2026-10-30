@@ -31,6 +31,12 @@ func apRead(_ path: String) -> Any? {
     FileManager.default.contents(atPath: path).flatMap { try? JSONSerialization.jsonObject(with: $0) }
 }
 func apNum(_ v: Any?) -> Double? { (v as? NSNumber)?.doubleValue }
+// 실제 경로(바로 가기를 풂, 엔진 canonical 과 같음). 없는 경로는 글자 그대로
+func apRealPath(_ p: String) -> String {
+    guard let r = realpath((p as NSString).expandingTildeInPath, nil) else { return p }
+    defer { free(r) }
+    return String(cString: r)
+}
 func apStamp(_ path: String) -> Double { mtime(path)?.timeIntervalSince1970 ?? 0 }
 func apStrings(_ v: Any?) -> [String] { (v as? [Any] ?? []).map { "\($0)" } }
 func apText(_ v: Any?) -> String? { (v as? String).flatMap { $0.isEmpty ? nil : $0 } }
@@ -569,8 +575,10 @@ struct APLogGroup: Identifiable {
     // 원래 작업 트리로 그 경로를 쓰는 실행 — 보드 탭 새 세션 경고
     func inPlaceRun(covering dir: String) -> APRun? { runs.first { $0.inPlace && $0.covers(dir) } }
     // 자율주행 보기의 사용량 상자 멈출 선(%, UsagePanel 의 한도 id 로)
+    // 실행마다 멈출 선이 따로라(6단계 ⑫-6 설계 판단: 출발 때 고정한 실행의 선) 가장 먼저 걸리는 선, 곧 가장 낮은 선을 보인다
     var stoplines: [String: Double]? {
-        runs.first.map { ["5h": $0.stop5 * 100, "7d": $0.stop7 * 100] }
+        guard !runs.isEmpty else { return nil }
+        return ["5h": (runs.map(\.stop5).min() ?? 0.95) * 100, "7d": (runs.map(\.stop7).min() ?? 0.80) * 100]
     }
 
     // 일시정지·재개·중단 — control.json 을 엔진 control 명령과 같은 꼴({"action","ts"}, 임시 파일을 바꿔 넣음)로 쓴다.
@@ -1248,6 +1256,8 @@ struct APRunLine: View, Equatable {
         let (st, c) = apStateChip(run)
         return HStack(spacing: 6) {
             APMark()
+            // 실행이 여럿이면 줄마다 어느 실행인지(6단계 ⑫-6) — 작은 크기에서도 실행 이름을 앞에
+            Text(run.name).boardFont(11, weight: .semibold).lineLimit(1).truncationMode(.tail).frame(maxWidth: 90, alignment: .leading).fixedSize(horizontal: true, vertical: false)
             APChip(text: st, color: c, strong: true)
             if let u = run.current {
                 Text("\(u.n)/\(run.units.count)").boardFont(10.5, design: .monospaced).foregroundStyle(.secondary).fixedSize()
@@ -1521,6 +1531,7 @@ struct APRunningScreen: View {
                 Spacer(minLength: 0)
                 APChip(text: st, color: c, strong: true)
             }
+            switcher(run, compact: true)
             if let u = run.current {
                 VStack(alignment: .leading, spacing: 6) {
                     HStack(spacing: 6) {
@@ -1561,6 +1572,7 @@ struct APRunningScreen: View {
                 Text("자율주행 · \(run.name)").boardFont(16, weight: .bold).lineLimit(1)
                 Spacer(minLength: 0)
             }
+            switcher(run, compact: false)
             WrapRow(spacing: 6) {
                 APChip(text: st, color: c, strong: true)
                 APChip(text: run.modeLabel, color: run.inPlace ? APColor.wait : APColor.muted)
@@ -1578,6 +1590,33 @@ struct APRunningScreen: View {
             }
             if !run.title.isEmpty {
                 Text(run.title).boardFont(11).foregroundStyle(.secondary).lineLimit(2)
+            }
+        }
+    }
+
+    // 함께 도는 다른 실행(6단계 ⑫-6) — 누르면 그 실행의 자율주행 중 화면으로 바뀐다. 실행이 하나면 없음
+    @ViewBuilder private func switcher(_ run: APRun, compact: Bool) -> some View {
+        let others = ap.runs.filter { $0.id != run.id }
+        if !others.isEmpty {
+            WrapRow(spacing: 5) {
+                Text(compact ? "다른 실행" : "함께 도는 실행 \(others.count)").boardFont(10.5).foregroundStyle(.secondary).fixedSize()
+                ForEach(others) { o in
+                    let (st, c) = apStateChip(o)
+                    Button { ap.screen = .running(o.id) } label: {
+                        HStack(spacing: 4) {
+                            Text(o.name).boardFont(10.5, weight: .semibold).lineLimit(1)
+                            Text(st).boardFont(9.5, weight: .semibold).foregroundStyle(c)
+                        }
+                        .fixedSize()
+                        .padding(.horizontal, 7).frame(height: 20)
+                        .background(Capsule().fill(Color.white.opacity(0.07)))
+                        .overlay(Capsule().stroke(c.opacity(0.35), lineWidth: 0.5))
+                        .contentShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .hint("\(o.name) 실행의 자율주행 중 화면으로(\(st))")
+                    .accessibilityIdentifier("ap-switch-\(o.id)")
+                }
             }
         }
     }
@@ -2871,10 +2910,15 @@ extension APRecords {
     var stop5: Double { ((settings["stopline"] as? [String: Any]).flatMap { apNum($0["five_hour"]) } ?? 0.95) * 100 }
     var title: String { settings["title"] as? String ?? "" }
     var choosable: [APDraftUnit] { units.filter { $0.excluded == nil && $0.blocked == nil } }
-    // 같은 경로·같은 프로젝트에서 도는 실행 — 끝날 때까지 출발을 잠근다(엔진은 이것을 보지 않는다. 같은 저장소의 두 실행이 부딪히지 않게)
+    // 같은 경로·같은 프로젝트에서 도는 실행 — 끝날 때까지 출발을 잠근다. 6단계 ⑫-6 부터 엔진도 출발할 때 기록 저장소의 경로 자리로 거부한다(거의 같은 때 둘을 띄워도).
+    // 경로는 실제 경로로 풀고 대소문자·유니코드 정규화를 접어 견준다(규칙 apPathOverlap, 엔진과 같은 규칙)
     var activeHere: String? {
         guard hasDraft else { return nil }
-        return AutopilotStore.shared.runs.first { (!root.isEmpty && $0.covers(root)) || ($0.project != nil && $0.project == project) }?.id
+        let key = root.isEmpty ? nil : apPathKey(apRealPath(root))
+        return AutopilotStore.shared.runs.first { r in
+            (key.map { k in r.repos.contains { apPathOverlap(k, apPathKey(apRealPath($0)), home: NSHomeDirectory()) } } ?? false)
+                || (r.project != nil && r.project == project)
+        }?.id
     }
 
     // 카드가 단위에 내린 결정 — 답하지 않은 카드가 있으면 "pending", 빼기·판정 고치기 답이면 "out"
@@ -3090,7 +3134,7 @@ extension APRecords {
         var keys = ["title", "model", "effort", "stopline", "caps", "check_timeout_min", "check_retries", "precheck_retry_min", "background_quiet_sec",
                     "allowed_tools", "disallowed_tools", "write_roots", "network_allow", "local_binding", "env_pass", "unix_sockets", "read_deny",
                     "sandbox_exclude", "project", "project_root", "worktree_mode", "worktree_files"]
-        if apDevBuild { keys += ["claude_args", "claude_path"] }
+        if apDevBuild { keys += ["claude_args", "claude_path", "usage_path"] }   // usage_path: 장난감 사용량 파일(6단계 ⑫-6, 시험 빌드만)
         for k in keys { if let v = pr[k], !(v is NSNull) { settings[k] = v } }
         settings["project"] = proj
         if let roots = settings["write_roots"] as? [String] { settings["write_roots"] = roots.map(unmap) }
@@ -3430,6 +3474,8 @@ extension APRecords {
             let deps = u.depends.filter { ids.contains($0) }
             if deps.isEmpty { d.removeValue(forKey: "depends") } else { d["depends"] = deps }
             if let s = u.story { d["story"] = storyKey(s); d["tickets"] = [taskKey(u)] }
+            // 단위 추정 주간 %p(보정한 추정, 6단계 ⑫-6): 엔진이 멈출 선 자리 크기로 쓴다(없으면 단위 주간 %p 상한)
+            if let pp = estimate(u).pp, pp > 0 { d["est_pp"] = (pp * 10).rounded() / 10 } else { d.removeValue(forKey: "est_pp") }
             ids.insert(u.id)
             out.append(d)
         }
