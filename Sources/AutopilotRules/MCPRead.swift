@@ -208,5 +208,6 @@ public func apMCPMeta(_ text: String, server: String, link: String) -> (meta: AP
     m.source = "mcp:" + server
     m.url = apMetaLinkShape(link) ? link : ""
     m.image = ""   // MCP 세션은 그림을 넘기지 않는다
+    m.notice = ""  // 안내는 근거 묶음에 넣을 때 붙인다
     return (m, [])
 }

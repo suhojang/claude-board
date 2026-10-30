@@ -92,7 +92,7 @@ public struct APEvidenceWrite: Equatable, Sendable {
 
 // 읽은 것 하나를 묶음에 넣는다 — 같은 주소면 같은 번호(옛 파일은 지움), 아니면 다음 번호. 그림 파일 이름을 메타 image 칸에 적는다.
 // 모든 길(내장 REST·MCP 읽기 세션·단위 시작 전 티켓)이 이 문을 지나므로 비밀 가리기(apMetaRedact)를 여기서 늘 하고, 가린 뒤 형식 검사(apMetaCheck)를
-// 다시 지난 것만 쓴다. redacted 는 앞서 가린 수(내장 읽기가 먼저 가렸으면 그 수)이고 여기서 더 가린 수를 더해 MANIFEST 에 적는다
+// 다시 지난 것만 쓴다(절 글은 믿지 않는 자료 표시로 감싸 쓴다, apMetaWrapUntrusted). redacted 는 앞서 가린 수(내장 읽기가 먼저 가렸으면 그 수)이고 여기서 더 가린 수를 더해 MANIFEST 에 적는다
 // (2026-10-30 자동 보안 검토 MEDIUM: 전에는 MCP 길의 가리기를 엔진이 따로 했다). 메타 파일 → 그림 → MANIFEST 차례(MANIFEST 가 가리키는 파일은 늘 있다)
 public func apAddEvidence(_ meta0: APMeta, image: Data?, imageHost: String, url: String, via: String, requests: Int, redacted: Int,
                           cost: Double? = nil, store: APEvidenceStore, clock: APClock) -> APEvidenceWrite {
@@ -101,10 +101,10 @@ public func apAddEvidence(_ meta0: APMeta, image: Data?, imageHost: String, url:
     let n = old?.n ?? ((entries.map(\.n).max() ?? 0) + 1)
     let (red, more) = apMetaRedact(meta0)
     let file = apEvidenceName(n, source: red.source, id: red.id)
-    var meta = red
+    var meta = apMetaWrapUntrusted(red)   // 믿지 않는 자료 표시(절 글 감싸기·표시 괄호 바꾸기·고정 안내)
     let imageFile = image == nil ? "" : String(file.dropLast(5)) + ".png"
     meta.image = imageFile
-    let checked = apMetaCheck(apMetaJSON(meta))
+    let checked = apMetaCheck(apMetaJSON(meta), wrapped: true)
     guard let ok = checked.meta else { return APEvidenceWrite(note: "형식 검사에 걸려 넣지 않았습니다: " + checked.problems.prefix(3).joined(separator: " · ")) }
     let data = apMetaData(ok)
     guard let sha = store.write(file, data) else { return APEvidenceWrite(note: "근거 묶음에 \(file) 을 쓰지 못했습니다") }
