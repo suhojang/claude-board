@@ -1,7 +1,7 @@
 // 자율주행 규칙의 포트 — 규칙이 바깥(파일·git·HTTP·시각)을 부르는 자리(2026-10-30 2단계 5-2b 에서 처음 생김).
 // 새 폴더 만들기(NewRepo.swift)가 바깥(폴더·git)을, 기술 스택 감지(Stack.swift)가 바깥(저장소 빌드 파일)을,
 // 버전 목록(Versions.swift)이 바깥(공식 목록 받기·하루 캐시)을, 원문 지우기(Purge.swift)가 바깥(실행 폴더·지운 기록)을,
-// 보고서 그리기(Report.swift, 3단계)가 바깥(실행 폴더·기록 저장소 읽기, 보고서 파일 쓰기)을 부르는 자리.
+// 보고서 그리기(Report.swift, 3단계)가 바깥(실행 폴더·기록 저장소 읽기, 보고서 파일 쓰기)을, 시험 실행기(Scenarios.swift, 5단계 ⑪-1)가 바깥(도구 찾기·판정 돌리기)을 부르는 자리.
 // 진짜 어댑터는 보드(Sources/ClaudeBoard/AutopilotTopic.swift)에, 가짜 어댑터는 Tests/AutopilotRulesTests 에만 둔다(BoardRules 의 Ports.swift 와 같은 꼴, 이슈 #9).
 // 이름의 AP 는 보드 자율주행 절의 이름 짓기를 따르고, 보드가 BoardRules 도 import 하므로 겹치지 않게 한다(BoardRules.Clock 과 APClock).
 // 포트는 역할로 나눈다(범용 파일 포트를 두면 시험이 경로 글자 시험이 된다)
@@ -137,4 +137,21 @@ public protocol APEvidenceStore {
     /// 쓴 글자의 sha256(16진수). 못 쓰면 nil
     func write(_ name: String, _ data: Data) -> String?
     func remove(_ name: String)
+}
+
+// MARK: - 시험 실행기 (Scenarios.swift, 5단계 ⑪-1)
+
+// 도구가 있는지 보는 포트(시나리오 종류마다 필요한 해석기·브라우저·node 모듈)(진짜 어댑터는 엔진: 로그인 셸 PATH·앱 자리·node 의 require.resolve). 도구를 깔지 않는다
+public protocol APToolProbe {
+    func program(_ path: String) -> Bool
+    func command(_ name: String) -> String?
+    func browser() -> String?
+    func nodeModule(_ name: String, from dir: String) -> Bool
+}
+
+// 판정 한 걸음을 돌리는 포트(진짜 어댑터는 엔진: 샌드박스·로그인 환경·시간 상한·일시정지/중단, 출력은 증거 폴더)
+public protocol APJudgeRunner {
+    /// 고정본의 지금 지문(sha256 16진수). 없으면 nil
+    func digest(_ path: String) -> String?
+    func run(_ step: APJudgeStep) -> APStepResult
 }
