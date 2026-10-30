@@ -1,0 +1,35 @@
+[
+ {
+  "id": "u1",
+  "item": "@주문 상세 쪽",
+  "title": "주문 상세 쪽 칸 다섯",
+  "kind": "dev",
+  "folder": "",
+  "prompt": "주문 상세 칸을 적습니다.\n- FAKE WRITE order-detail.txt 칸 다섯\n- FAKE COMMIT 주문 상세",
+  "check": "grep -qx '칸 다섯' order-detail.txt",
+  "est_min": 15,
+  "why": "옛 자동화 원장 L-2(멈춘 자리)"
+ },
+ {
+  "id": "u2",
+  "item": "@환불 버튼",
+  "title": "환불 버튼 자리",
+  "kind": "dev",
+  "folder": "",
+  "prompt": "환불 버튼 자리를 적습니다.\n- FAKE WRITE refund.txt 환불 버튼\n- FAKE COMMIT 환불",
+  "check": "grep -qx '환불 버튼' refund.txt",
+  "est_min": 10,
+  "why": "옛 자동화 원장 L-3"
+ },
+ {
+  "id": "u3",
+  "item": "@장애 알림 문구 정리",
+  "title": "장애 알림 문구",
+  "kind": "docs",
+  "folder": "",
+  "prompt": "장애 알림 문구를 적습니다.\n- FAKE WRITE alert.txt 장애가 났습니다\n- FAKE COMMIT 알림 문구",
+  "check": "grep -qx '장애가 났습니다' alert.txt",
+  "est_min": 10,
+  "why": "옛 자동화 메모"
+ }
+]

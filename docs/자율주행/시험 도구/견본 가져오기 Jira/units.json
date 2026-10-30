@@ -1,0 +1,35 @@
+[
+ {
+  "id": "u1",
+  "item": "@회원 목록 쪽 나누기",
+  "title": "회원 목록을 20명씩 나누기",
+  "kind": "dev",
+  "folder": "",
+  "prompt": "회원 목록 쪽 크기를 적습니다.\n- FAKE WRITE members-page.txt 20\n- FAKE COMMIT 쪽 크기",
+  "check": "grep -qx 20 members-page.txt",
+  "est_min": 15,
+  "why": "TOY-1 설명 첫 줄"
+ },
+ {
+  "id": "u2",
+  "item": "@배포 메모 정리",
+  "title": "배포 메모 정리",
+  "kind": "docs",
+  "folder": "",
+  "prompt": "배포 메모를 정리합니다(옛 토큰 줄은 옮기지 않습니다).\n- FAKE WRITE deploy-notes.txt 배포 메모 정리함\n- FAKE COMMIT 배포 메모",
+  "check": "grep -qx '배포 메모 정리함' deploy-notes.txt",
+  "est_min": 10,
+  "why": "TOY-4 설명"
+ },
+ {
+  "id": "u3",
+  "item": "@주문 합계 반올림",
+  "title": "주문 합계를 원 단위로",
+  "kind": "fix",
+  "folder": "",
+  "prompt": "반올림 규칙을 적습니다.\n- FAKE WRITE rounding.txt 원 단위 반올림\n- FAKE COMMIT 반올림",
+  "check": "grep -qx '원 단위 반올림' rounding.txt",
+  "est_min": 15,
+  "why": "TOY-5 설명"
+ }
+]

@@ -1,0 +1,49 @@
+[
+ {
+  "id": "u1",
+  "item": "@인사 글 파일 만들기",
+  "title": "인사 글 파일 만들기",
+  "kind": "dev",
+  "folder": "",
+  "prompt": "hello.txt 에 인사 한 줄을 씁니다.\n- FAKE WRITE hello.txt 안녕하세요\n- FAKE COMMIT 인사 글",
+  "check": "grep -qx '안녕하세요' hello.txt",
+  "est_min": 10,
+  "why": "할 일 문서 '이번 주' 첫 항목과 그 아래 줄"
+ },
+ {
+  "id": "u2",
+  "item": "@메뉴 목록 파일",
+  "title": "메뉴 파일 만들기",
+  "kind": "dev",
+  "folder": "",
+  "prompt": "menu.txt 에 메뉴를 한 줄로 씁니다.\n- FAKE WRITE menu.txt 커피 차 주스\n- FAKE COMMIT 메뉴",
+  "check": "grep -qx '커피 차 주스' menu.txt",
+  "est_min": 10,
+  "why": "할 일 문서 '메뉴 목록 파일' 아래 줄(앞 조각)"
+ },
+ {
+  "id": "u3",
+  "item": "@메뉴 목록 파일",
+  "title": "메뉴 수 적기",
+  "kind": "docs",
+  "folder": "",
+  "prompt": "메뉴 수를 menu-count.txt 에 적습니다.\n- FAKE WRITE menu-count.txt 3\n- FAKE COMMIT 메뉴 수",
+  "check": "grep -qx 3 menu-count.txt",
+  "est_min": 10,
+  "depends": [
+   "u2"
+  ],
+  "why": "같은 항목의 뒤 조각"
+ },
+ {
+  "id": "u4",
+  "item": "@README 첫 줄 고침",
+  "title": "README 첫 줄 다시 보기",
+  "kind": "docs",
+  "folder": "",
+  "prompt": "README 첫 줄을 다시 보고 본 것을 적습니다.\n- FAKE WRITE readme-check.txt 다시 봄\n- FAKE COMMIT README 다시 봄",
+  "check": "grep -qx '다시 봄' readme-check.txt",
+  "est_min": 5,
+  "why": "사람이 되살린 항목"
+ }
+]
