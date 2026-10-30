@@ -76,7 +76,10 @@ func appendLine(_ path: String, _ line: String) {
     close(fd)
 }
 
+// 실패로 끝내기 전에 할 정리 — 출발(start)이 잡은 같은 경로 자리를 푼다(6단계 ⑫-6)
+var failCleanup: (() -> Void)?
 func fail(_ msg: String) -> Never {
+    if let c = failCleanup { failCleanup = nil; c() }
     FileHandle.standardError.write(Data((msg + "\n").utf8))
     exit(2)
 }
@@ -1286,8 +1289,10 @@ final class RecordsDB {
         }
         if fresh { chmod(path, 0o600) }
         sqlite3_busy_timeout(db, 5000)   // 다른 엔진이 쓰는 중이면 5초까지 기다린다(그 뒤는 transaction 이 다시 한다)
-        try exec("PRAGMA journal_mode=WAL")
-        let v = Int32(try rows("PRAGMA user_version").first.flatMap { num($0[0]) } ?? 0)
+        // 여러 엔진이 빈 저장소를 함께 열면 WAL 로 바꾸는 걸음·판 읽기가 busy_timeout 을 거치지 않고 database is locked 로 실패할 때가 있다(6단계 ⑫-6 실측:
+        // 32개를 함께 열어 8번에 한 번). 그 걸음도 규칙 apBusyRetryDelay 대로 다시 한다
+        try RecordsDB.again { try exec("PRAGMA journal_mode=WAL") }
+        let v = try RecordsDB.again { Int32(try rows("PRAGMA user_version").first.flatMap { num($0[0]) } ?? 0) }
         if v > RecordsDB.version { throw DBError(description: "저장소 판(\(v))이 이 엔진이 아는 판(\(RecordsDB.version))보다 새롭습니다. 보드를 업데이트하세요") }
         if v < RecordsDB.version {
             try transaction {
@@ -1361,21 +1366,120 @@ final class RecordsDB {
         return out
     }
 
-    // 쓰기 잠금을 먼저 잡고(BEGIN IMMEDIATE) 한 번에 쓴다. 다른 엔진과 겹쳐 잠겨 있으면 조금 쉬었다 다섯 번까지 다시 한다
-    func transaction(_ body: () throws -> Void) throws {
-        var tries = 0
+    // 잠겨 실패한 걸음을 규칙 apBusyRetryDelay 대로 다시 한다(6단계 ⑫-6, 전에는 transaction 만 다섯 번)
+    static func again<T>(_ step: () throws -> T) throws -> T {
+        var attempt = 0
         while true {
-            do {
-                try exec("BEGIN IMMEDIATE")
-                do { try body(); try exec("COMMIT"); return } catch { _ = try? exec("ROLLBACK"); throw error }
-            } catch let e as DBError where e.busy && tries < 5 {
-                tries += 1
-                usleep(useconds_t(300_000 * tries))
+            do { return try step() } catch let e as DBError where e.busy {
+                attempt += 1
+                guard let d = apBusyRetryDelay(attempt) else { throw e }
+                usleep(useconds_t(d * 1_000_000))
             }
         }
     }
 
+    // 쓰기 잠금을 먼저 잡고(BEGIN IMMEDIATE) 한 번에 쓴다. 다른 엔진과 겹쳐 잠겨 있으면 조금 쉬었다 다시 한다(apBusyRetryDelay, 여덟 번까지).
+    // 판 올리기도 이 안에서 잠금을 잡은 뒤 판을 다시 보므로, 여러 엔진이 함께 열어도 한 번만 된다
+    func transaction(_ body: () throws -> Void) throws {
+        try RecordsDB.again {
+            try exec("BEGIN IMMEDIATE")
+            do { try body(); try exec("COMMIT") } catch { _ = try? exec("ROLLBACK"); throw error }
+        }
+    }
+
     func count(_ table: String) -> Int { (try? rows("SELECT COUNT(*) FROM \(table)").first.flatMap { num($0[0]) }).flatMap { $0 }.map(Int.init) ?? -1 }
+}
+
+// MARK: - 여러 실행 함께 돌리기의 자리 표 (6단계 ⑫-6, 규칙 AutopilotRules/Multirun.swift, 기록 저장소 판 3)
+
+// 멈출 선 자리 표의 진짜 어댑터 — 기록 저장소를 열고 BEGIN IMMEDIATE 한 transaction 에서 줄을 읽고, 규칙이 돌려준 바꿈(지울 실행 → 넣을 줄)을 쓴다.
+// 다른 엔진이 쓰는 중이면 busy_timeout·다시 하기(RecordsDB.transaction)로 기다린다
+struct EngineSlotBook: APSlotBook {
+    let path: String
+    func update(_ body: ([APSlot]) -> APSlotChange) throws {
+        let db = try RecordsDB(path)
+        defer { db.close() }
+        try db.transaction {
+            let rows = try db.rows("SELECT run_id, project_id, unit_n, kind, pp, used, pid, since, beat FROM stopline_slots").map { r -> APSlot in
+                APSlot(run: r[0] as? String ?? "", project: r[1] as? String, unit: inum(r[2]) ?? 0, kind: APSlotKind(rawValue: r[3] as? String ?? "") ?? .hold,
+                       pp: num(r[4]) ?? 0, used: num(r[5]) ?? 0, pid: inum(r[6]).map(Int32.init), since: num(r[7]) ?? 0, beat: num(r[8]) ?? 0)
+            }
+            let c = body(rows)
+            for d in c.drop { try db.run("DELETE FROM stopline_slots WHERE run_id=?", [d]) }
+            for p in c.put {
+                try db.run("""
+                    INSERT INTO stopline_slots(run_id,project_id,unit_n,kind,pp,used,pid,since,beat) VALUES(?,?,?,?,?,?,?,?,?)
+                    ON CONFLICT(run_id) DO UPDATE SET project_id=excluded.project_id, unit_n=excluded.unit_n, kind=excluded.kind, pp=excluded.pp,
+                      used=excluded.used, pid=excluded.pid, since=excluded.since, beat=excluded.beat
+                    """, [p.run, p.project, p.unit, p.kind.rawValue, r3(p.pp), r3(p.used), p.pid.map { Int($0) }, r3(p.since), r3(p.beat)])
+            }
+        }
+    }
+}
+
+// 같은 경로 자리 표의 진짜 어댑터 — 같은 꼴(지울 실행을 먼저, 넣을 줄은 접은 경로 key 가 PRIMARY KEY 라 같은 key 가 남아 있으면 실패)
+struct EngineClaimBook: APClaimBook {
+    let path: String
+    func update(_ body: ([APClaim]) -> (put: [APClaim], drop: [String])) throws {
+        let db = try RecordsDB(path)
+        defer { db.close() }
+        try db.transaction {
+            let rows = try db.rows("SELECT key, path, run_id, run_dir, label, pid, claimed FROM path_claims").map { r -> APClaim in
+                APClaim(key: r[0] as? String ?? "", path: r[1] as? String ?? "", run: r[2] as? String ?? "", runDir: r[3] as? String ?? "",
+                        label: r[4] as? String ?? "", pid: inum(r[5]).map(Int32.init), claimed: num(r[6]) ?? 0)
+            }
+            let c = body(rows)
+            for d in c.drop { try db.run("DELETE FROM path_claims WHERE run_id=?", [d]) }
+            for p in c.put {
+                try db.run("INSERT INTO path_claims(key,path,run_id,run_dir,label,pid,claimed) VALUES(?,?,?,?,?,?,?)",
+                           [p.key, p.path, p.run, p.runDir, p.label, p.pid.map { Int($0) }, r3(p.claimed)])
+            }
+        }
+    }
+}
+
+// 자리를 잡은 실행이 살아 있는지 — 실행 폴더의 run.json(상태·끝 정리·엔진 pid), 엔진 pid 가 그 실행 폴더의 엔진인지(명령줄),
+// LaunchAgent 가 실렸는지(launchctl print), 자리를 잡은 출발 명령이 아직 도는지(pid 와 명령줄의 start·실행 id)
+struct EngineClaimProbe: APClaimProbe {
+    func view(_ c: APClaim) -> APClaimRunView {
+        let r = readJSON(c.runDir + "/run.json") as? [String: Any]
+        var v = APClaimRunView(exists: r != nil, state: r?["state"] as? String, wrapped: r?["wrapped"] != nil, engineAlive: false, jobLoaded: false, starterAlive: false)
+        if let pid = num(r?["engine_pid"]).map({ pid_t($0) }), pid > 1, kill(pid, 0) == 0 || errno == EPERM {
+            v.engineAlive = commandOf(pid).contains(c.runDir)
+        }
+        let label = r?["launchd_label"] as? String ?? c.label
+        if label.hasPrefix("com.claude.board"), label.contains(".autopilot.") { v.jobLoaded = launchdLoaded(label) }
+        if let p = c.pid, p > 1, kill(p, 0) == 0 || errno == EPERM {
+            let cmd = commandOf(p)
+            v.starterAlive = cmd.contains(" start ") && cmd.contains((c.runDir as NSString).lastPathComponent)
+        }
+        return v
+    }
+}
+
+// 기록 저장소를 읽기만 하는 질의(status) — 파일이 없거나 판이 낮아 표가 없으면 빈 목록
+func readOnlyRows(_ path: String, _ sql: String, _ args: [String] = []) -> [[Any?]] {
+    guard fm.fileExists(atPath: path) else { return [] }
+    var db: OpaquePointer?
+    guard sqlite3_open_v2("file:" + path + "?mode=ro", &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_URI, nil) == SQLITE_OK else { sqlite3_close_v2(db); return [] }
+    defer { sqlite3_close_v2(db) }
+    sqlite3_busy_timeout(db, 2000)
+    var st: OpaquePointer?
+    guard sqlite3_prepare_v2(db, sql, -1, &st, nil) == SQLITE_OK else { return [] }
+    defer { sqlite3_finalize(st) }
+    for (i, a) in args.enumerated() { sqlite3_bind_text(st, Int32(i + 1), a, -1, SQLITE_TRANSIENT_) }
+    var out: [[Any?]] = []
+    while sqlite3_step(st) == SQLITE_ROW {
+        out.append((0..<sqlite3_column_count(st)).map { c -> Any? in
+            switch sqlite3_column_type(st, c) {
+            case SQLITE_INTEGER: return Int(sqlite3_column_int64(st, c))
+            case SQLITE_FLOAT: return sqlite3_column_double(st, c)
+            case SQLITE_TEXT: return String(cString: sqlite3_column_text(st, c))
+            default: return nil
+            }
+        })
+    }
+    return out
 }
 
 // 옮겨 담는 실행 하나
@@ -1823,9 +1927,9 @@ final class Engine {
     static let settingKeys = ["title", "model", "effort", "stopline", "caps", "check_timeout_min", "check_retries", "precheck_retry_min", "background_quiet_sec",
                               "allowed_tools", "disallowed_tools", "write_roots", "network_allow", "local_binding", "env_pass", "unix_sockets",
                               "read_deny", "sandbox_exclude", "claude_args", "claude_path", "project", "project_root", "base_branch", "publish",
-                              "check_sandbox", "check_unix_sockets", "browser_path"]
+                              "check_sandbox", "check_unix_sockets", "browser_path", "usage_path"]
     static let unitKeys = ["id", "title", "prompt", "check", "precheck", "action", "context", "cwd", "caps", "check_timeout_min", "action_timeout_min",
-                           "tickets", "review", "source_key", "kind", "est_min", "est_basis", "story", "branch", "depends", "prerun",
+                           "tickets", "review", "source_key", "kind", "est_min", "est_basis", "est_pp", "story", "branch", "depends", "prerun",
                            "scenarios", "criteria", "check_sandbox", "check_ports"]
     func syncFromFrozen() {
         for k in Engine.settingKeys { run[k] = cfg[k] }
@@ -1914,6 +2018,7 @@ final class Engine {
         if gotTerm != 0 { terminated() }
         pollInbox()
         summaryTick()
+        slotTick()
         guard let a = readControl() else { return nil }
         // 받은 요청으로 할 일은 규칙 apControlOutcome
         let o = apControlOutcome(a, paused: false)
@@ -1989,7 +2094,7 @@ final class Engine {
     func main() -> Never {
         let prev = state
         if ["stopped", "done", "error"].contains(prev) {   // 끝난 실행인데 다시 떴다(정리 도중 끊김) — 정리만 다시 한다
-            if run["wrapped"] == nil { wrapUp() }          // 하네스 끝 검사·기록 저장소 쓰기 전에 끊겼으면 그것부터
+            if run["wrapped"] == nil { wrapUp() } else { releaseRunPlaces() }   // 하네스 끝 검사·기록 저장소 쓰기 전에 끊겼으면 그것부터, 자리 풀기 전이면 풀기
             cleanupAndExit()
         }
         let first = prev == "starting" || prev.isEmpty
@@ -2076,7 +2181,9 @@ final class Engine {
             if queue[n - 1]["status"] as? String != "running" {
                 // 멈추고 다시 출발을 받았으면 새 단위를 시작하지 않고 멈춘다(규칙 apRestartStopsBefore, 남은 단위가 없으면 위에서 보통처럼 끝남)
                 if apRestartStopsBefore(asked: run["restart"] is [String: Any], hasPending: true) { restartStop() }
-                guard stoplineGate(), unitBranchGate(n), precheckGate(n) else { continue }   // 건너뛸 단위는 시험 환경을 기다리지 않는다
+                guard stoplineGate(n) else { continue }
+                // 건너뛸 단위는 시험 환경을 기다리지 않는다. 시작하지 못하면 잡은 멈출 선 자리를 푼다(6단계 ⑫-6)
+                guard unitBranchGate(n), precheckGate(n) else { releaseSlot(); continue }
                 beginUnit(n)
             }
             runUnit(n)
@@ -2177,6 +2284,14 @@ final class Engine {
         noticeEnd()   // 끝 알림 webhook(실행마다 한 번, 기다리는 올릴 글 수와 합치기 기다림을 넣음)
         run["wrapped"] = r3(now())
         saveRun()
+        releaseRunPlaces()
+    }
+
+    // 실행 끝: 멈출 선 자리와 같은 경로 자리를 푼다(6단계 ⑫-6). 끝 정리(가지 되돌리기)를 마친 뒤라 다음 출발이 같은 경로를 쓸 수 있다
+    func releaseRunPlaces() {
+        releaseSlot()
+        do { try apReleaseClaims(run: id, book: EngineClaimBook(path: recordsPath(dev: isDev))) }
+        catch { elog("같은 경로 자리를 풀지 못했습니다(\(error)). 다음 출발이 그 실행이 끝난 것을 보고 치웁니다") }
     }
 
     // 서브에이전트에 주는 규칙. --append-system-prompt 는 Agent 도구의 서브에이전트에 닿지 않아(실측) 고정 플러그인의 SubagentStart hook 이
@@ -2257,6 +2372,7 @@ final class Engine {
     func pause() {
         event("board", "일시정지했습니다. 재개하면 같은 세션으로 이어 갑니다.")
         setState("paused", "사람이 일시정지했습니다. 재개하면 이어 갑니다.")
+        releaseSlot()   // 멈춘 동안은 자리를 풀고, 재개하면 도는 단위가 다시 적는다(slotTick)
     }
 
     func stopRun() -> Never {
@@ -2315,22 +2431,70 @@ final class Engine {
 
     // MARK: 멈출 선
 
-    // 지금 계정 사용률(15분 안에 읽은 값). 없으면 캐시·API 로 새로 읽는다
+    // 지금 계정 사용률. 읽는 걸음은 규칙 apUsageSteps(6단계 ⑫-6): 설치판은 15분 안에 읽은 값(stream) → 캐시 → 사용량 API(지금 그대로).
+    // 시험 빌드는 장난감 사용량 파일(usage_path, 두 엔진이 함께 읽음)이 있으면 그것 → stream, 없으면 stream → 캐시(읽기만). 사용량 API 로 떨어지지 않는다
     func freshUsage() -> [String: Any]? {
-        if let u = run["usage"] as? [String: Any], let at = num(u["at"]), now() - at < 900 { return u }
-        if let u = usageFromCache() ?? usageFromAPI() { run["usage"] = u; saveRun(); return u }
+        for step in apUsageSteps(dev: isDev, toyPath: cfg["usage_path"] as? String) {
+            switch step {
+            case .toy(let p):
+                guard let m = mtime(p), let j = readJSON(p) as? [String: Any], let u = apUsageFromPercent(j, from: "toy", at: m) else { continue }
+                run["usage"] = u; saveRun(); return u
+            case .stream:
+                if let u = run["usage"] as? [String: Any], let at = num(u["at"]), now() - at < 900 { return u }
+            case .cache:
+                if let u = usageFromCache() { run["usage"] = u; saveRun(); return u }
+            case .api:
+                if let u = usageFromAPI() { run["usage"] = u; saveRun(); return u }
+            }
+        }
         return nil
     }
 
+    // MARK: 멈출 선 자리(6단계 ⑫-6) — 여러 실행이 계정 멈출 선을 함께 본다
+
+    var slotBook: EngineSlotBook { EngineSlotBook(path: recordsPath(dev: isDev)) }
+    var slotHeld = false            // 이 엔진이 자리 표에 자리(hold)를 적어 두었나
+    var slotBeatAt = 0.0            // 마지막으로 자리를 다시 적은 때
+    // 단위의 자리 크기 — 출발 확인이 넣은 단위 추정 %p(est_pp), 없으면 단위 주간 %p 상한
+    func slotPP(_ n: Int) -> Double { apSlotSize(estPP: num(def(n)["est_pp"]), capPP: caps(n)["weekly_pp"] ?? 5) }
+    // 자리를 푼다(단위 끝·일시정지·실행 끝·시작하지 못한 단위). 앞 엔진(다시 뜨기 전)이 남긴 줄도 같은 실행 id 라 함께 풀린다
+    func releaseSlot() {
+        do { try apReleaseSlot(me: id, book: slotBook); slotHeld = false; slotBeatAt = 0 }
+        catch { elog("멈출 선 자리를 풀지 못했습니다(\(error)). 15분 뒤 저절로 풀립니다") }
+    }
+    // 1분마다(pollControl): 도는 단위가 있고 일시정지가 아니면 자리를 다시 적는다(그 단위가 쓴 %p 와 함께). 다시 뜬 엔진이 이어 가는 단위도 이것으로 자리를 되찾는다
+    func slotTick() {
+        let t = now()
+        guard t - slotBeatAt >= 60, state != "paused" else { return }
+        guard let i = queue.firstIndex(where: { $0["status"] as? String == "running" }) else { return }
+        let n = i + 1
+        slotBeatAt = t
+        // 시험 빌드의 장난감 사용량 파일은 단위 도중에도 1분마다 다시 읽는다(단위 주간 %p·자리의 쓴 만큼을 장난감 값으로 재려고). 설치판은 여기서 읽지 않는다
+        if isDev, cfg["usage_path"] is String { _ = freshUsage() }
+        do {
+            try apBeatSlot(me: id, project: cfg["project"] as? String, unit: n, pp: slotPP(n), used: num(loadUnit(n)["weekly_pp"]) ?? 0,
+                           pid: getpid(), book: slotBook, clock: EngineClock())
+            if !slotHeld { slotHeld = true }
+        } catch { elog("멈출 선 자리를 다시 적지 못했습니다(\(error))") }
+    }
+
     // 새 단위를 시작해도 되는가. 계정 사용률이 멈출 선 이상이면 초기화 시각까지 기다리고 false(다시 확인하게)
-    func stoplineGate() -> Bool {
-        // 견주기·기다릴 때·글은 규칙 apStoplineWait(AutopilotRules/Stopline.swift, 6단계 ⑫-6 에서 같은 동작으로 옮김)
-        guard let w = apStoplineWait(usage: freshUsage(), stopline: cfg["stopline"] as? [String: Any] ?? [:], now: now(), tz: .current) else { return true }
+    // 6단계 ⑫-6: 기록 저장소의 자리 표에서 자리를 잡는다(규칙 apTakeSlot) — 다른 실행이 잡아 둔 자리를 더해 보고, 지나가면 이 단위의 자리를 적는다
+    func stoplineGate(_ n: Int) -> Bool {
+        if !fm.fileExists(atPath: privateRoot(dev: isDev)) { mkdirPrivate(privateRoot(dev: isDev)) }
+        let take = apTakeSlot(me: id, project: cfg["project"] as? String, unit: n, pp: slotPP(n), pid: getpid(), usage: freshUsage(),
+                              stopline: cfg["stopline"] as? [String: Any] ?? [:], book: slotBook, clock: EngineClock(), tz: .current)
+        if let note = take.note, run["slot_note"] as? String != note { run["slot_note"] = note; event("engine", note) }
+        guard let w = take.wait else {
+            slotHeld = take.note == nil; slotBeatAt = now()
+            if take.others > 0 { event("engine", "다른 실행 \(take.others)개가 잡아 둔 멈출 선 자리 \(apPPText(take.held))%p 를 더해도 멈출 선 아래라 단위 \(n) 의 자리(\(apPPText(slotPP(n)))%p)를 잡았습니다.") }
+            return true
+        }
         let until = w.until, reason = w.reason
         if run["reason"] as? String != reason { event("board", reason) }
         setState("waiting_stopline", reason, until: until)
         switch waitUntil(until) {
-        case .elapsed: setState("running", "멈출 선 대기를 마치고 다시 확인합니다.")
+        case .elapsed: if !take.byOthers { setState("running", "멈출 선 대기를 마치고 다시 확인합니다.") }   // 다른 실행 때문이면 1분마다 상태 그대로 다시 본다
         case .paused: pause()
         case .stopped: stopRun()
         case .restart: restartStop()
@@ -3002,6 +3166,7 @@ final class Engine {
         saveUnit(n, u)
         queue[n - 1]["status"] = status
         saveQueue()
+        releaseSlot()   // 단위 끝: 멈출 선 자리를 푼다(6단계 ⑫-6)
         if status != "done" { noteUnmerged(n, unitLabel[status] ?? status) }   // Jira 작업: 합치지 않고 작업 가지만 남긴다
         closeInbox(unit: n, status)
         checkGitPlaces("단위 \(n) 뒤")
@@ -4029,6 +4194,11 @@ func prepare(_ dir: String, dev: Bool) -> (problems: [String], frozen: [String: 
         if !dev { problems.append("tool_path 는 시험용 칸이라 --dev 출발에서만 씁니다") }
         else if let t = v as? String { f["tool_path"] = t } else { problems.append("run.json 의 tool_path 는 글자입니다") }
     }
+    // 장난감 사용량 파일(6단계 ⑫-6, 시험 빌드만): 두 엔진이 함께 읽는 사용률 자리. 설치판은 받지 않고, 고정 설정에 있어도 엔진이 듣지 않는다(apUsageSteps)
+    if let v = run["usage_path"] {
+        if !dev { problems.append("usage_path 는 시험용 칸이라 --dev 출발에서만 씁니다") }
+        else if let t = v as? String, t.hasPrefix("/") { f["usage_path"] = t } else { problems.append("run.json 의 usage_path 는 절대 경로 글자입니다") }
+    }
     let answers = readJSON(dir + "/answers.json") as? [String: Any] ?? [:]
     prepareEnvRows = []; prepareGaps = []
     var units: [[String: Any]] = []
@@ -4069,6 +4239,8 @@ func prepare(_ dir: String, dev: Bool) -> (problems: [String], frozen: [String: 
             if let v = q[k] { if v is String { d[k] = v } else { problems.append("단위 \(n) 의 \(k) 는 글자여야 합니다") } }
         }
         if let v = q["est_min"] { if num(v) != nil, !(v is String) { d["est_min"] = v } else { problems.append("단위 \(n) 의 est_min 은 수여야 합니다") } }
+        // 단위 추정 주간 %p(6단계 ⑫-6, 출발 확인의 보정한 추정): 멈출 선 자리 크기(apSlotSize, 없으면 단위 주간 %p 상한)
+        if let v = q["est_pp"] { if let x = num(v), !(v is String), x >= 0 { d["est_pp"] = v } else { problems.append("단위 \(n) 의 est_pp 는 0 이상의 수여야 합니다") } }
         // 가지 칸: Jira 단위의 스토리 키·작업 가지, 기대는 앞 단위(id), 판정 미리 돌리기에 넣을지(기본 true)
         for k in ["story", "branch"] {
             if let v = q[k] { if let s = v as? String, !s.isEmpty { d[k] = s } else { problems.append("단위 \(n) 의 \(k) 는 글자여야 합니다") } }
@@ -4337,6 +4509,22 @@ func cmdStart(_ args: [String]) -> Never {
     let label = (dev ? "com.claude.board.dev" : "com.claude.board") + ".autopilot." + id
     let plist = plistPath(label)
     guard !fm.fileExists(atPath: plist), !launchdLoaded(label) else { fail("같은 이름의 LaunchAgent 가 이미 있습니다: \(label)") }
+    // 같은 경로의 두 번째 출발 거부(6단계 ⑫-6, 규칙 apClaimPaths): 저장소 경로(저장소 밖 작업 폴더는 그 폴더)를 실제 경로로 풀어 기록 저장소의 경로 자리 표에
+    // 한 transaction 으로 잡는다. 겹치는 자리의 실행이 살아 있으면 거부, 끝났거나 엔진·LaunchAgent 가 없으면 그 자리를 치우고 잡는다. 표를 못 쓰면 출발하지 않는다(닫힌 쪽).
+    // 가지·작업 트리를 만들기 전에 잡아, 거의 같은 때 온 두 출발 가운데 하나만 지나간다. 잡은 뒤 실패하면 fail 이 푼다
+    let unitCwds = (frozen["units"] as? [[String: Any]] ?? []).compactMap { $0["cwd"] as? String }.map(canonical)
+    let repoList = (frozen["repos"] as? [String] ?? []).map(canonical)
+    let claimPaths = repoList + unitCwds.filter { c in !repoList.contains { c == $0 || c.hasPrefix($0 + "/") } }
+    if !fm.fileExists(atPath: privateRoot(dev: dev)) { mkdirPrivate(privateRoot(dev: dev)) }
+    let claimBook = EngineClaimBook(path: recordsPath(dev: dev))
+    let claimed = apClaimPaths(run: id, runDir: dir, label: label, pid: getpid(), paths: claimPaths, home: home, book: claimBook, probe: EngineClaimProbe(), clock: EngineClock())
+    switch claimed {
+    case .busy: fail("출발하지 않았습니다:\n  - " + (apClaimBusyText(claimed, home: home) ?? "같은 경로에서 자율주행이 돌고 있습니다"))
+    case .failed(let e): fail("출발하지 않았습니다: 실행 기록 저장소에 같은 경로 자리를 잡지 못했습니다(\(e)). 같은 경로의 실행과 겹치는지 볼 수 없어 출발하지 않습니다")
+    case .ok(let cleared):
+        if !cleared.isEmpty { print("끝났거나 엔진이 없는 실행의 남은 경로 자리를 치웠습니다: \(cleared.joined(separator: ", "))") }
+    }
+    failCleanup = { try? apReleaseClaims(run: id, book: claimBook) }
     // 자기 사본과 고정 설정을 실행 폴더에 둔다(엔진만 쓰는 0700 폴더). 실행 중에 앱을 다시 깔거나 업데이트해도 이 실행의 엔진은 바뀌지 않고,
     // 엔진은 실행 중에 run.json·queue.json 의 설정 칸을 읽지 않는다. 고정 설정의 해시는 LaunchAgent 인자로만 넘겨 다시 뜰 때 견준다
     let pinned = dir + "/pinned/claude-autopilot"
@@ -4459,6 +4647,7 @@ func cmdStart(_ args: [String]) -> Never {
         writeJSON(dir + "/run.json", run)
         fail("launchctl bootstrap 이 실패했습니다(코드 \(r.code)). 가지는 출발 때로 되돌렸습니다")
     }
+    failCleanup = nil   // 출발했다 — 경로 자리는 그 실행의 엔진이 끝 정리를 마칠 때 푼다
     print("출발했습니다: \(label)\n상태 보기: \(pinned) status \(dir)")
     exit(0)
 }
@@ -4647,8 +4836,23 @@ func cmdStatus(_ args: [String]) -> Never {
     }
     if let u = run["usage"] as? [String: Any] {
         let p = { (k: String) in num(u[k]).map { "\(Int(($0 * 100).rounded()))%" } ?? "?" }
-        out += "계정 사용률: 5시간 \(p("five_hour")) · 주간 \(p("seven_day"))\n"
+        out += "계정 사용률: 5시간 \(p("five_hour")) · 주간 \(p("seven_day"))\((u["from"] as? String).map { " (\($0))" } ?? "")\n"
     }
+    // 여러 실행 함께 돌리기(6단계 ⑫-6): 기록 저장소의 멈출 선 자리와 같은 경로 자리를 읽기만 한다
+    let id = (dir as NSString).lastPathComponent, dbPath = recordsPath(dev: run["dev"] as? Bool ?? args.contains("--dev"))
+    let slots = readOnlyRows(dbPath, "SELECT run_id, kind, unit_n, pp, used, beat FROM stopline_slots ORDER BY since")
+    if !slots.isEmpty {
+        let t = now()
+        let parts = slots.map { r -> String in
+            let who = (r[0] as? String) == id ? "이 실행" : (r[0] as? String ?? "?")
+            let kind = (r[1] as? String) == "wait" ? "기다림" : "단위 \(inum(r[2]) ?? 0)"
+            let stale = t - (num(r[5]) ?? 0) >= apSlotTTL ? " · 15분 지나 풀릴 자리" : ""
+            return "\(who) \(kind) \(apPPText(num(r[3]) ?? 0))%p(쓴 \(apPPText(num(r[4]) ?? 0))%p)\(stale)"
+        }
+        out += "멈출 선 자리: " + parts.joined(separator: " / ") + "\n"
+    }
+    let claims = readOnlyRows(dbPath, "SELECT path FROM path_claims WHERE run_id=? ORDER BY path", [id]).compactMap { $0[0] as? String }
+    if !claims.isEmpty { out += "같은 경로 자리: " + claims.map { $0.hasPrefix(home + "/") ? "~/" + $0.dropFirst(home.count + 1) : $0 }.joined(separator: ", ") + "\n" }
     if let b = run["branches"] as? [String: Any] {
         for (r, v) in (b["repos"] as? [String: Any] ?? [:]).sorted(by: { $0.key < $1.key }) {
             let i = v as? [String: Any] ?? [:]
