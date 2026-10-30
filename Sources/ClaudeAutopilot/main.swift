@@ -740,7 +740,8 @@ func isAncestor(_ repo: String, _ a: String, _ b: String, env: [String] = []) ->
 // 작업 트리 상태 줄(추적 안 하는 파일 포함, 무시 파일 제외). 색인을 고쳐 쓰지 않게 --no-optional-locks.
 // 줄 앞 빈칸이 상태 글자라("XY 경로") 출력 전체를 다듬지 않는다 — gitOut 은 다듬어 첫 줄의 " M" 이 "M" 이 됐다(5-3b ①, 경로만 보관할 때 경로가 어긋남)
 func porcelain(_ repo: String, env: [String] = []) -> [String] {
-    let r = runTool("/usr/bin/env", gitHardenEnv + env + ["/usr/bin/git"] + gitHardenC + ["--no-optional-locks", "status", "--porcelain"], cwd: repo)
+    // --ignore-submodules=all 은 명령줄 플래그라 .gitmodules 의 ignore 설정을 이긴다(⑦ 보안 검토 2) — 하위 모듈로 status 가 들어가지 않는다
+    let r = runTool("/usr/bin/env", gitHardenEnv + env + ["/usr/bin/git"] + gitHardenC + ["--no-optional-locks", "status", "--porcelain", "--ignore-submodules=all"], cwd: repo)
     return r.code == 0 ? r.out.split(separator: "\n").map(String.init).filter { !$0.isEmpty } : []
 }
 // 가지가 걸려 있는 작업 트리(가지 이름 → 작업 트리 경로)
@@ -2128,9 +2129,20 @@ final class Engine {
     }
     // 저장소의 작업 트리 자리: 따로 작업 트리 모드면 그 작업 트리, 아니면 원래 저장소. 작업 트리 쪽 git(switch·status·커밋)은 이 자리에서 돈다
     func wt(_ r: String) -> String { repoInfo(r)["work_tree"] as? String ?? r }
-    // 색인에 든 중첩 git(gitlink)을 add·stash 에서 빼는 pathspec(⑦ 보안, Gitlinks.swift). ls-files -s 는 색인만 읽어 filter 를 돌리지 않는다
-    func gitlinkExcludes(_ w: String, _ env: [String]) -> [String] {
-        apGitlinkExcludes(lsFilesStage: safeGit(["ls-files", "-s"], cwd: w, env: env))
+    // 색인에 든 중첩 git(gitlink)을 add·stash 에서 빼는 pathspec(⑦ 보안, Gitlinks.swift). -z·quotePath=false 라야 한글·탭·줄바꿈 경로도
+    // 그대로 온다(보안 검토 1). ls-files 는 색인만 읽어 filter 를 돌리지 않는다. 읽지 못하면 빈 pathspec 이 아니라 nil 을 돌려 부르는 쪽이 멈춘다(닫힌 쪽)
+    func gitlinkExcludes(_ w: String, _ env: [String]) -> [String]? {
+        let r = gitRun(["-c", "core.quotePath=false", "ls-files", "-s", "-z"], cwd: w, env: env)
+        return r.code == 0 ? apGitlinkExcludes(lsFilesZ: r.out) : nil
+    }
+    // 하위 모듈 막기(⑦ 보안 검토 2): 작업 트리에 중첩 git(색인 gitlink)이나 .gitmodules 가 있으면 그 자리에서 git 을 돌리지 않는 까닭(없으면 nil).
+    // status·diff 는 플래그로 막지만 switch·claude 세션 열기는 설정으로 못 막고, .gitmodules 의 ignore=none 이 diff.ignoreSubmodules 를 이겨서(실측)
+    func submoduleReason(_ r: String) -> String? {
+        let w = wt(r), p = pin(r)
+        let ls = gitRun(["-c", "core.quotePath=false", "ls-files", "-s", "-z"], cwd: w, env: p)
+        guard ls.code == 0 else { return "색인을 읽지 못해(git ls-files 실패)" }   // 닫힌 쪽
+        let links = apGitlinkPaths(lsFilesZ: ls.out), gm = fm.fileExists(atPath: w + "/.gitmodules")
+        return apHasSubmodule(gitlinks: links, gitmodules: gm) ? apSubmoduleReason(gitlinks: links, gitmodules: gm) : nil
     }
     func repoOf(_ path: String) -> String? {
         repos.filter { r in let w = wt(r); return path == r || path.hasPrefix(r + "/") || path == w || path.hasPrefix(w + "/") }.max { $0.count < $1.count }
@@ -2200,7 +2212,13 @@ final class Engine {
             event("engine", "보안: 단위 \(n) 의 \(why) 그 자리에서 git(모델·판정·기록)을 돌리지 않습니다(바꿔치기 의심). 사람이 확인하세요.")
             return false
         }
-        return r.map(gitDirOK) ?? true
+        guard r.map(gitDirOK) ?? true else { return false }
+        // 하위 모듈 막기(⑦ 보안 검토 2): 모델이 중첩 git·.gitmodules 를 심으면 claude 세션 열기·판정·switch 가 그 저장소의 filter 를 돌린다
+        if let r, let why = submoduleReason(r) {
+            event("engine", "보안: 단위 \(n) 의 \(why) 그 자리에서 git(모델·판정·기록)을 돌리지 않습니다. 사람이 확인하세요.")
+            return false
+        }
+        return true
     }
     // 스토리 기록은 저장소별(2026-10-28, 한 스토리가 여러 저장소에 걸침): stories.<키>.repos.<저장소> = {branch, base, head, merged, unmerged}
     func storyRepo(_ k: String, _ r: String) -> [String: Any] { apStoryRepos((br["stories"] as? [String: Any])?[k] as? [String: Any] ?? [:])[r] ?? [:] }
@@ -2334,13 +2352,16 @@ final class Engine {
             // 가지가 실행 중에 바뀌었으면 손대지 않는다(switchTo 가 까닭을 남긴다)
             let p = pin(r)
             guard gitDirOK(r), currentBranch(w, env: p) == on else { continue }
+            // 하위 모듈이 있으면 stash 가 그 저장소로 들어가므로 보관하지 않는다(⑦ 보안 검토 2). 뒤 단위는 unitGitOK 가 막는다
+            if let why = submoduleReason(r) { event("board", "단위 \(unit.map(String.init) ?? "?") 의 \(why) \(repoName(r)) \(on) 의 변경을 보관하지 않았습니다. 사람이 확인하세요."); continue }
             let dirty = porcelain(w, env: p), start = i["dirty_start"] as? [String] ?? []
             guard case .stash(let paths) = apLeftover(dirty: dirty, dirtyStart: start, onStoryBranch: true, madeByRun: true) else { continue }
             guard currentBranch(w, env: p) == on else { continue }   // 보관 바로 앞에서 가지를 한 번 더 본다
             let msg = apStashMessage(run: id, unit: unit, repo: repoName(r), branch: on)
             let before = gitOut(["rev-parse", "-q", "--verify", "refs/stash"], cwd: w, env: p)
-            // paths 가 있으면 그 경로만, 없으면 gitlink 를 뺀 전부(gitlink 의 filter 를 돌리지 않게, ⑦ 보안)
-            let spec = paths.map { ["--"] + $0.map { ":(literal)" + $0 } } ?? (gitlinkExcludes(w, p).isEmpty ? [] : ["--", ":(literal)."] + gitlinkExcludes(w, p))
+            // paths 가 있으면 그 경로만, 없으면 gitlink 를 뺀 전부(gitlink 의 filter 를 돌리지 않게, ⑦ 보안 — 위 submoduleReason 이 먼저 멈추므로 받침)
+            guard let excl = gitlinkExcludes(w, p) else { event("board", "단위 \(unit.map(String.init) ?? "?") 의 \(repoName(r)) 색인을 읽지 못해 변경을 보관하지 않았습니다."); continue }
+            let spec = paths.map { ["--"] + $0.map { ":(literal)" + $0 } } ?? (excl.isEmpty ? [] : ["--", ":(literal)."] + excl)
             let c = gitRun(["stash", "push", "--include-untracked", "-m", msg] + spec, cwd: w, commit: true, env: p)
             let after = gitOut(["rev-parse", "-q", "--verify", "refs/stash"], cwd: w, env: p)
             let k = dirty.filter { !start.contains($0) }.count
@@ -2367,6 +2388,8 @@ final class Engine {
         // 바꿔치기된 저장소가 있으면 뒤 단위는 모두 건너뛴다(전에는 가지를 바꾸는 단위에서만 봤다)
         guard gitDirOK(r) else { return "\(repoName(r)) 의 git 폴더가 바뀌어 \(want) 로 바꾸지 않았습니다" }
         let p = pin(r)
+        // 하위 모듈이 있으면 switch 가 그 저장소로 들어가므로 바꾸지 않는다(⑦ 보안 검토 2, switch 는 --ignore-submodules 플래그가 없다)
+        if let why = submoduleReason(r) { return "\(repoName(r)) 의 \(why) \(want) 로 바꾸지 않았습니다. 사람이 확인하세요" }
         let on = i["on"] as? String ?? "", cur = currentBranch(w, env: p) ?? ""
         if on == want, cur == want { return nil }
         if cur != on { return "\(repoName(r)) 의 가지가 실행 중에 바뀌어(지금 \(cur.isEmpty ? "가지 없음" : cur)) \(want) 로 바꾸지 않았습니다" }
@@ -2388,7 +2411,9 @@ final class Engine {
         case .refuse(.dirty):
             return "\(repoName(r)) 에 커밋하지 않은 변경 \(dirty.count)개가 있어 \(want) 로 바꾸지 않았습니다"
         case .commit:
-            let a = gitRun(["add", "-A", "--"] + ([":(literal)."] + gitlinkExcludes(w, p)), cwd: w, env: p)
+            // gitlink 는 add 에서 뺀다(⑦ 보안 — 위 submoduleReason 이 먼저 멈추므로 받침). 색인을 읽지 못하면 바꾸지 않는다(닫힌 쪽)
+            guard let excl = gitlinkExcludes(w, p) else { return "\(repoName(r)) 색인을 읽지 못해 \(want) 로 바꾸지 않았습니다" }
+            let a = gitRun(["add", "-A", "--"] + ([":(literal)."] + excl), cwd: w, env: p)
             let c = a.code == 0 ? gitRun(["commit", "-q", "--no-verify", "-m", "자율주행 \(id): \(on) 에 커밋하지 않고 남은 변경(다음 단위로 가지를 바꾸기 전에 엔진이 남김)"], cwd: w, commit: true, env: p) : a
             guard c.code == 0 else { return "\(repoName(r)) 에 남은 변경을 \(on) 에 커밋하지 못해 \(want) 로 바꾸지 않았습니다: \(firstLine(c.out))" }
             event("board", "앞 단위가 커밋하지 않고 남긴 변경 \(dirty.count)개를 그 가지(\(on))에 커밋해 두었습니다.")
@@ -2547,6 +2572,13 @@ final class Engine {
                 event("engine", "\(repoName(r)): \(i["restore_note"] as? String ?? "").")
                 continue
             }
+            // 하위 모듈이 있으면 끝 정리의 switch·status 가 그 저장소로 들어가므로 되돌리지 않는다(⑦ 보안 검토 2)
+            if let why = submoduleReason(r) {
+                i["restored"] = false; i["restore_note"] = "보안: \(why) git 을 돌리지 않아 출발 때 가지로 되돌리지 않았습니다(작업 트리는 \(on) 에 있습니다)"
+                setRepoInfo(r, i); changed = true
+                event("engine", "\(repoName(r)): \(i["restore_note"] as? String ?? "").")
+                continue
+            }
             let p = pin(r)
             let cur = currentBranch(r, env: p)
             if let o = original, cur == o { ok = true; note = "이미 출발 때 가지(\(o))에 있습니다" }
@@ -2662,7 +2694,8 @@ final class Engine {
                 u["git"] = ["note": "보안: git 폴더가 출발 때와 달라져 git status·diff 를 돌리지 않았습니다"]
             } else if let r = repoOf(cwd(n)) {
                 let p = pin(r)
-                u["git"] = ["status": safeGit(["status", "--porcelain"], cwd: cwd(n), env: p), "diff_stat": safeGit(["diff", "--stat"], cwd: cwd(n), env: p)]
+                // --ignore-submodules=all 플래그로 하위 모듈을 보지 않는다(⑦ 보안 검토 2, .gitmodules 가 설정을 이김). unitGitOK 가 먼저 막지만 받침
+                u["git"] = ["status": safeGit(["status", "--porcelain", "--ignore-submodules=all"], cwd: cwd(n), env: p), "diff_stat": safeGit(["diff", "--stat", "--ignore-submodules=all"], cwd: cwd(n), env: p)]
             } else {
                 u["git"] = ["note": "작업 폴더가 git 저장소가 아니라 git 기록이 없습니다"]
             }
@@ -3552,6 +3585,16 @@ func prepare(_ dir: String, dev: Bool) -> (problems: [String], frozen: [String: 
         }
         if !branchExists(r, base) { problems.append("\(r) 에 출발 가지 \(base) 가 없습니다") }
         if branchExists(r, work) { problems.append("\(r) 에 이미 \(work) 가지가 있습니다(같은 실행 id 를 다시 썼습니다)") }
+        // 출발 가지에 하위 모듈(색인 gitlink·.gitmodules)이 있으면 출발하지 않는다(⑦ 보안 검토 2, 설계 4장). 자율주행은 아직 하위 모듈을 다루지 않는다 —
+        // status·diff 는 플래그로 막아도 switch·claude 세션 열기 git status 가 그 저장소의 filter 를 돌린다
+        let ls = gitRun(["-c", "core.quotePath=false", "ls-files", "-s", "-z"], cwd: r)
+        if ls.code != 0 { problems.append("\(repoName(r)) 의 색인을 읽지 못했습니다(git ls-files 실패)") }
+        else {
+            let links = apGitlinkPaths(lsFilesZ: ls.out), gm = fm.fileExists(atPath: r + "/.gitmodules")
+            if apHasSubmodule(gitlinks: links, gitmodules: gm) {
+                problems.append("\(repoName(r)) 의 \(apSubmoduleReason(gitlinks: links, gitmodules: gm)) 출발하지 않습니다. 자율주행은 git 하위 모듈이 있는 저장소를 아직 다루지 않습니다")
+            }
+        }
     }
     // Jira 연결 프로젝트의 단위(story 칸): 스토리 가지·작업 가지 이름을 프로젝트 설정의 꼴로 정해 고정한다. 둘 다 이 실행이 새로 만들 가지여야 한다
     // (엔진이 스스로 움직이는 가지는 이 실행이 만든 것뿐 — 이미 있는 가지면 출발하지 않는다)
