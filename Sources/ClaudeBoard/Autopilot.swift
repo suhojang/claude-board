@@ -734,6 +734,33 @@ struct APPastUnit: Equatable, Identifiable {
     var tries = 0
     var result: APResult?
     var dependsOn: [String] = []   // 기대는 단위(작업 키, 없으면 "단위 n") — 실행 폴더의 queue.json 이 남아 있을 때만
+    var evidence: APEvidence?      // 마지막 판정의 증거(5단계 ⑪-1) — 실행 폴더의 units/<n>/engine.json 이 남아 있을 때만
+}
+
+// 판정 증거(5단계 ⑪-1 시험 실행기): 마지막 판정의 증거 폴더와 걸음(시나리오·판정 명령)마다 종료 코드·시간·남긴 파일
+struct APEvidence: Equatable {
+    struct Part: Equatable { var label = "", exit = 0, sec = 0.0, passed = false, files: [String] = [], shots: [String] = [], note = "" }
+    var dir = ""          // 실행 폴더 안의 증거 폴더(절대 경로)
+    var tryN = 0, exit = 0, sandbox = false
+    var parts: [Part] = []
+    // engine.json 의 checks 마지막 줄. 증거 폴더가 그 실행 폴더 안(링크 아님)일 때만
+    static func load(runDir: String, n: Int) -> APEvidence? {
+        guard !runDir.isEmpty, let e = apRead(runDir + "/units/\(n)/engine.json") as? [String: Any],
+              let c = (e["checks"] as? [[String: Any]])?.last, let rel = c["evidence"] as? String, !rel.contains("..") else { return nil }
+        let dir = runDir + "/units/\(n)/" + rel
+        let real = URL(fileURLWithPath: dir).resolvingSymlinksInPath().path, base = URL(fileURLWithPath: runDir).resolvingSymlinksInPath().path
+        guard real.hasPrefix(base + "/") else { return nil }
+        var ev = APEvidence(dir: dir, tryN: Int(apNum(c["try"]) ?? 0), exit: Int(apNum(c["exit"]) ?? 0), sandbox: c["sandbox"] as? Bool ?? false)
+        let parts = c["parts"] as? [[String: Any]] ?? []
+        if parts.isEmpty {
+            ev.parts = [Part(label: "판정 명령", exit: ev.exit, sec: apNum(c["sec"]) ?? 0, passed: ev.exit == 0, files: apStrings(c["files"]))]
+        } else {
+            ev.parts = parts.map { p in Part(label: p["label"] as? String ?? "", exit: Int(apNum(p["exit"]) ?? 0), sec: apNum(p["sec"]) ?? 0,
+                                             passed: p["passed"] as? Bool ?? false, files: apStrings(p["files"]), shots: apStrings(p["screenshots"]),
+                                             note: p["note"] as? String ?? "") }
+        }
+        return ev
+    }
 }
 
 struct APCarry: Equatable, Identifiable {
@@ -950,6 +977,7 @@ enum APRecords {
             let deps = apStrings(q[n - 1]["depends"]).compactMap { idToN[$0] }
             d.units[i].dependsOn = deps.map { k in d.units.first { $0.n == k }?.task ?? "단위 \(k)" }
         }
+        for i in d.units.indices { d.units[i].evidence = APEvidence.load(runDir: run.runDir, n: d.units[i].n) }
         for c in rows(db, "SELECT id, unit_n, kind, title, why FROM carry WHERE run_id = ? ORDER BY unit_n, id", [run.id], error: &err) {
             d.carry.append(APCarry(id: c[0] as? String ?? UUID().uuidString, unit: Int(c[1] as? Double ?? 0), kind: c[2] as? String ?? "",
                                    title: apPlain(c[3] as? String ?? ""), why: apPlain(c[4] as? String ?? "")))
@@ -2464,6 +2492,7 @@ struct APReport: View {
                 line("결과 기록이 없습니다")
             }
             if !unit.branch.isEmpty { Text("가지 \(unit.branch)").boardFont(10, design: .monospaced).foregroundStyle(.secondary) }
+            if let ev = unit.evidence { evidence(ev) }
         }
         .padding(8)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -2473,6 +2502,29 @@ struct APReport: View {
     }
     private func line(_ s: String) -> some View {
         Text(s).boardFont(10.5).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+    }
+    // 판정 증거(5단계 ⑪-1): 걸음마다 결과와 남긴 파일, 증거 폴더 열기(Finder 에서 그 폴더를 고른 채로)
+    @ViewBuilder private func evidence(_ ev: APEvidence) -> some View {
+        Divider().padding(.vertical, 2)
+        HStack(spacing: 6) {
+            Text("판정 증거 · \(ev.tryN == 0 ? "첫 판정" : "\(ev.tryN + 1)번째 판정") · \(ev.sandbox ? "샌드박스 안" : "샌드박스 밖")")
+                .boardFont(10.5, weight: .semibold)
+            Spacer(minLength: 4)
+            Button("증거 폴더 열기") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: ev.dir)]) }
+                .buttonStyle(.link).boardFont(10.5)
+                .accessibilityIdentifier("ap-evidence-open-\(unit.n)")
+                .help(ev.dir.replacingOccurrences(of: NSHomeDirectory(), with: "~"))
+        }
+        VStack(alignment: .leading, spacing: 2) { ForEach(Array(ev.parts.enumerated()), id: \.offset) { _, p in
+            let files = p.files.filter { $0 != "output.log" }
+            Text("\(p.passed ? "통과" : "실패") · \(p.label) · 종료 코드 \(p.exit) · \(p.sec < 1 ? "1초 미만" : apDur(p.sec))"
+                 + (p.shots.isEmpty ? "" : " · 스크린샷 \(p.shots.joined(separator: ", "))")
+                 + (files.isEmpty ? "" : " · 파일 \(files.prefix(4).joined(separator: ", "))\(files.count > 4 ? " 외 \(files.count - 4)" : "")")
+                 + (p.note.isEmpty ? "" : " · \(p.note)"))
+                .boardFont(10.5).foregroundStyle(p.passed ? Color.secondary : APColor.fail).fixedSize(horizontal: false, vertical: true)
+        } }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("ap-evidence-\(unit.n)")
     }
 }
 
@@ -2724,6 +2776,9 @@ extension APRecords {
     @Published private(set) var prerunPassed: Set<String> = []
     private var prerunIds: Set<String> = []          // 판정 미리 돌리기를 거친 단위(되살린 단위는 출발 확인으로 갈 때 마저 돌린다)
     @Published private(set) var prerunNote = ""
+    // 시험 실행기(5단계 ⑪-1): 이미 통과한 시나리오 카드(엔진 prerun.json 의 시나리오 카드 감), 실행 파일이 없는 수용 기준 카드(엔진 status --json 의 criteria_gaps)
+    @Published private(set) var scenarioCards: [APCard] = []
+    @Published private(set) var criterionCards: [APCard] = []
     @Published var cards: [APCard] = []
     @Published var answers: [String: String] = [:]
     @Published private(set) var policyLoaded: Set<String> = []
@@ -2934,7 +2989,7 @@ extension APRecords {
     private func reset() {
         step = 1; past = []; pastId = nil; root = ""; project = nil; jira = false; setText = nil; setAt = nil
         units = []; carryPark = []; carryNew = []; noDefs = nil; lines = []; preparing = false; prepared = false; rechecking = false
-        problems = []; mode = ""; modeReason = ""; repos = []; repoInfo = [:]; storyBranch = [:]; prerunPassed = []; prerunIds = []; prerunNote = ""
+        problems = []; mode = ""; modeReason = ""; repos = []; repoInfo = [:]; storyBranch = [:]; prerunPassed = []; prerunIds = []; prerunNote = ""; scenarioCards = []; criterionCards = []
         cards = []; answers = [:]; policyLoaded = []; bases = [:]; baseNote = ""; promotion = []; promotionSaved = false
         epic = ""; stories = []; estimates = [:]; starting = false; startError = nil; changedBy = nil; leftBranches = []
         epicInfo = nil; topicOtherDone = false; topicBundle = ""; linkURLs = [:]
@@ -2995,7 +3050,8 @@ extension APRecords {
         if q.isEmpty { noDefs = "지난 실행 폴더(\(run.runDir.replacingOccurrences(of: NSHomeDirectory(), with: "~")))의 queue.json 이 없어 남은 단위의 정의(프롬프트·판정)를 읽을 수 없습니다" }
         let open = ["pending", "running", "failed", "capped", "stopped", "skipped"]
         let defKeys = ["id", "title", "prompt", "check", "precheck", "action", "context", "cwd", "caps", "check_timeout_min", "action_timeout_min",
-                       "tickets", "review", "source_key", "kind", "est_min", "est_basis", "story", "depends", "prerun"]
+                       "tickets", "review", "source_key", "kind", "est_min", "est_basis", "story", "depends", "prerun",
+                       "scenarios", "criteria", "check_ports", "check_sandbox"]
         let defaultCap = APCaps.from(pr["caps"]).minutes
         for (i, d0) in q.enumerated() {
             let n = i + 1
@@ -3161,11 +3217,13 @@ extension APRecords {
                        note: setText.map { "지시 \($0.count)자를 불러왔습니다(\(apDay(setAt))). 출발 때 엔진이 고정해 자율주행 세션에만 얹습니다" }
                         ?? "이 프로젝트의 세트에 지시(autopilot.md)가 없어 공통 규칙만으로 돕니다"),
             APPrepLine(id: "check", title: "단위마다 기계 검사 · 엔진 출발 전 확인"),
+            APPrepLine(id: "env", title: "시험 실행기 환경 확인"),
             APPrepLine(id: "where", title: "따로 작업 트리 확인"),
             APPrepLine(id: "prerun", title: "판정 미리 돌리기"),
         ]
         if cand.isEmpty {
             setLine("check", "skip", note: "이어 갈 단위가 없습니다")
+            setLine("env", "skip", note: "")
             setLine("where", "skip", note: "")
             setLine("prerun", "skip", note: "")
             preparing = false; prepared = true
@@ -3318,6 +3376,8 @@ extension APRecords {
                     var sb: [String: String] = [:]
                     for u in j?["units"] as? [[String: Any]] ?? [] { if let i = u["id"] as? String, let b = u["story_branch"] as? String { sb[i] = b } }
                     self.storyBranch = sb
+                    self.setEnvLine(j?["env"] as? [[String: Any]] ?? [], units: j?["units"] as? [[String: Any]] ?? [])
+                    self.criterionCards = (j?["criteria_gaps"] as? [[String: Any]] ?? []).compactMap(APStart.criterionCard)
                     let n = ids.count
                     self.setLine("check", problems.isEmpty ? "done" : "fail",
                                  note: problems.isEmpty ? "단위 \(n)개 모두 통과(판정 명령·작업 폴더·상한·가지 꼴 · 다른 가지 지시 없음)" : "엔진이 고칠 것 \(problems.count)개를 찾았습니다",
@@ -3358,6 +3418,7 @@ extension APRecords {
                     } else if let pj {
                         let rows = pj["units"] as? [[String: Any]] ?? []
                         let passed = Set(rows.filter { $0["passed"] as? Bool == true }.compactMap { $0["id"] as? String })
+                        self.scenarioCards = (pj["cards"] as? [[String: Any]] ?? []).filter { $0["scenario"] != nil }.compactMap(APStart.scenarioCard)
                         let ran = rows.filter { $0["ran"] as? Bool == true }.count
                         let skipped = rows.filter { $0["skipped"] != nil }.count
                         self.prerunPassed = passed.union(self.prerunPassed.subtracting(ids))   // 이번에 돌리지 않은 단위의 앞 결과는 둔다
@@ -3365,13 +3426,65 @@ extension APRecords {
                         var note = "단위 \(rows.count)개 가운데 실패 \(ran - passed.count)(예상대로)"
                         if !passed.isEmpty { note += " · 일하기 전부터 통과 \(passed.count): " + passed.compactMap { byId[$0] }.joined(separator: ", ") + "(출발 카드로)" }
                         if skipped > 0 { note += " · 미리 돌리지 않음 \(skipped)" }
+                        // 시나리오(⑪-1): 이미 통과한 시나리오 수와 시나리오마다 결과·증거 자리, 판정 샌드박스 한 줄
+                        let already = rows.flatMap { $0["already"] as? [String] ?? [] }
+                        if !already.isEmpty { note += " · 이미 통과한 시나리오 \(already.count)(출발 카드로)" }
+                        var detail = rows.compactMap { r in (r["skipped"] as? String).map { "\(r["title"] ?? ""): \($0)" } }
+                        for r in rows {
+                            for sc in r["scenarios"] as? [[String: Any]] ?? [] {
+                                let ok = sc["passed"] as? Bool == true
+                                detail.append("\(r["title"] ?? "") · 시나리오 \(sc["file"] ?? "")\((sc["criterion"] as? String).map { "(수용 기준 \($0))" } ?? ""): "
+                                              + (ok ? "이미 통과" : "실패(종료 코드 \(sc["exit"] ?? "?"), 일하기 전이라 맞습니다)")
+                                              + ((sc["screenshots"] as? [String]).map { $0.isEmpty ? "" : " · 스크린샷 \($0.count)" } ?? "")
+                                              + " · 증거 prerun/\(r["n"] ?? "")/\(sc["evidence"] ?? "")")
+                            }
+                        }
+                        if let sb = rows.first(where: { $0["sandbox"] != nil })?["sandbox"] as? String { detail.append(sb) }
                         self.prerunNote = note
-                        self.setLine("prerun", "done", note: note, detail: rows.compactMap { r in (r["skipped"] as? String).map { "\(r["title"] ?? ""): \($0)" } })
+                        self.setLine("prerun", "done", note: note, detail: detail)
                     }
                     self.finishCheck()
                 }
             }
         }
+    }
+
+    // 시험 실행기 환경 확인 줄(⑪-1): 시나리오마다 필요한 도구가 있는지. 없으면 실패 줄과 까닭(엔진이 고칠 것에도 넣어 출발이 잠긴다)
+    private func setEnvLine(_ rows: [[String: Any]], units: [[String: Any]]) {
+        let n = units.reduce(0) { $0 + (($1["scenarios"] as? [Any])?.count ?? 0) }
+        guard !rows.isEmpty || n > 0 else {
+            setLine("env", "skip", note: "판정 시나리오가 없습니다(판정 명령만 돌립니다)"); return
+        }
+        let bad = rows.filter { $0["ok"] as? Bool != true }
+        let kinds = Dictionary(grouping: rows, by: { $0["kind"] as? String ?? "shell" }).map { k, v in "\(k == "browser" ? "브라우저" : "셸") \(v.count)" }.sorted()
+        let detail = rows.map { r -> String in
+            let tools = (r["tools"] as? [[String: Any]] ?? []).map { t in "\(t["need"] ?? "?") \(t["found"] is String ? "있음" : "없음")" }.joined(separator: " · ")
+            return "단위 \(r["unit"] ?? "") · \(r["file"] ?? ""): " + ((r["why"] as? String) ?? tools)
+        }
+        if bad.isEmpty {
+            setLine("env", "done", note: "시나리오 \(rows.count)개(\(kinds.joined(separator: " · "))) 모두 도구가 있습니다", detail: detail)
+        } else {
+            setLine("env", "fail", note: "시나리오 \(bad.count)개를 돌릴 도구가 없습니다. 보드는 도구를 깔지 않습니다", detail: detail)
+        }
+    }
+
+    nonisolated static func scenarios(_ u: APDraftUnit) -> [[String: Any]] {
+        ((try? JSONSerialization.jsonObject(with: u.def)) as? [String: Any])?["scenarios"] as? [[String: Any]] ?? []
+    }
+    nonisolated static func scenarioCard(_ c: [String: Any]) -> APCard? {
+        guard let id = c["id"] as? String, c["unit_id"] is String else { return nil }
+        return APCard(id: id, kind: "prerun", label: "판정 미리 돌리기 · 이미 통과한 시나리오", title: c["title"] as? String ?? "",
+                      why: c["why"] as? String ?? "",
+                      options: [APOption(key: "fix_check", label: "판정을 고치고 다음 출발로", note: "이 단위는 이번 실행에서 빼고 판정(시나리오)을 고칩니다"),
+                                APOption(key: "keep", label: "그대로 두기", note: "단위에 넣습니다. 그 기준은 일하지 않아도 통과로 남을 수 있습니다"),
+                                APOption(key: "drop", label: "이번 실행에서 빼기")],
+                      recommended: c["recommended"] as? String ?? "fix_check", unit: c["unit_id"] as? String)
+    }
+    nonisolated static func criterionCard(_ g: [String: Any]) -> APCard? {
+        guard let id = g["card"] as? String else { return nil }
+        let opts = (g["options"] as? [[String: Any]] ?? []).map { APOption(key: $0["key"] as? String ?? "", label: $0["label"] as? String ?? "", note: $0["note"] as? String ?? "") }
+        return APCard(id: id, kind: "criterion", label: "실행 파일이 없는 수용 기준", title: g["title"] as? String ?? "", why: g["why"] as? String ?? "",
+                      options: opts, recommended: g["recommended"] as? String ?? apCriterionDrop)
     }
 
     private func finishCheck() {
@@ -3393,6 +3506,11 @@ extension APRecords {
                                         APOption(key: "keep", label: "그대로 두기", note: "단위에 넣습니다. 일하지 않고 통과로 남을 수 있습니다")],
                               recommended: "drop", unit: u.id))
         }
+        // 시험 실행기(⑪-1): 이미 통과한 시나리오 카드(빼기·판정 고치기 답이면 그 단위를 뺀다)와 실행 파일이 없는 수용 기준 카드(단위는 남고 기준만)
+        for c in scenarioCards where units.contains(where: { $0.id == c.unit && $0.excluded == nil && $0.blocked == nil && !prerunPassed.contains($0.id) }) {
+            out.append(c)
+        }
+        out += criterionCards
         let outside = openParked.filter { includeParked.contains($0.id) }.map { APCarry(id: $0.id, unit: $0.unit, kind: $0.kind, title: $0.title, why: $0.why) }
         for c in carryPark + outside {
             out.append(APCard(id: c.id, kind: "next_start", label: carryPark.contains(c) ? "지난 실행에서 미룬 사람 몫" : "이어 간 줄 밖에서 미룬 사람 몫", title: c.title,
@@ -5147,8 +5265,22 @@ struct APConfirm: View {
                     if diff.count > 300 { apNote("… \(diff.count - 300)줄 더") }
                 }
             }
-            APFold(title: "판정 명령 \(s.chosen.count)", summary: "읽기 전용 · 출발 뒤에는 고정본으로 판정합니다", axid: "ap-fold-checks", open: bind("checks")) {
-                ForEach(s.chosen) { u in Text("\(u.n). " + u.check).boardFont(10.5, design: .monospaced).foregroundStyle(.secondary).lineLimit(2) }
+            let scen = s.chosen.reduce(0) { $0 + APStart.scenarios($1).count }
+            APFold(title: "판정 명령 \(s.chosen.count)" + (scen > 0 ? " · 시나리오 \(scen)" : ""),
+                   summary: "읽기 전용 · 출발 뒤에는 고정본으로 판정합니다 · 판정은 샌드박스 안에서", axid: "ap-fold-checks", open: bind("checks")) {
+                ForEach(s.chosen) { u in
+                    VStack(alignment: .leading, spacing: 1) {
+                        if !u.check.isEmpty || APStart.scenarios(u).isEmpty {
+                            Text("\(u.n). " + u.check).boardFont(10.5, design: .monospaced).foregroundStyle(.secondary).lineLimit(2)
+                        }
+                        // 시험 실행기(⑪-1): 시나리오 목록(작업 폴더 기준, 출발 때 고정본으로)과 짝지은 수용 기준
+                        ForEach(Array(APStart.scenarios(u).enumerated()), id: \.offset) { _, sc in
+                            Text("\(u.n). 시나리오 \(sc["file"] as? String ?? "")(\(sc["kind"] as? String == "browser" ? "브라우저" : "셸")\((sc["criterion"] as? String).map { " · 수용 기준 \($0)" } ?? ""))")
+                                .boardFont(10.5, design: .monospaced).foregroundStyle(.secondary).lineLimit(2)
+                        }
+                    }
+                }
+                apNote("판정은 샌드박스 안에서 돕니다. 쓰기는 작업 폴더·쓰기 범위·증거 폴더만, 네트워크는 실행의 localhost 설정과 단위 check_ports 만 엽니다.")
             }
             apNote("하네스 지문: 출발 때 엔진이 하네스 사본과 지문을 남기고, 끝나면 같은지 확인합니다. 저장소 하네스는 고치지 않습니다.")
             apNote("하네스 확인 지점 읽기와 지시 초안은 하네스 읽기(7단계)에서 엽니다.")
