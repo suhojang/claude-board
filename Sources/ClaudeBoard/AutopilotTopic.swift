@@ -7,9 +7,9 @@ import SwiftUI
 // MARK: - 자율주행 · 주제로 시작
 
 // 2단계 5-2b(2026-10-30): 출발 준비 1단계의 "주제로 시작" 입력 판(주제 글·자료 링크·작업 경로(기존 저장소·새 폴더)·기술 스택 세 칸)과
-// 그 준비(2단계 줄: 링크 읽기·버전 목록·스택 감지·새 폴더 만들기, 초안 세션은 5단계라 잠금), 그리고 5-2b 규칙(AutopilotRules)의 진짜 어댑터.
+// 그 준비(2단계 줄: 링크 읽기·버전 목록·스택 감지·새 폴더 만들기, 뼈대·초안 세션·시나리오 커밋은 5단계 ⑪-2 에서 Autopilot.swift 의 준비 줄로), 그리고 5-2b 규칙(AutopilotRules)의 진짜 어댑터.
 // 판정은 규칙이 하고 이 파일은 화면·파일·git·HTTP 만 한다(설계 2장 "주제로 시작"·"기술 스택", 와이어프레임 5판 출발 준비 ⑤~⑨·⑭).
-// 주제로 시작의 준비는 보드 메모리에만 있고(5-2a 와 같음) 세트(stack.json·spec.md)는 쓰지 않는다 — 출발은 초안 세션(5단계)이 단위를 쓴 뒤다
+// 주제로 시작의 준비는 보드 메모리와 준비 폴더(drafts/<실행 id>/)에만 있고, 세트(spec.md·stack.json·autopilot.md)는 출발할 때 쓴다(5단계 ⑪-2)
 
 // MARK: 진짜 어댑터
 
@@ -391,6 +391,37 @@ struct APMCPServerInfo: Equatable, Identifiable {
         return ["back", "front", "db"].map(one).filter { !$0.isEmpty }.joined(separator: " / ")
     }
 
+    // 고른 스택 → 세트 stack.json 의 꼴(규칙 APStackSet, 5단계 ⑪-2). 기존 저장소에서 감지해 잠갔으면 감지한 것 그대로
+    func stackSet() -> APStackSet {
+        if locked, let d = detected { return d }
+        func one(_ slot: String) -> APStackSlot? {
+            guard let p = slots[slot] else { return nil }
+            switch p.mode {
+            case "list":
+                let label = apSlotChoices[slot]?.first { $0.key == p.key }?.label ?? p.key
+                let v = { (k: String) in p.vers[k] ?? "" }
+                var s = APStackSlot(key: p.key, name: label, origin: p.origin == "topic" ? "topic" : "picked")
+                switch p.key {
+                case "spring-java": s.lang = "Java"; s.langVersion = v("java"); s.framework = "Spring Boot"; s.frameworkVersion = v("spring-boot"); s.build = v("build").isEmpty ? "Gradle Groovy" : v("build")
+                case "spring-kotlin": s.lang = "Kotlin"; s.langVersion = v("kotlin"); s.framework = "Spring Boot"; s.frameworkVersion = v("spring-boot"); s.build = v("build").isEmpty ? "Gradle Groovy" : v("build")
+                case "nest": s.lang = "Node.js"; s.langVersion = v("node"); s.framework = "NestJS"; s.frameworkVersion = v("nest"); s.build = "npm"
+                case "fastapi": s.lang = "Python"; s.langVersion = v("python"); s.framework = "FastAPI"; s.frameworkVersion = v("fastapi")
+                case "react": s.lang = "Node.js"; s.langVersion = v("node"); s.framework = "React"; s.frameworkVersion = v("react"); s.build = v("vite").isEmpty ? "Vite" : "Vite " + v("vite")
+                case "next": s.lang = "Node.js"; s.langVersion = v("node"); s.framework = "Next.js"; s.frameworkVersion = v("next"); s.build = "npm"
+                case "vue": s.lang = "Node.js"; s.langVersion = v("node"); s.framework = "Vue"; s.frameworkVersion = v("vue"); s.build = v("vite").isEmpty ? "Vite" : "Vite " + v("vite")
+                case "postgresql": s.framework = "PostgreSQL"; s.frameworkVersion = v("postgresql")
+                case "mysql": s.framework = "MySQL"; s.frameworkVersion = v("mysql")
+                default: break
+                }
+                return s
+            case "custom":
+                return p.name.isEmpty ? nil : APStackSlot(key: "", name: p.name, frameworkVersion: p.version, origin: "custom")
+            default: return nil
+            }
+        }
+        return APStackSet(front: one("front"), back: one("back"), db: one("db"))
+    }
+
     // MARK: 작업 경로
     private func modeChanged() {
         if pathMode == "new" { checkNew(); detected = nil; conflicts = []; touched = []; prefill(); loadCatalog() }
@@ -572,7 +603,7 @@ struct APTopicStep1: View {
                 .accessibilityElement(children: .combine)
                 .accessibilityIdentifier("ap-topic-hits")
             }
-            apNote("보드가 주제 글에서 기술 스택 이름과 버전 꼴을 낱말 대조로 찾습니다(모델을 부르지 않습니다). 명세·단위는 초안 세션(5단계)이 씁니다.")
+            apNote("보드가 주제 글에서 기술 스택 이름과 버전 꼴을 낱말 대조로 찾습니다(모델을 부르지 않습니다). 명세·단위는 다음 단계의 초안 세션이 씁니다.")
         }
     }
 
@@ -719,7 +750,7 @@ struct APTopicStep1: View {
                 headLine
                 ForEach(["front", "back", "db"], id: \.self) { slot in APSlotEditor(t: t, slot: slot) }
                 if !t.summary().isEmpty { apNote("고른 스택: " + t.summary()) }
-                apNote("고른 스택은 자율주행 세트의 stack 칸으로 초안 세션과 단위 세션에 넘깁니다(출발은 초안 세션 5단계 뒤). 목록에 있는 스택은 보드가 공식 생성기로 뼈대를 만들고(5단계), 직접 입력한 스택은 첫 단위 '프로젝트 구성'을 모델이 합니다.")
+                apNote("고른 스택은 초안 세션과 단위 세션에 넘기고 출발할 때 자율주행 세트 stack.json 에 남깁니다. 목록에 있는 스택은 보드가 공식 생성기로 뼈대를 만들고(바깥 레지스트리를 부르는 생성기도 있습니다), 직접 입력한 스택은 첫 단위 '프로젝트 구성'을 모델이 합니다.")
             }
         }
         .onAppear { if t.pathMode == "new" || (t.detected?.isEmpty ?? false) { t.loadCatalog() } }
@@ -822,7 +853,7 @@ struct APSlotEditor: View {
             }
         }
         if p.key.hasPrefix("spring"), let n = t.catalog?.catalog.notes["java"] { apNote(n) }
-        apNote("목록 출처 " + source(p.key) + (p.key == "fastapi" ? ". 공식 생성기가 없어 보드가 든 틀로 뼈대를 만듭니다(5단계)." : ""))
+        apNote("목록 출처 " + source(p.key) + (p.key == "fastapi" ? ". 공식 생성기가 없어 보드가 든 틀로 뼈대를 만듭니다(바깥 요청 없음)." : ""))
         if p.key == "postgresql" || p.key == "mysql" { apNote("시험은 뼈대의 docker compose 로 띄우는 로컬 DB 로 합니다. 운영 DB 연결과 배포는 범위 밖입니다.") }
     }
     private func source(_ key: String) -> String {
