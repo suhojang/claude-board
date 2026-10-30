@@ -173,7 +173,7 @@ public func apMissDigest(_ rows: [APMiss], maxRows: Int = apMissDigestRows, maxC
         for m in part {
             guard shown < maxRows else { break }
             let line = "- [\(apMissLabel(m.signal))\(m.state == "open" ? "" : " · \(m.state == "fixed" ? "고침" : "씀")")] \(m.title.isEmpty ? (m.unitId ?? "") : m.title)"
-                + (m.judge.map { " · 판정 " + clip($0, 120) } ?? "") + " · " + m.why
+                + (m.judge.map { " · " + clip($0, 120) } ?? "") + " · " + m.why
             guard chars + line.count + 1 <= maxChars else { break }
             out.append(line); chars += line.count + 1; shown += 1
         }
