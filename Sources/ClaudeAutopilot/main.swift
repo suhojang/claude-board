@@ -514,7 +514,7 @@ let fileWriteTools: Set<String> = ["Write", "Edit", "MultiEdit", "NotebookEdit"]
 let alwaysDenied = ["Edit(**/CLAUDE.md)", "Edit(~/.claude/CLAUDE.md)", "Edit(.claude/**)", "Edit(**/.claude/rules/**)",
                     "Edit(~/.claude/settings.json)", "Edit(~/.claude/settings.local.json)", "Edit(~/Library/LaunchAgents/**)",
                     "Bash(git push)", "Bash(git push *)", "Bash(git -C * push *)",
-                    // 키체인 읽기(연결 토큰·로그인 정보) — 받침일 뿐 샌드박스가 막는 것은 아니다(설계 4장 남는 한계, 4단계 ⑩-1)
+                    // 키체인 읽기(연결 토큰·로그인 정보) — 받침. 막는 것은 샌드박스의 ~/Library/Keychains 읽기 금지(modelReadDeny, 4단계 ⑩-1 보안 검토)
                     "Bash(security *)", "Bash(/usr/bin/security *)",
                     "mcp__atlassian", "mcp__plugin_atlassian_atlassian", "mcp__claude_ai_Atlassian"]
 // 네트워크 허용 목록 기본값(run.json network_allow 로 바꿈): Maven·Gradle 저장소와 localhost. git 원격 호스트는 넣지 않아 push 가 나갈 길이 없다
@@ -1697,6 +1697,11 @@ final class Engine {
         a.append(dir.hasPrefix(old + "/") ? old + "/runs/*/engine" : old)   // 옛 뿌리에서 도는 실행이면 자기 폴더는 읽어야 한다
         return a
     }
+    // 모델이 읽지 못하게 하는 그 밖의 자리(4단계 ⑩-1): 이 실행의 올릴 글, 사용자 키체인 파일.
+    // 키체인: /usr/bin/security 로 만든 항목(연결 토큰·Claude Code 로그인·저장 계정)은 security 를 믿는 앱으로 두어 아무 프로세스나 security 를 거쳐
+    // 창 없이 읽는다. Bash 의 security 거부(alwaysDenied)는 env·sh -c 로 비켜 가므로, 샌드박스가 키체인 파일 읽기를 막는다(sandbox-exec 로 잼:
+    // 막기 전에는 가짜 항목이 읽히고, 막은 뒤에는 SecKeychainSearchCopyNext 가 찾지 못함. 진짜 Claude Code 샌드박스에서 같은지는 사람 몫)
+    var modelReadDeny: [String] { [dir + "/outbox", home + "/Library/Keychains"] }
     // 엔진 전용 폴더: 실행 폴더 밖, 0700, 샌드박스·파일 도구 모두 읽기 금지. 복원 전 백업처럼 비밀이 든 것을 둔다
     var enginePrivate: String { privateRoot(dev: isDev) + "/" + id }
     var envPass: [String] { cfg["env_pass"] as? [String] ?? [] }
@@ -2961,7 +2966,7 @@ final class Engine {
         denied += ["engine.json", "stream.jsonl", "stderr.log", "evidence/**", "context/**", "report.html"].map { "Edit(/\(unitDir(n))/\($0))" }
         denied += (1...total).filter { $0 != n }.map { "Edit(/\(unitDir($0))/**)" }
         // 엔진 전용 폴더(복원 전 백업 등)와 read_deny 는 파일 도구로도 읽지 못하게(샌드박스 denyRead 는 Read 도구를 막지 않는다)
-        for p in engineDeny + readDenyPaths + [dir + "/outbox"] { denied += ["Read(/\(p)/**)", "Read(/\(p))", "Edit(/\(p)/**)"] }
+        for p in engineDeny + readDenyPaths + modelReadDeny { denied += ["Read(/\(p)/**)", "Read(/\(p))", "Edit(/\(p)/**)"] }
         // 가지 보호는 파일 도구에도(Write 로 ref 파일을 고쳐 쓰는 길). 폴더 자리(스토리 가지 꼴)는 안까지
         for p in protectDeny() { denied += ["Edit(/\(p))"] + (isDir(p) && !isLink(p) ? ["Edit(/\(p)/**)"] : []) }
         // 사용자 settings 는 읽지 않는다(--setting-sources project,local): 사용자 hook(알림 패널)·플러그인 hook 은 샌드박스 밖에서 돌고,
@@ -2985,7 +2990,7 @@ final class Engine {
         deny += ["engine.json", "stream.jsonl", "stderr.log", "evidence", "context", "report.html"].map { unitDir(n) + "/" + $0 }   // report.html: 단위 보고서(엔진이 그림, 3단계)
         deny += protectDeny()   // 지금 작업 가지 밖의 가지·HEAD·packed-refs(단위마다, 엔진이 가지를 바꾼 뒤 다시 계산)
         deny.append(dir + "/outbox")   // 올릴 글(4단계): 모델 쓰기·읽기 범위 밖(엔진·보드만)
-        let readDeny = engineDeny + readDenyPaths + [dir + "/outbox"]
+        let readDeny = engineDeny + readDenyPaths + modelReadDeny
         let s: [String: Any] = ["sandbox": [
             "enabled": true, "failIfUnavailable": true, "allowUnsandboxedCommands": false, "autoAllowBashIfSandboxed": true,
             "excludedCommands": cfg["sandbox_exclude"] as? [String] ?? [],
