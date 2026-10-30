@@ -105,10 +105,14 @@ private func failedBaseline(_ steps: [APJudgeStep], passing: Set<String> = []) -
         (".git/config", true), ("sub/.git/HEAD", true), (".autopilot/scenarios/u1/list.sh", true), ("CLAUDE.md", true), ("docs/CLAUDE.md", true),
         (".claude/settings.json", true), (".mcp.json", true), ("AGENTS.md", true), ("tests/test_app.py", true), ("app/todos.test.ts", true),
         ("app/todos.py", false), ("NOTES.md", false), ("check.sh", true), ("README.md", false),
+        // 대소문자·유니코드 정규화(⑪-3 자동 보안 검토 MEDIUM): APFS 는 가리지 않으므로 접어서 견준다
+        (".GIT/config", true), (".Git", true), ("sub/.Git/HEAD", true), (".CLAUDE/settings.json", true), (".Claude/settings.json", true), ("Claude.md", true),
+        ("claude.md", true), ("docs/Claude.Local.md", true), ("Agents.md", true), (".MCP.json", true), (".Autopilot/scenarios/u1/list.sh", true), ("Check.sh", true),
+        ("TESTS/x.py", true), ("App/\u{D310}\u{C815}.sh", true), ("app/\u{1111}\u{1161}\u{11AB}\u{110C}\u{1165}\u{11BC}.sh", true),
     ])
     func 보호(_ p: String, _ protected: Bool) {
-        #expect(apProtectedJudgePath(p, judgeFiles: ["check.sh"]) == protected)
-        #expect(apCasePathOK(p, judgeFiles: ["check.sh"]) == !protected)
+        #expect(apProtectedJudgePath(p, judgeFiles: ["check.sh", "app/\u{D310}\u{C815}.sh"]) == protected)
+        #expect(apCasePathOK(p, judgeFiles: ["check.sh", "app/\u{D310}\u{C815}.sh"]) == !protected)
     }
 
     @Test("탐침 대상은 판정 자체·보호 자리를 뺀다")
@@ -206,6 +210,7 @@ private let criticUnits = [
                                          APCriticScenario(file: ".autopilot/scenarios/u1/list.sh", kind: .shell, criterion: "AC-2", copy: "/J/u1/2-list.sh")]),
     APCriticUnit(id: "u2", title: "README 안내", prompt: "안내를 쓴다", criteria: [APCriterion(id: "AC-3", text: "읽힌다")], check: "grep -q '할 일' NOTES.md", scenarios: []),
 ]
+private let criticTargets = ["u1": ["app/todos.py"], "u2": ["NOTES.md"]]
 private let findingsJSON = """
 [{"id":"f1","unit":"u1","criterion":"AC-2","judge":".autopilot/scenarios/u1/list.sh","kind":"counterexample","why":"GET 글자만 있고 경로가 없는 파일도 통과합니다","files":["app/todos.py"]},
  {"id":"f2","unit":"u2","criterion":"AC-3","kind":"unverifiable","why":"읽기 쉬운지는 반례 파일로 가리지 못합니다"},
@@ -249,19 +254,19 @@ private let caseFiles: [String: String] = ["findings.json": findingsJSON, "cases
 
     @Test("결과 읽기: 틀린 줄은 빼고, 판정 자체를 바꾸는 반례·없는 반례 파일은 확인 안 됨으로")
     func 읽기() {
-        let (fs, problems) = apCriticParse(FakeOut(files: caseFiles), units: criticUnits)
+        let (fs, problems) = apCriticParse(FakeOut(files: caseFiles), units: criticUnits, targets: criticTargets)
         #expect(fs.map(\.id) == ["f1", "f2", "f3", "f4", "f5"])
         #expect(fs.map(\.kind) == [.counterexample, .unverifiable, .interpretation, .unverifiable, .unverifiable])
         #expect(fs[3].why.contains("판정·하네스 자리라"))
-        #expect(fs[4].why.contains("없거나 64 KB"))
+        #expect(fs[4].why.contains("판정이 보는 자리(app/todos.py)가 아닌 파일"))
         #expect(fs[2].recommended == "works")
         #expect(problems.count == 4)
-        #expect(apCriticParse(FakeOut(files: [:]), units: criticUnits).problems == ["결과 파일 findings.json 이 없습니다"])
+        #expect(apCriticParse(FakeOut(files: [:]), units: criticUnits, targets: criticTargets).problems == ["결과 파일 findings.json 이 없습니다"])
     }
 
     @Test("반례 확인: 형식만 보는 판정은 통과(확인된 지적), 뜻을 보는 판정은 막음, 이미 통과는 확인 안 됨")
     func 확인() {
-        let (fs, _) = apCriticParse(FakeOut(files: caseFiles), units: criticUnits)
+        let (fs, _) = apCriticParse(FakeOut(files: caseFiles), units: criticUnits, targets: criticTargets)
         let read = { (p: String) in caseFiles[p].map { Data($0.utf8) } }
         let views = ["u1": toyView]
         let weak = FakeTree(steps: toySteps, verdict: weakVerdict)
@@ -474,5 +479,33 @@ private let caseFiles: [String: String] = ["findings.json": findingsJSON, "cases
         let p = apDraftPrompt(x)
         #expect(p.contains("이 프로젝트의 지난 판정 놓침") && p.contains("- [통과했지만 버림] 안내 글"))
         #expect(p.replacingOccurrences(of: "\n- 이 프로젝트의 지난 판정 놓침(엔진 기록 요약, 지난 판정이 통과시켰지만 틀렸던 것과 지시가 멈추게 한 자리. 판정·지시를 쓸 때 같은 빈틈을 남기지 않습니다):\n" + x.misses!, with: "") == plain)
+    }
+}
+
+@Suite("자율주행 판정 비판: 반례 허용 목록") struct CaseAllowTests {
+    @Test("반례는 판정이 보는 자리만, 설정 파일 꼴·보호 자리는 받지 않는다(대소문자·정규화를 접어 견줌)", arguments: [
+        ("app/todos.py", nil as String?), ("App/Todos.PY", nil), ("NOTES.md", "보는 자리"), ("conftest.py", "설정 파일"), ("package.json", "설정 파일"),
+        ("Makefile", "설정 파일"), ("pytest.ini", "설정 파일"), ("pyproject.toml", "설정 파일"), ("setup.cfg", "설정 파일"), ("tox.ini", "설정 파일"),
+        ("lib/sitecustomize.py", "설정 파일"), (".npmrc", "설정 파일"), ("x.pth", "설정 파일"), ("jest.config.js", "설정 파일"), (".GIT/config", "판정·하네스"),
+        ("../x.py", "상대 경로"),
+    ])
+    func 허용(_ p: String, _ want: String?) {
+        let why = apCasePathProblem(p, judgeFiles: [".autopilot/scenarios/u1/list.sh"], targets: ["app/todos.py", "package.json"])
+        if let w = want { #expect(why?.contains(w) == true) } else { #expect(why == nil) }
+    }
+
+    @Test("시험 설정을 바꿔 통과시키는 반례는 확인된 지적이 되지 않는다")
+    func 설정반례() {
+        let u = [APCriticUnit(id: "u1", title: "t", prompt: "p", criteria: [], check: "python3 -m pytest -q", scenarios: [])]
+        let files = FakeOut(files: ["findings.json": "[{\"id\":\"f1\",\"unit\":\"u1\",\"judge\":\"check\",\"kind\":\"counterexample\",\"why\":\"시험을 건너뜀\",\"files\":[\"conftest.py\"]}]",
+                                    "cases/f1/conftest.py": "collect_ignore_glob = ['*']\n"])
+        let (fs, _) = apCriticParse(files, units: u, targets: ["u1": []])
+        #expect(fs.map(\.kind) == [.unverifiable] && fs[0].why.contains("conftest.py"))
+    }
+
+    @Test("탐침 대상도 접은 꼴로 겹침을 뺀다")
+    func 겹침() {
+        let v = APJudgeView(unit: 1, unitId: "u1", title: "t", check: "test -f out.json && test -f OUT.json && test -f .Git", scenarios: [])
+        #expect(apProbeTargets(v) == ["out.json"])
     }
 }

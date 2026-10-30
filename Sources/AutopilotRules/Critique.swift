@@ -66,18 +66,40 @@ public func apJudgeRunScripts(_ check: String) -> [String] {
 
 // 시험 파일 꼴(판정을 돕는 파일): tests/·test/·spec/·__tests__/ 아래, test_*.·*_test.·*.test.·*.spec.
 public func apTestHelperPath(_ p: String) -> Bool {
-    let parts = p.split(separator: "/").map(String.init)
-    if parts.dropLast().contains(where: { ["test", "tests", "spec", "specs", "__tests__"].contains($0.lowercased()) }) { return true }
-    let name = (parts.last ?? "").lowercased()
+    let parts = apPathKey(p).split(separator: "/").map(String.init)
+    if parts.dropLast().contains(where: { ["test", "tests", "spec", "specs", "__tests__"].contains($0) }) { return true }
+    let name = parts.last ?? ""
     return name.hasPrefix("test_") || name.contains("_test.") || name.contains(".test.") || name.contains(".spec.")
 }
 
-// 탐침·반례가 쓰면 안 되는 자리: 판정 자체(시나리오·판정 스크립트·시험 파일), 하네스(CLAUDE.md·.claude/·.mcp.json·AGENTS.md), .git, .autopilot(판정 시나리오 자리)
+// 경로를 견줄 꼴(5단계 ⑪-3 자동 보안 검토 MEDIUM: macOS 기본 APFS 는 대소문자와 유니코드 정규화를 가리지 않아 .GIT·Claude.md·.Autopilot 이 보호 자리에 닿았다).
+// 조각마다 유니코드 정규화(NFC)를 한 뒤 소문자로 접는다. 보호 자리·판정 파일·허용 목록을 모두 이 꼴로 견준다
+public func apPathKey(_ p: String) -> String {
+    p.split(separator: "/", omittingEmptySubsequences: false).map { String($0).precomposedStringWithCanonicalMapping.lowercased() }.joined(separator: "/")
+}
+
+// 판정에 영향을 주는 설정 파일 꼴(⑪-3 자동 보안 검토 MEDIUM 둘째): 반례가 이것을 바꾸면 결과물이 틀려도 판정이 통과하는 가짜 확인이 된다.
+// 반례는 허용 목록(그 단위 판정이 보는 자리)으로만 받고, 허용 목록에 들었어도 이 꼴은 받지 않는다(덧막기)
+public let apJudgeConfigNames: Set<String> = ["makefile", "gnumakefile", "package.json", "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml",
+    "conftest.py", "pytest.ini", "pyproject.toml", "setup.cfg", "setup.py", "tox.ini", "noxfile.py", "sitecustomize.py", "usercustomize.py",
+    ".npmrc", ".yarnrc", ".yarnrc.yml", ".pnpmfile.cjs", ".env", ".envrc", "deno.json", "deno.jsonc", "bunfig.toml", "tsconfig.json",
+    "go.mod", "cargo.toml", "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts", "pom.xml", "gradle.properties", "justfile", "rakefile", "gemfile"]
+public func apJudgeConfigPath(_ p: String) -> Bool {
+    let parts = apPathKey(p).split(separator: "/").map(String.init)
+    guard let name = parts.last else { return false }
+    if apJudgeConfigNames.contains(name) || name.hasSuffix(".pth") { return true }
+    for stem in ["jest.config.", "vitest.config.", "babel.config.", "karma.conf.", "playwright.config.", "vite.config.", ".babelrc", ".mocharc"] where name.hasPrefix(stem) { return true }
+    return parts.dropLast().contains { [".github", ".husky", "node_modules", ".venv", "venv"].contains($0) }
+}
+
+// 탐침·반례가 쓰면 안 되는 자리: 판정 자체(시나리오·판정 스크립트·시험 파일), 하네스(CLAUDE.md·.claude/·.mcp.json·AGENTS.md), .git, .autopilot(판정 시나리오 자리).
+// 대소문자·유니코드 정규화를 접어 견준다(apPathKey)
 public func apProtectedJudgePath(_ p: String, judgeFiles: [String]) -> Bool {
-    let parts = p.split(separator: "/").map(String.init)
+    let k = apPathKey(p)
+    let parts = k.split(separator: "/").map(String.init)
     if parts.contains(".git") || parts.contains(".claude") || parts.first == ".autopilot" { return true }
-    if let last = parts.last, ["CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", ".mcp.json"].contains(last) { return true }
-    if judgeFiles.contains(p) || apTestHelperPath(p) { return true }
+    if let last = parts.last, ["claude.md", "claude.local.md", "agents.md", ".mcp.json"].contains(last) { return true }
+    if judgeFiles.contains(where: { apPathKey($0) == k }) || apTestHelperPath(p) { return true }
     return false
 }
 
@@ -89,13 +111,26 @@ public func apCasePathOK(_ p: String, judgeFiles: [String]) -> Bool {
     apScenarioPathOK(p) && !apProtectedJudgePath(p, judgeFiles: judgeFiles)
 }
 
+// 반례가 그 파일을 바꿔도 되나(⑪-3 자동 보안 검토 MEDIUM 둘째): 그 단위 판정이 보는 자리(apProbeTargets)에 들고(대소문자·정규화를 접어 견줌),
+// 판정 자체·하네스·.git 자리도, 판정에 영향을 주는 설정 파일 꼴도 아님. 아니면 까닭
+public func apCasePathProblem(_ p: String, judgeFiles: [String], targets: [String]) -> String? {
+    guard apScenarioPathOK(p) else { return "작업 폴더 기준 상대 경로가 아닙니다" }
+    if apProtectedJudgePath(p, judgeFiles: judgeFiles) { return "판정·하네스 자리라 보드가 받지 않았습니다" }
+    if apJudgeConfigPath(p) { return "판정에 영향을 주는 설정 파일이라 보드가 받지 않았습니다" }
+    let k = apPathKey(p)
+    if !targets.contains(where: { apPathKey($0) == k }) {
+        return "판정이 보는 자리(" + (targets.isEmpty ? "찾지 못함" : targets.prefix(6).joined(separator: ", ")) + ")가 아닌 파일이라 보드가 받지 않았습니다"
+    }
+    return nil
+}
+
 // 탐침 대상: 시나리오 글과 판정 명령 글이 가리키는 파일 가운데 판정 자체·보호 자리가 아닌 것(차례대로, 12개까지)
 public let apProbeTargetMax = 12
 public func apProbeTargets(_ v: APJudgeView) -> [String] {
     let judge = apJudgeFiles(v)
     var out: [String] = []
     for t in v.scenarios.map(\.text) + [v.check] {
-        for p in apJudgePaths(t) where !out.contains(p) && !apProtectedJudgePath(p, judgeFiles: judge) { out.append(p) }
+        for p in apJudgePaths(t) where !out.contains(where: { apPathKey($0) == apPathKey(p) }) && !apProtectedJudgePath(p, judgeFiles: judge) { out.append(p) }
     }
     return Array(out.prefix(apProbeTargetMax))
 }
@@ -494,7 +529,8 @@ public struct APCriticFinding: Equatable, Sendable {
 }
 
 // 결과 폴더의 findings.json 을 읽는다. 틀린 줄은 그 줄만 빼고 problems 에 남긴다(다른 지적은 그대로 확인한다)
-public func apCriticParse(_ files: APDraftFiles, units: [APCriticUnit]) -> (findings: [APCriticFinding], problems: [String]) {
+// targets: 단위 id → 그 판정이 보는 자리(apProbeTargets). 반례는 그 자리만 바꿀 수 있다(허용 목록, 밖이면 확인 안 됨과 까닭)
+public func apCriticParse(_ files: APDraftFiles, units: [APCriticUnit], targets: [String: [String]]) -> (findings: [APCriticFinding], problems: [String]) {
     guard let d = files.read("findings.json") else { return ([], ["결과 파일 findings.json 이 없습니다"]) }
     guard let arr = (try? JSONSerialization.jsonObject(with: d)) as? [Any] else { return ([], ["findings.json 이 JSON 배열이 아닙니다"]) }
     var out: [APCriticFinding] = [], problems: [String] = []
@@ -525,10 +561,10 @@ public func apCriticParse(_ files: APDraftFiles, units: [APCriticUnit]) -> (find
         case .counterexample:
             let fl = o["files"] as? [String] ?? []
             guard (1...apCaseFileMax).contains(fl.count), Set(fl).count == fl.count else { problems.append("지적 \(id) 의 반례 파일은 1~\(apCaseFileMax)개입니다"); continue }
-            if let bad = fl.first(where: { !apCasePathOK($0, judgeFiles: judgeFiles) }) {
-                // 판정 자체·하네스·.git 자리를 바꾸는 반례는 받지 않는다(반례가 판정을 바꿔 통과하는 가짜 확인이 되므로) — 확인 안 됨으로 남긴다
+            if let bad = fl.lazy.compactMap({ p in apCasePathProblem(p, judgeFiles: judgeFiles, targets: targets[uid] ?? []).map { (p, $0) } }).first {
+                // 판정 자체·하네스·.git·설정 파일, 또는 판정이 보는 자리 밖을 바꾸는 반례는 받지 않는다(반례가 판정을 바꿔 통과하는 가짜 확인이 되므로) — 확인 안 됨으로 남긴다
                 f.kind = .unverifiable
-                f.why = why + " (반례 파일 \(String(bad.prefix(80))) 이 판정·하네스 자리라 보드가 받지 않았습니다)"
+                f.why = why + " (반례 파일 \(String(bad.0.prefix(80))) 은 \(bad.1))"
                 out.append(f); continue
             }
             if let miss = fl.first(where: { files.read("cases/\(id)/\($0)").map { $0.count > apCaseFileBytes } ?? true }) {
