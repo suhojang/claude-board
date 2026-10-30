@@ -2135,13 +2135,22 @@ final class Engine {
         let r = gitRun(["-c", "core.quotePath=false", "ls-files", "-s", "-z"], cwd: w, env: env)
         return r.code == 0 ? apGitlinkExcludes(lsFilesZ: r.out) : nil
     }
-    // 하위 모듈 막기(⑦ 보안 검토 2): 작업 트리에 중첩 git(색인 gitlink)이나 .gitmodules 가 있으면 그 자리에서 git 을 돌리지 않는 까닭(없으면 nil).
-    // status·diff 는 플래그로 막지만 switch·claude 세션 열기는 설정으로 못 막고, .gitmodules 의 ignore=none 이 diff.ignoreSubmodules 를 이겨서(실측)
+    // git 은 .gitmodules 를 작업 트리 파일 → 색인 → HEAD 차례로 찾는다(config_from_gitmodules, 보안 검토 3) — 모델이 작업 트리 파일만 지워도
+    // 색인·HEAD 에 남으면 ignore 설정이 돈다. 셋 다 본다
+    func hasGitmodules(_ w: String, _ env: [String]) -> Bool {
+        if fm.fileExists(atPath: w + "/.gitmodules") { return true }
+        let idx = gitRun(["ls-files", "-s", "-z", "--", ".gitmodules"], cwd: w, env: env)
+        if idx.code == 0, !idx.out.isEmpty { return true }
+        return gitRun(["cat-file", "-e", "HEAD:.gitmodules"], cwd: w, env: env).code == 0
+    }
+    // 하위 모듈 막기(⑦ 보안 검토 2·3): 작업 트리에 중첩 git(색인 gitlink)이나 .gitmodules(작업 트리·색인·HEAD 중 하나)가 있으면 그 자리에서 git 을
+    // 돌리지 않는 까닭(없으면 nil). status·diff 는 플래그로 막지만 switch·claude 세션 열기는 설정으로 못 막고, .gitmodules 의 ignore=none 이
+    // diff.ignoreSubmodules 를 이겨서(실측). ls-files 를 읽지 못하면 닫힌 쪽
     func submoduleReason(_ r: String) -> String? {
         let w = wt(r), p = pin(r)
         let ls = gitRun(["-c", "core.quotePath=false", "ls-files", "-s", "-z"], cwd: w, env: p)
         guard ls.code == 0 else { return "색인을 읽지 못해(git ls-files 실패)" }   // 닫힌 쪽
-        let links = apGitlinkPaths(lsFilesZ: ls.out), gm = fm.fileExists(atPath: w + "/.gitmodules")
+        let links = apGitlinkPaths(lsFilesZ: ls.out), gm = hasGitmodules(w, p)
         return apHasSubmodule(gitlinks: links, gitmodules: gm) ? apSubmoduleReason(gitlinks: links, gitmodules: gm) : nil
     }
     func repoOf(_ path: String) -> String? {
@@ -2414,6 +2423,15 @@ final class Engine {
             // gitlink 는 add 에서 뺀다(⑦ 보안 — 위 submoduleReason 이 먼저 멈추므로 받침). 색인을 읽지 못하면 바꾸지 않는다(닫힌 쪽)
             guard let excl = gitlinkExcludes(w, p) else { return "\(repoName(r)) 색인을 읽지 못해 \(want) 로 바꾸지 않았습니다" }
             let a = gitRun(["add", "-A", "--"] + ([":(literal)."] + excl), cwd: w, env: p)
+            // add -A 는 추적하지 않던 중첩 저장소를 gitlink 로 새로 넣는다(보안 검토 1, "adding embedded git repository"). 커밋·switch 전에 색인을 다시 읽어
+            // 새 gitlink 가 있으면 색인에서 빼고(rm --cached) 바꾸지 않는다 — 확인(submoduleReason)과 쓰기를 같은 색인 상태로 맞춘다(닫힌 쪽)
+            let reread = gitRun(["-c", "core.quotePath=false", "ls-files", "-s", "-z"], cwd: w, env: p)
+            guard reread.code == 0 else { return "\(repoName(r)) 색인을 다시 읽지 못해 \(want) 로 바꾸지 않았습니다" }
+            let added = apGitlinkPaths(lsFilesZ: reread.out)
+            if !added.isEmpty {
+                _ = gitRun(["rm", "--cached", "-q", "-f", "--"] + added, cwd: w, env: p)   // -f: gitlink 은 색인 내용이 HEAD·작업 트리와 달라 -f 라야 색인에서 빠진다(작업 트리는 둔다)
+                return "\(repoName(r)) 에서 add -A 가 추적하지 않던 중첩 git 저장소(\(added.prefix(3).joined(separator: ", ")))를 gitlink 로 넣어, 색인에서 빼고 \(want) 로 바꾸지 않았습니다. 사람이 확인하세요"
+            }
             let c = a.code == 0 ? gitRun(["commit", "-q", "--no-verify", "-m", "자율주행 \(id): \(on) 에 커밋하지 않고 남은 변경(다음 단위로 가지를 바꾸기 전에 엔진이 남김)"], cwd: w, commit: true, env: p) : a
             guard c.code == 0 else { return "\(repoName(r)) 에 남은 변경을 \(on) 에 커밋하지 못해 \(want) 로 바꾸지 않았습니다: \(firstLine(c.out))" }
             event("board", "앞 단위가 커밋하지 않고 남긴 변경 \(dirty.count)개를 그 가지(\(on))에 커밋해 두었습니다.")
@@ -3585,12 +3603,18 @@ func prepare(_ dir: String, dev: Bool) -> (problems: [String], frozen: [String: 
         }
         if !branchExists(r, base) { problems.append("\(r) 에 출발 가지 \(base) 가 없습니다") }
         if branchExists(r, work) { problems.append("\(r) 에 이미 \(work) 가지가 있습니다(같은 실행 id 를 다시 썼습니다)") }
-        // 출발 가지에 하위 모듈(색인 gitlink·.gitmodules)이 있으면 출발하지 않는다(⑦ 보안 검토 2, 설계 4장). 자율주행은 아직 하위 모듈을 다루지 않는다 —
-        // status·diff 는 플래그로 막아도 switch·claude 세션 열기 git status 가 그 저장소의 filter 를 돌린다
+        // 하위 모듈(색인 gitlink·.gitmodules)이 있으면 출발하지 않는다(⑦ 보안 검토 2·3, 설계 4장). 자율주행은 아직 하위 모듈을 다루지 않는다 —
+        // status·diff 는 플래그로 막아도 switch·claude 세션 열기 git status 가 그 저장소의 filter 를 돌린다. 지금 색인·작업 트리뿐 아니라 출발 가지도 본다
+        // (보안 검토 2: 엔진이 출발 가지로 바꿔 돌므로, 지금 깨끗한 가지에 걸려 있어도 출발 가지에 하위 모듈이 있으면 들어온다)
         let ls = gitRun(["-c", "core.quotePath=false", "ls-files", "-s", "-z"], cwd: r)
         if ls.code != 0 { problems.append("\(repoName(r)) 의 색인을 읽지 못했습니다(git ls-files 실패)") }
         else {
-            let links = apGitlinkPaths(lsFilesZ: ls.out), gm = fm.fileExists(atPath: r + "/.gitmodules")
+            var links = apGitlinkPaths(lsFilesZ: ls.out)
+            var gm = fm.fileExists(atPath: r + "/.gitmodules") || (gitRun(["ls-files", "-s", "-z", "--", ".gitmodules"], cwd: r).out.isEmpty == false)
+            // 출발 가지 트리: ls-tree 는 filter 를 돌리지 않는다. gitlink 는 mode 160000(apGitlinkPaths 가 ls-tree -z 꼴도 읽는다), .gitmodules 는 cat-file -e
+            let tree = gitRun(["-c", "core.quotePath=false", "ls-tree", "-r", "-z", base], cwd: r)
+            if tree.code == 0 { for l in apGitlinkPaths(lsFilesZ: tree.out) where !links.contains(l) { links.append(l) } }
+            if gitRun(["cat-file", "-e", "\(base):.gitmodules"], cwd: r).code == 0 { gm = true }
             if apHasSubmodule(gitlinks: links, gitmodules: gm) {
                 problems.append("\(repoName(r)) 의 \(apSubmoduleReason(gitlinks: links, gitmodules: gm)) 출발하지 않습니다. 자율주행은 git 하위 모듈이 있는 저장소를 아직 다루지 않습니다")
             }
