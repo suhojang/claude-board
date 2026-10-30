@@ -95,11 +95,12 @@ pub fn short_id() -> String {
 
 /// HTTP GET — (상태 코드, 본문). OS 의 TLS(native-tls)를 쓴다. 실패하면 Err.
 pub fn http_get(url: &str, headers: &[(&str, &str)], timeout: Duration) -> Result<(u16, Vec<u8>), String> {
-    use ureq::tls::{TlsConfig, TlsProvider};
+    use ureq::tls::{RootCerts, TlsConfig, TlsProvider};
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(timeout))
         .http_status_as_error(false)
-        .tls_config(TlsConfig::builder().provider(TlsProvider::NativeTls).build())
+        // 기본값(RootCerts::WebPki)은 OS 저장소를 끄고 ureq 에 든 Mozilla 목록만 믿어, 사슬이 그 목록으로 끝나지 않는 서버(api.anthropic.com)에서 실패한다(native-tls: unable to find any user-specified roots in the final cert chain). OS 저장소를 쓴다
+        .tls_config(TlsConfig::builder().provider(TlsProvider::NativeTls).root_certs(RootCerts::PlatformVerifier).build())
         .build()
         .into();
     let mut req = agent.get(url);
@@ -163,6 +164,21 @@ pub fn spawn_detached(mut cmd: Command) -> std::io::Result<Child> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 보드가 쓰는 두 서버(사용량·업데이트)에 진짜로 닿는지 본다(OS 인증서 저장소). 어떤 상태 코드든 받으면 TLS 가 통과한 것이다 —
+    /// 토큰이 없는 사용량 요청은 401 이 와도 성공이다. 네트워크가 필요해 기본으로는 돌리지 않는다: `cargo test -- --ignored https_reaches_a_real_server`
+    #[test]
+    #[ignore]
+    fn https_reaches_a_real_server() {
+        let hosts = [
+            ("사용량", "https://api.anthropic.com/api/oauth/usage"),
+            ("업데이트", "https://api.github.com/repos/suhojang/claude-board/releases?per_page=1"),
+        ];
+        for (name, url) in hosts {
+            let r = http_get(url, &[("User-Agent", "ClaudeBoard-Windows")], Duration::from_secs(10));
+            assert!(r.is_ok(), "{name} 서버({url}) TLS 연결: {r:?}");
+        }
+    }
 
     #[test]
     fn tail_and_contains() {
