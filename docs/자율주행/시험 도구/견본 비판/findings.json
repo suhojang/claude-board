@@ -1,0 +1,11 @@
+[
+ {"id": "f1", "unit": "u1", "criterion": "AC-2", "judge": ".autopilot/scenarios/u1/list.sh", "kind": "counterexample",
+  "why": "GET /todos 글자만 주석에 있고 ROUTES 가 빈 목록인 파일도 이 시나리오를 통과합니다(경로가 없는데 있다고 봄)", "files": ["app/todos.py"]},
+ {"id": "f2", "unit": "u2", "criterion": "AC-3", "kind": "unverifiable",
+  "why": "안내가 쉽게 읽히는지는 반례 파일로 가리지 못합니다(사람이 읽어 봐야 함)"},
+ {"id": "f3", "unit": "u1", "criterion": "AC-1", "kind": "interpretation",
+  "why": "POST /todos 가 있다를 경로 목록에 있으면 된다로도, 만들기를 보내면 실제로 만들어진다로도 읽을 수 있습니다",
+  "readings": [{"key": "listed", "label": "경로 목록에 있으면 됨"}, {"key": "works", "label": "만들기를 보내면 실제로 만들어짐"}], "recommended": "works"},
+ {"id": "f4", "unit": "u2", "judge": "check", "kind": "counterexample",
+  "why": "할 일 이라는 글자만 있고 띄우는 법이 없는 안내도 이 판정 명령을 통과합니다", "files": ["NOTES.md"]}
+]

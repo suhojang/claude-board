@@ -34,6 +34,11 @@
 #     결과 파일(spec.md·units.json·cards.json·autopilot.md·scenarios/<단위 id>/…)을 지금 폴더(엔진이 정한 결과 폴더 draft/)에 그대로 복사한다.
 #     "FAKE DRAFT_SLEEP <초>" 줄이 있으면 그만큼 기다린 뒤(시간 상한 시험), "FAKE DRAFT_ERROR" 면 오류 결과로 끝낸다.
 #     받은 인자·--settings 파일 내용·글 앞부분을 결과 폴더의 숨은 파일 .fake-draft.json 에 남긴다(기계 검사는 숨은 파일을 보지 않음). 바깥으로 아무것도 보내지 않는다
+#     판정 고치기 차례(5단계 ⑪-3, 글에 "판정 고치기 차례입니다." 가 있음)면 "FAKE DRAFT_FIX <견본 폴더>" 줄의 폴더를 복사한다(엔진이 먼저 넣어 둔 지금 초안 위에 덮어씀)
+#  5) 판정 비판 세션(5단계 ⑪-3, 같은 인자 꼴, 첫 줄 "Claude Board 자율주행의 판정 비판 세션입니다."): 글 안의 "FAKE CRITIC <견본 폴더>" 줄(단위 글·주제 글에 넣음)의
+#     findings.json·cases/ 를 결과 폴더에 복사한다. 받은 인자(--model 포함)·설정·글 앞부분은 .fake-critic.json 에
+#  6) 세트 이어 쓰기 세션(5단계 ⑪-3, 첫 줄 "Claude Board 자율주행의 세트 이어 쓰기 세션입니다."): "FAKE REVISE <견본 폴더>" 줄의 units.json·autopilot.md 를 복사, 기록은 .fake-revise.json
+#     5)·6) 은 견본 줄이 없으면 찾은 것이 없다고 끝낸다(비판은 빈 findings.json). 4)~6) 의 견본 폴더가 절대 경로가 아니면 이 파일이 있는 폴더(시험 도구/) 기준으로 찾는다(견본 단위 글에 "FAKE CRITIC 견본 비판" 처럼 쓰려고)
 # 남기는 것(단위 폴더 $CLAUDE_BOARD_UNIT_DIR): fake-args.log(띄울 때 인자 한 줄), fake-in.log(표준 입력 줄 원문, 띄울 때마다 머리 줄),
 # fake-signals.log(받은 신호와 시각), fake-runs.count(이 단위에서 띄운 횟수). 뜰 때 진짜 claude 처럼 작업 폴더에서 git status 를 한 번 부른다
 # (샌드박스 밖에서 도는 claude 의 git, 2026-10-30 5-4 실측 흉내)
@@ -120,11 +125,29 @@ if "--input-format" not in args and "--tools" in args:
         settings = json.load(open(after("--settings")))
     except Exception as ex:
         settings = "읽지 못함: %s" % ex
-    rec = {"argv": args, "settings": settings, "cwd": os.getcwd(), "env_draft": os.environ.get("CLAUDE_BOARD_DRAFT"),
+    here = os.path.dirname(os.path.abspath(__file__))
+    def sample(tag):
+        mm = _re.search(r"^\s*(?:- )?FAKE " + tag + r" (.+?)\s*$", prompt, _re.M)   # 견본 폴더 경로에 빈칸이 있어도 줄 끝까지
+        if not mm:
+            return None
+        p = mm.group(1)
+        return p if p.startswith("/") else os.path.join(here, p)
+    kind = "draft"
+    if prompt.startswith("Claude Board 자율주행의 판정 비판 세션입니다."):
+        kind = "critic"
+    elif prompt.startswith("Claude Board 자율주행의 세트 이어 쓰기 세션입니다."):
+        kind = "revise"
+    fixing = kind == "draft" and "판정 고치기 차례입니다." in prompt.split("\n", 1)[0]
+    rec = {"argv": args, "model": after("--model"), "settings": settings, "cwd": os.getcwd(), "kind": kind, "fix": fixing,
+           "env_draft": os.environ.get("CLAUDE_BOARD_DRAFT"), "env_critic": os.environ.get("CLAUDE_BOARD_CRITIC"), "env_revise": os.environ.get("CLAUDE_BOARD_REVISE"),
            "prompt_head": prompt[:1500], "prompt_chars": len(prompt), "first_line": prompt.split("\n", 1)[0]}
-    m = _re.search(r"^\s*(?:- )?FAKE DRAFT (/.+?)\s*$", prompt, _re.M)   # 견본 폴더 경로에 빈칸이 있어도 줄 끝까지
+    src_dir = sample({"critic": "CRITIC", "revise": "REVISE"}.get(kind, "DRAFT_FIX" if fixing else "DRAFT"))
+    class _M:
+        def __init__(self, g): self._g = g
+        def group(self, i): return self._g
+    m = _M(src_dir) if src_dir else None
     copied = []
-    ok = prompt.startswith("Claude Board 자율주행의 초안 세션입니다.") and m is not None
+    ok = m is not None and (kind != "draft" or prompt.startswith("Claude Board 자율주행의 초안 세션입니다."))
     sl = _re.search(r"^\s*(?:- )?FAKE DRAFT_SLEEP (\d+)", prompt, _re.M)
     if sl:
         time.sleep(int(sl.group(1)))
@@ -137,8 +160,12 @@ if "--input-format" not in args and "--tools" in args:
                 os.makedirs(os.path.dirname(rel) or ".", exist_ok=True)
                 shutil.copyfile(a, rel)
                 copied.append(rel)
+    if kind in ("critic", "revise") and m is None:   # 견본이 없으면 "찾은 것 없음"으로 끝낸다(지적 0·고칠 것 0)
+        if kind == "critic":
+            open("findings.json", "w").write("[]\n"); copied.append("findings.json")
+        ok = True
     rec["copied"] = sorted(copied)
-    json.dump(rec, open(".fake-draft.json", "w"), ensure_ascii=False, indent=1)
+    json.dump(rec, open(".fake-%s.json" % kind, "w"), ensure_ascii=False, indent=1)
     if _re.search(r"^\s*(?:- )?FAKE DRAFT_ERROR", prompt, _re.M) or not ok:
         res = {"type": "result", "subtype": "error_during_execution", "is_error": True, "total_cost_usd": 0}
     else:

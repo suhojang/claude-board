@@ -297,6 +297,11 @@ public struct APJudgeStep: Equatable, Sendable {
     public var criterion: String?
     public var pinned: String?       // 고정본 경로
     public var sha256: String?       // 고정본 지문(출발 때). 있으면 돌리기 전에 견준다
+    public init(name: String, label: String, argv: [String], evidence: String, kind: String, file: String? = nil, criterion: String? = nil,
+                pinned: String? = nil, sha256: String? = nil) {
+        self.name = name; self.label = label; self.argv = argv; self.evidence = evidence; self.kind = kind; self.file = file
+        self.criterion = criterion; self.pinned = pinned; self.sha256 = sha256
+    }
 }
 
 // 고정본 하나: 시나리오·돌리는 법·고정본 경로·지문
