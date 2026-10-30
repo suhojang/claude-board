@@ -6156,6 +6156,7 @@ func cmdSeed(_ args: [String]) {
         let probe = EngineToolProbe(path: env["PATH"] ?? loginPath(), browserPath: nil)
         let steps = plan.steps.map { ["slot": $0.slot, "label": $0.label, "folder": $0.folder, "kind": $0.kind.rawValue, "external": $0.external,
                                       "command": apGenCommandText($0), "tools": $0.tools.map(\.label)] as [String: Any] }
+        guard plan.problems.isEmpty else { reply(["ok": false, "step": "plan", "problems": plan.problems, "plan": steps, "first_unit": plan.firstUnit, "notes": plan.notes], false) }
         let tools = apSkeletonToolProblems(plan, probe: probe)
         guard tools.isEmpty else { reply(["ok": false, "step": "tools", "problems": tools, "plan": steps, "first_unit": plan.firstUnit, "notes": plan.notes], false) }
         guard let baseHead = headOf(x.repo, "refs/heads/" + x.base) else { reply(["ok": false, "problems": ["출발 가지 \(x.base) 머리를 읽지 못했습니다"]], false) }
