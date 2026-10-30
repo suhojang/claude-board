@@ -1,0 +1,107 @@
+{
+  "content" : [
+    {
+      "content" : [
+        {
+          "marks" : [
+            {
+              "type" : "strong"
+            }
+          ],
+          "text" : "오토파일럿 작성",
+          "type" : "text"
+        }
+      ],
+      "type" : "paragraph"
+    },
+    {
+      "content" : [
+        {
+          "text" : "할 일에 마감일 칸 더하기: ",
+          "type" : "text"
+        },
+        {
+          "marks" : [
+            {
+              "type" : "strong"
+            }
+          ],
+          "text" : "통과",
+          "type" : "text"
+        },
+        {
+          "text" : " (단위 1/4, 일한 시간 24분, 0.820 USD)",
+          "type" : "text"
+        }
+      ],
+      "type" : "paragraph"
+    },
+    {
+      "content" : [
+        {
+          "text" : "할 일마다 마감일을 넣고 고칠 수 있습니다.",
+          "type" : "text"
+        }
+      ],
+      "type" : "paragraph"
+    },
+    {
+      "content" : [
+        {
+          "content" : [
+            {
+              "content" : [
+                {
+                  "text" : "할 일 표에 마감일 칸을 더했습니다.",
+                  "type" : "text"
+                }
+              ],
+              "type" : "paragraph"
+            }
+          ],
+          "type" : "listItem"
+        },
+        {
+          "content" : [
+            {
+              "content" : [
+                {
+                  "text" : "할 일 고치기 API 가 마감일을 받습니다.",
+                  "type" : "text"
+                }
+              ],
+              "type" : "paragraph"
+            }
+          ],
+          "type" : "listItem"
+        },
+        {
+          "content" : [
+            {
+              "content" : [
+                {
+                  "text" : "지난 날짜는 400 으로 거부합니다.",
+                  "type" : "text"
+                }
+              ],
+              "type" : "paragraph"
+            }
+          ],
+          "type" : "listItem"
+        }
+      ],
+      "type" : "bulletList"
+    },
+    {
+      "content" : [
+        {
+          "text" : "자율주행 실행 20261030-0900-todo-api · 보드 글 번호 20261030-0900-todo-api/u1-jira-TODO-41",
+          "type" : "text"
+        }
+      ],
+      "type" : "paragraph"
+    }
+  ],
+  "type" : "doc",
+  "version" : 1
+}
