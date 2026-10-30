@@ -1,7 +1,8 @@
 // 자율주행 규칙의 포트 — 규칙이 바깥(파일·git·HTTP·시각)을 부르는 자리(2026-10-30 2단계 5-2b 에서 처음 생김).
 // 새 폴더 만들기(NewRepo.swift)가 바깥(폴더·git)을, 기술 스택 감지(Stack.swift)가 바깥(저장소 빌드 파일)을,
 // 버전 목록(Versions.swift)이 바깥(공식 목록 받기·하루 캐시)을, 원문 지우기(Purge.swift)가 바깥(실행 폴더·지운 기록)을,
-// 보고서 그리기(Report.swift, 3단계)가 바깥(실행 폴더·기록 저장소 읽기, 보고서 파일 쓰기)을, 시험 실행기(Scenarios.swift, 5단계 ⑪-1)가 바깥(도구 찾기·판정 돌리기)을 부르는 자리.
+// 보고서 그리기(Report.swift, 3단계)가 바깥(실행 폴더·기록 저장소 읽기, 보고서 파일 쓰기)을, 시험 실행기(Scenarios.swift, 5단계 ⑪-1)가 바깥(도구 찾기·판정 돌리기)을,
+// 주제로 시작의 초안 세션·뼈대(Draft.swift·Skeleton.swift, 5단계 ⑪-2)가 바깥(초안 결과 폴더 읽기·뼈대 쓰기와 생성기 돌리기)을 부르는 자리.
 // 진짜 어댑터는 보드(Sources/ClaudeBoard/AutopilotTopic.swift)에, 가짜 어댑터는 Tests/AutopilotRulesTests 에만 둔다(BoardRules 의 Ports.swift 와 같은 꼴, 이슈 #9).
 // 이름의 AP 는 보드 자율주행 절의 이름 짓기를 따르고, 보드가 BoardRules 도 import 하므로 겹치지 않게 한다(BoardRules.Clock 과 APClock).
 // 포트는 역할로 나눈다(범용 파일 포트를 두면 시험이 경로 글자 시험이 된다)
@@ -154,4 +155,25 @@ public protocol APJudgeRunner {
     /// 고정본의 지금 지문(sha256 16진수). 없으면 nil
     func digest(_ path: String) -> String?
     func run(_ step: APJudgeStep) -> APStepResult
+}
+
+// MARK: - 주제로 시작의 초안 세션과 뼈대 (Draft.swift·Skeleton.swift, 5단계 ⑪-2)
+
+// 초안 세션 결과 폴더 — 규칙이 고른 상대 경로만 읽는다(링크·폴더가 아닌 보통 파일, 크기 상한 아래일 때만. 어댑터 몫)
+public protocol APDraftFiles {
+    func read(_ relative: String) -> Data?
+    /// 그 폴더 바로 아래의 이름들(숨은 이름 포함, 없으면 빈 목록)
+    func list(_ relative: String) -> [String]
+}
+
+// 계획을 돌리는 자리(진짜 어댑터는 엔진: 임시 작업 트리 안, 로그인 셸 환경). 경로는 그 작업 트리 기준 상대 경로
+public protocol APSkeletonWork {
+    /// 파일을 쓴다(부모 폴더를 만든다). 되면 true
+    func write(_ relative: String, _ text: String) -> Bool
+    /// 명령을 그 폴더(빈 글자 = 뿌리)에서 돌린다
+    func run(_ argv: [String], in relative: String) -> (code: Int32, out: String)
+    /// 주소에서 zip 을 받아 그 폴더에 푼다. 되면 nil, 아니면 까닭
+    func download(_ url: String, into relative: String) -> String?
+    /// 바뀐 것을 모두 add 해 커밋한다. 커밋 sha, 바뀐 것이 없으면 nil
+    func commit(_ message: String) -> (sha: String?, error: String?)
 }
