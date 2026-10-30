@@ -86,8 +86,8 @@ Claude Code hook ──> state.py  ──> ~/.claude/notifier/sessions/<session_
 
 ### 실행 파일
 
-- `Sources/ClaudeBoard/` (18개 파일, 약 16,900줄 — 그 가운데 자율주행 `Autopilot.swift` 약 5,700줄·`AutopilotTopic.swift` 약 750줄) — 보드 앱 전체. AppKit 창 위에 SwiftUI 화면을 얹었다. 한 파일 `ClaudeBoard.swift` 이던 것을 2026-10-29 에
-  `tools/split-board.py` 로 맨 위 `// MARK: - ` 절마다 한 파일로 나눴다(코드는 옮기기만 했고 머리의 import 는 파일마다 같다 — 자율주행 `Autopilot.swift`·`AutopilotTopic.swift` 만 `AutopilotRules` 를 더 import 한다. 자율주행 절은 가지 `autopilot-stage2` 에 main 을 합칠 때 같은 스크립트로 떨어졌고, `AutopilotTopic.swift` 는 2단계 5-2b 에서 새로 만든 파일이다). 절 이름과 내용이 어긋난 곳이 있으니
+- `Sources/ClaudeBoard/` (19개 파일, 약 17,400줄 — 그 가운데 자율주행 `Autopilot.swift` 약 6,000줄·`AutopilotTopic.swift` 약 750줄·`AutopilotReport.swift` 약 260줄) — 보드 앱 전체. AppKit 창 위에 SwiftUI 화면을 얹었다. 한 파일 `ClaudeBoard.swift` 이던 것을 2026-10-29 에
+  `tools/split-board.py` 로 맨 위 `// MARK: - ` 절마다 한 파일로 나눴다(코드는 옮기기만 했고 머리의 import 는 파일마다 같다 — 자율주행 `Autopilot.swift`·`AutopilotTopic.swift`·`AutopilotReport.swift` 만 `AutopilotRules` 를 더 import 한다. 자율주행 절은 가지 `autopilot-stage2` 에 main 을 합칠 때 같은 스크립트로 떨어졌고, `AutopilotTopic.swift` 는 2단계 5-2b, `AutopilotReport.swift` 는 3단계에서 새로 만든 파일이다). 절 이름과 내용이 어긋난 곳이 있으니
   (`BoardView` 는 `BrainrotMascots.swift`, `Store` 는 `LimitSwitching.swift`, `AppDelegate` 는 `SettingsScreen.swift`) 파일 이름보다 아래 표나 grep 으로 찾는다.
 
   | 파일 | 절 | 들어 있는 것 |
@@ -105,6 +105,7 @@ Claude Code hook ──> state.py  ──> ~/.claude/notifier/sessions/<session_
   | `EmbeddedTerminal.swift` | 내장 터미널 | `TerminalHub`·`BoardTab`·`BoardSurface`·`BoardTerminalView`·`BoardRootView`·`PaneDivider`, `confirmShutdown`, `mdRenderDir`, `boardLog` |
   | `Autopilot.swift` | 자율주행 | 뿌리 `autopilotRoot`, 실행·단위 모델(`APRun`·`APUnit`), `AutopilotStore`(원문 지우기 `purge` 포함), 기록 저장소 읽기 `APRecords`, 보드 본체 줄(`APRunLine`·`APRunCard`·`APEndedLine`·`APBar`), 자율주행 중 `APRunningScreen`·지난 실행 `APHistoryScreen`, 출발 `APStart`·`APStartSheet`(출발 확인의 설정 줄·승격 차례·자율주행 지시 그 자리 바꾸기), 합치기·승격 `APMerge`·`APMergeSheet`, 엔진·git 부르기(`apEngine`·`apGit`) |
   | `AutopilotTopic.swift` | 자율주행 · 주제로 시작 | 출발 준비 1단계의 주제로 시작 입력 판 `APTopic`·`APTopicStep1`·`APSlotEditor`(주제 글·자료 링크·작업 경로·기술 스택), 5-2b 규칙의 진짜 어댑터(`APFolderFiles`·`APBoardGit`·`APRepoFiles`·`APHTTPFeeds`·`APCatalogCacheFile`·`APRawRunFiles`·`APSystemClock`) |
+  | `AutopilotReport.swift` | 자율주행 · 보고서 뷰어 | 보고서 창 `APReportViewer`(WebKit, JavaScript 끔·처리기 없는 바탕 주소 `claude-board-report://report/`·문서 안 이동만·https 링크는 확인 뒤 기본 브라우저·콘텐츠 규칙으로 http(s)·ws(s)·ftp(s) 막음·파일로 저장), 보고서 규칙의 진짜 어댑터 `APFolderReportSource`(실행 폴더)·`APRecordsReportSource`(기록 저장소, 행은 `APRecords.reportSource` 가 읽음)·`apBoardReportHTML` |
   | `BoardWindow.swift` | 창 | `window`, `SizeGuard` |
   | `BoardTiers.swift` | 창 크기 단계 | `BoardTier`·`BoardFit`, 미니 화면 `MiniBoard` |
   | `KeyboardShortcuts.swift` | 단축키 | `Shortcuts`·`ShortcutSettings` |
@@ -165,11 +166,16 @@ Claude Code hook ──> state.py  ──> ~/.claude/notifier/sessions/<session_
   `Stack.swift`(기존 저장소 빌드·설정 파일 감지 `apDetectStack`·주제 글 낱말 대조 `apTopicHits`·`apTopicStack`·다른 스택 경고 `apStackConflicts`), `Links.swift`(자료 링크 종류·읽기 상태 `apLinkInfo`, 읽지는 않음),
   `NewRepo.swift`(새 폴더 확인 `apNewRepoCheck`·git 차례·유스케이스 `apCreateRepo`), `Versions.swift`(공식 버전 목록: 고정 주소 `APFeed`·응답 풀기·목록과 추천 `apBuildCatalog`·유스케이스 `apLoadCatalog`, 하루 캐시 → 받기 → 지난 캐시 → 앱에 든 목록 `BuiltinVersions.swift`),
   `Purge.swift`(지난 실행 원문 지우기 `apPurgeCheck`·유스케이스 `apPurgeRaw`, 실행 폴더만), `Carry.swift`(이어 간 줄 밖의 열린 미룬 몫 `apOpenParked`).
-  바깥은 포트(`Ports.swift`: `APClock`·`APFolders`·`APGitRunner`·`APStackFiles`·`APVersionFeeds`·`APVersionCache`·`APRawFiles`, BoardRules 의 `Clock` 과 이름이 겹치지 않게 AP)로만 부른다 — 진짜 어댑터는 보드 `AutopilotTopic.swift`, 가짜는 `Tests/AutopilotRulesTests` 에만.
+  3단계(보고서): `Report.swift`(결과 기록 읽기 `apParseResult`·기록 → 값 `apReportRun`·한 파일로 완결된 HTML `apReportHTML`(CSP 로 바깥 요청 막음, 그림은 인라인 SVG, 밝은·어두운 화면, 시각·시간대·홈 폴더는 값)·유스케이스 `apDrawReports`),
+  `Sequence.swift`(결과 기록 흐름 그림의 sequenceDiagram 작은 부분 읽기 `apParseSequence`·SVG `apSequenceSVG`, 읽지 못한 줄이 있으면 원문), `Prose.swift`(긴 줄표 `apPlain`(보드에서 옮김)·HTML 이스케이프 `apEscapeHTML`·링크 `apSafeLink`(https 만)).
+  바깥은 포트(`Ports.swift`: `APClock`·`APFolders`·`APGitRunner`·`APStackFiles`·`APVersionFeeds`·`APVersionCache`·`APRawFiles`·`APReportSource`·`APReportSink`, BoardRules 의 `Clock` 과 이름이 겹치지 않게 AP)로만 부른다 — 진짜 어댑터는 보드 `AutopilotTopic.swift`·`AutopilotReport.swift`(보고서 읽을 곳)와 엔진(`EngineReportSource`·`EngineReportSink`), 가짜는 `Tests/AutopilotRulesTests` 에만.
   입력 승격 차례는 값(`[APStep]`)으로 받고 프로젝트 설정 파일 읽기(`apPromotion`)·기록 저장소 읽기(`APRecords`)는 보드에 남았다.
   시험(`Tests/AutopilotRulesTests/` 의 `BranchesTests`·`LeftoversTests`·`HistoryTests`·`PromotionTests`, 5-2b 새 규칙은 `TopicTests`·`VersionsTests`·`StartTests`(가짜 어댑터))은 옮기기 전 함수로 돌린 덤프의 입력·기대값 표다(시험 빌드 뿌리 장난감 기록 26개를 줄이고 경로를 `/w/…` 로 바꿈, 경계 입력). 규칙을 고치면 그 줄의 기대값과 note 를 함께 고친다(5-3b 에서 고친 줄은 note 에 "5-3b").
+  보고서 시험 `ReportTests` 는 견본 기록(`Tests/AutopilotRulesTests/Report/sample-run.json`·악성 견본 `evil-run.json`, 장난감 값)과 골든 HTML 셋(같은 폴더, `Package.swift` 에서 exclude)을 #filePath 로 읽는다.
+  틀을 고쳐 골든이 달라지면 화면으로 확인한 뒤 `AP_REPORT_GOLDEN=write swift test …` 로 다시 쓰고 바뀐 줄을 함께 커밋한다.
   자율주행 규칙은 맨 위 `rules-table/`(Windows 공용 표)에 넣지 않는다.
-- `Sources/ClaudeAutopilot/main.swift` — 자율주행 엔진 `claude-autopilot`(`start`·`run`·`control`·`status`·`records import`·`prerun`·`finish`(`--dev` 는 그 실행의 뿌리와 맞는지만 본다), 사용법은 파일 머리 주석). SwiftPM 실행 타깃 `ClaudeAutopilot`(언어 모드 5, `AutopilotRules` 에 기댐)이고 한 파일이라 최상위 실행문이 있다.
+- `Sources/ClaudeAutopilot/main.swift` — 자율주행 엔진 `claude-autopilot`(`start`·`run`·`control`·`status`·`records import`·`prerun`·`finish`(`--dev` 는 그 실행의 뿌리와 맞는지만 본다)·`report`(끝난 실행의 보고서 다시 그리기), 사용법은 파일 머리 주석).
+  도는 엔진은 단위 판정 뒤·건너뛴 뒤·끝 정리 때 실행 폴더에 보고서(`report.html`·`units/<n>/report.html`)를 AutopilotRules 틀로 직접 그린다(보드 창이 꺼져 있어도, 모델 0). SwiftPM 실행 타깃 `ClaudeAutopilot`(언어 모드 5, `AutopilotRules` 에 기댐)이고 한 파일이라 최상위 실행문이 있다.
   보드 앱 밖에서 LaunchAgent(KeepAlive)로 돌고, 출발 때 실행 폴더 `pinned/` 에 고정한 자기 사본과 설정(`frozen.json`, 해시는 LaunchAgent 인자)으로 돈다. 모델 세션은 Claude Code 샌드박스(`--settings`)·고른 환경 변수·`--setting-sources project,local` 로 띄운다.
   build-board.sh 는 보드와 같은 `swift build` 결과의 `ClaudeAutopilot` 을, make-dmg.sh 는 두 아키텍처 결과를 `lipo` 로 합쳐 앱 `Contents/MacOS/claude-autopilot` 에 싣는다(앱보다 먼저 서명). 설계·실측은 `docs/자율주행/설계.md`·`진행 상황.md`.
 - `ClaudeNotifier.swift` — 알림 패널. 인자는 파일 머리 주석 참고. 여러 패널이 동시에 뜨면 슬롯 파일로 자리를 나눈다. `--session` 을 받으면 누를 때 보드에 `focus` 동작을 알린다.
