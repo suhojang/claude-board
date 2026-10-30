@@ -783,7 +783,7 @@ struct APHistory: Equatable {
 // 기록 저장소 읽기 — 읽기 전용으로 열고(SQLITE_OPEN_READONLY, 만들지 않음) 읽을 때마다 닫는다(긴 읽기 트랜잭션이 엔진의 체크포인트를 막지 않게).
 // 판(user_version)이 이 보드가 아는 판보다 높으면 읽을 수 있는 만큼 읽고 "보드를 업데이트하세요"를 보인다(설계 5장 7절)
 enum APRecords {
-    static let knownVersion = 1
+    static let knownVersion = Int(apRecordsVersion)   // 판 2(5단계 ⑪-3 판정 놓침 표)
 
     private static func open(_ path: String) -> OpaquePointer? {
         guard FileManager.default.fileExists(atPath: path) else { return nil }
@@ -2779,6 +2779,21 @@ extension APRecords {
     // 시험 실행기(5단계 ⑪-1): 이미 통과한 시나리오 카드(엔진 prerun.json 의 시나리오 카드 감), 실행 파일이 없는 수용 기준 카드(엔진 status --json 의 criteria_gaps)
     @Published private(set) var scenarioCards: [APCard] = []
     @Published private(set) var criterionCards: [APCard] = []
+    // 5단계 ⑪-3 — 판정 비판: 반대 탐침 카드(prerun.json probe_cards)·비판 세션의 마지막 차례(critic.json)와 카드, 판정 고치기 차례(주제로 시작만),
+    // 약해진 고침 카드, 판정 놓침(misses.json)과 세트 이어 쓰기(revise.json, 이어 가기)·판정 차이(출발 확인)
+    @Published private(set) var probeCards: [APCard] = []
+    @Published private(set) var criticCards: [APCard] = []
+    @Published private(set) var criticSummary: [String: Any] = [:]
+    @Published private(set) var weakCard: APCard?
+    @Published private(set) var fixRound = 0
+    @Published private(set) var fixing = false
+    @Published private(set) var missInfo: [String: Any] = [:]
+    @Published private(set) var judgeChanges: [[String: Any]] = []
+    @Published private(set) var judgeChangeFrom = ""
+    private var missesUsed: [String] = []
+    private var pendingSet: String?
+    private var critRound = 0
+    private var keepHistory = false
     @Published var cards: [APCard] = []
     @Published var answers: [String: String] = [:]
     @Published private(set) var policyLoaded: Set<String> = []
@@ -2865,7 +2880,8 @@ extension APRecords {
     // 카드가 단위에 내린 결정 — 답하지 않은 카드가 있으면 "pending", 빼기·판정 고치기 답이면 "out"
     func cardDecision(_ u: APDraftUnit) -> String {
         let mine = cards.filter { $0.unit == u.id }
-        if mine.contains(where: { ["drop", "fix_check"].contains(answers[$0.id] ?? "") }) { return "out" }
+        if mine.contains(where: { ["drop", "fix_check"].contains(answers[$0.id] ?? "") }) { return "out" }   // 판정 고치기: 이어 가기는 다음 출발로, 주제로 시작은 고친 뒤 새 카드
+
         if mine.contains(where: { answers[$0.id] == nil }) { return "pending" }
         return "in"
     }
@@ -3025,6 +3041,8 @@ extension APRecords {
         units = []; carryPark = []; carryNew = []; noDefs = nil; lines = []; preparing = false; prepared = false; rechecking = false
         problems = []; mode = ""; modeReason = ""; repos = []; repoInfo = [:]; storyBranch = [:]; prerunPassed = []; prerunIds = []; prerunNote = ""; scenarioCards = []; criterionCards = []
         cards = []; answers = [:]; policyLoaded = []; bases = [:]; baseNote = ""; promotion = []; promotionSaved = false
+        probeCards = []; criticCards = []; criticSummary = [:]; weakCard = nil; fixRound = 0; fixing = false; missInfo = [:]; judgeChanges = []; judgeChangeFrom = ""
+        missesUsed = []; pendingSet = nil; critRound = 0; keepHistory = false
         epic = ""; stories = []; estimates = [:]; starting = false; startError = nil; changedBy = nil; leftBranches = []
         epicInfo = nil; topicOtherDone = false; topicBundle = ""; linkURLs = [:]
         draftResult = [:]; topicStack = APStackSet(); topicNew = false; topicLayout = "dlm"; topicReseeding = false; draftCards = []; harnessCards = []; topicKey = ""
@@ -3088,10 +3106,13 @@ extension APRecords {
                        "tickets", "review", "source_key", "kind", "est_min", "est_basis", "story", "depends", "prerun",
                        "scenarios", "criteria", "check_ports", "check_sandbox"]
         let defaultCap = APCaps.from(pr["caps"]).minutes
+        // 판정을 통과했지만 합치기·승격 화면에서 버린 단위는 일이 저장소에 없으므로 다시 후보로(판정 놓침, 5단계 ⑪-3, 규칙 apDiscardedUnit)
+        let gone = Set(((pr["branches"] as? [String: Any])?["discarded"] as? [[String: Any]] ?? []).compactMap { $0["source"] as? String })
         for (i, d0) in q.enumerated() {
             let n = i + 1
             let st = detail.units.first { $0.n == n }?.status ?? d0["status"] as? String ?? "pending"
-            guard open.contains(st) else { continue }
+            let discardedPass = st == "done" && apDiscardedUnit(story: apText(d0["story"]), discardedSources: gone)
+            guard open.contains(st) || discardedPass else { continue }
             var d: [String: Any] = [:]
             for k in defKeys { if let v = d0[k], !(v is NSNull) { d[k] = v } }
             for k in ["cwd", "prompt", "check", "precheck", "action"] { if let s = d[k] as? String { d[k] = unmap(s) } }
@@ -3104,7 +3125,7 @@ extension APRecords {
             u.title = d["title"] as? String ?? "단위 \(n)"
             u.kind = d["kind"] as? String ?? detail.units.first { $0.n == n }?.kind ?? ""
             if !u.kind.isEmpty { d["kind"] = u.kind }
-            u.last = st
+            u.last = discardedPass ? "통과했지만 버림" : st
             u.check = d["check"] as? String ?? ""
             u.sourceKey = key
             u.est = apNum(d["est_min"]) ?? detail.units.first { $0.n == n }?.estMin
@@ -3251,16 +3272,18 @@ extension APRecords {
             APPrepLine(id: "set", title: "지난 자율주행 세트", state: "done", sec: 0,
                        note: setText.map { "지시 \($0.count)자를 불러왔습니다(\(apDay(setAt))). 출발 때 엔진이 고정해 자율주행 세션에만 얹습니다" }
                         ?? "이 프로젝트의 세트에 지시(autopilot.md)가 없어 공통 규칙만으로 돕니다"),
+            APPrepLine(id: "misses", title: "판정 놓침(이 프로젝트)"),
+            APPrepLine(id: "revise", title: "세트 이어 쓰기"),
             APPrepLine(id: "check", title: "단위마다 기계 검사 · 엔진 출발 전 확인"),
             APPrepLine(id: "env", title: "시험 실행기 환경 확인"),
             APPrepLine(id: "where", title: "따로 작업 트리 확인"),
             APPrepLine(id: "prerun", title: "판정 미리 돌리기"),
+            APPrepLine(id: "probe", title: "반대 탐침"),
+            APPrepLine(id: "critic", title: "판정 비판 세션"),
         ]
         if cand.isEmpty {
+            for l in ["misses", "revise", "env", "where", "prerun", "probe", "critic"] { setLine(l, "skip", note: "") }
             setLine("check", "skip", note: "이어 갈 단위가 없습니다")
-            setLine("env", "skip", note: "")
-            setLine("where", "skip", note: "")
-            setLine("prerun", "skip", note: "")
             preparing = false; prepared = true
             buildCards()
             return
@@ -3274,7 +3297,13 @@ extension APRecords {
                     self.repos = info.repos; self.repoInfo = info.info
                     self.pickDefaultBases(projectNow, settingsNow)
                     self.writeDraft(cand.filter { $0.blocked == nil })
-                    self.runStatus(prerun: true, ids: Set(cand.filter { $0.blocked == nil }.map(\.id)))
+                    // 판정 놓침(⑪-3) → 있으면 세트 이어 쓰기(판정 명령·지시를 고침) → 엔진 확인·판정 미리 돌리기·반대 탐침·비판 세션
+                    self.runMisses {
+                        self.runRevise {
+                            self.writeDraft(self.units.filter { u in cand.contains { $0.id == u.id } && u.blocked == nil })
+                            self.runStatus(prerun: true, ids: Set(cand.filter { $0.blocked == nil }.map(\.id)), critic: true)
+                        }
+                    }
                 }
             }
         }
@@ -3380,6 +3409,7 @@ extension APRecords {
     }
     private func writeRunRest(_ run: inout [String: Any], _ list: [APDraftUnit]) {
         if jira, !epic.isEmpty { run["epic"] = epic }
+        if !missesUsed.isEmpty { run["misses_used"] = missesUsed }   // 이 준비의 세션(초안·비판·세트 이어 쓰기)에 넘긴 판정 놓침 — 출발하면 엔진이 used 로(⑪-3)
         let chosenBases = repos.compactMap { r in bases[r].map { (r, $0) } }
         if Set(chosenBases.map(\.1)).count == 1, chosenBases.count == repos.count, let b = chosenBases.first?.1 { run["base_branch"] = b }
         else if !chosenBases.isEmpty { run["base_branch"] = Dictionary(chosenBases, uniquingKeysWith: { a, _ in a }) }
@@ -3416,7 +3446,8 @@ extension APRecords {
     }
 
     // 엔진 출발 전 확인(status --json)과 판정 미리 돌리기(prerun). 준비(2단계)와 출발 확인의 다시 확인이 함께 쓴다
-    private func runStatus(prerun: Bool, ids: Set<String>) {
+    // critic: 판정 미리 돌리기 뒤 비판 세션도(출발 준비와 판정 고치기 차례. 출발 확인의 다시 확인은 앞 비판 결과를 그대로 둔다 — 모델 비용, 출발마다 한 번)
+    private func runStatus(prerun: Bool, ids: Set<String>, critic: Bool = false) {
         let d = dir, dev = apDevBuild
         let byId = Dictionary(units.map { ($0.id, $0.title) }, uniquingKeysWith: { a, _ in a })
         queue.async {
@@ -3450,10 +3481,14 @@ extension APRecords {
                     }
                     if prerun, problems.isEmpty {
                         self.setLine("prerun", "run", note: "")
-                        self.runPrerun(d, ids: ids, byId: byId)
+                        self.runPrerun(d, ids: ids, byId: byId, critic: critic)
                         return
                     }
-                    if prerun { self.setLine("prerun", "skip", note: "출발 전 확인에 고칠 것이 있어 돌리지 않았습니다") }
+                    if prerun {
+                        self.setLine("prerun", "skip", note: "출발 전 확인에 고칠 것이 있어 돌리지 않았습니다")
+                        self.setLine("probe", "skip", note: "출발 전 확인에 고칠 것이 있어 돌리지 않았습니다")
+                        self.setLine("critic", "skip", note: "출발 전 확인에 고칠 것이 있어 돌리지 않았습니다")
+                    }
                     self.finishCheck()
                 }
             }
@@ -3461,10 +3496,12 @@ extension APRecords {
     }
 
     // 판정 미리 돌리기 — 단위마다 판정 시간 상한까지 걸릴 수 있어 확인 줄과 따로 알린다
-    private func runPrerun(_ d: String, ids: Set<String>, byId: [String: String]) {
-        let dev = apDevBuild
+    private func runPrerun(_ d: String, ids: Set<String>, byId: [String: String], critic: Bool = false) {
+        let dev = apDevBuild, keep = keepHistory
+        keepHistory = false   // 판정 고치기 바로 뒤 한 번만(다시 확인마다 앞 탐침 카드를 쌓지 않게)
+        if critic { setLine("probe", "run", note: "") }
         queue.async {
-            let pre = apEngine(["prerun", d] + (dev ? ["--dev"] : []))
+            let pre = apEngine(["prerun", d] + (dev ? ["--dev"] : []) + (keep ? ["--keep-history"] : []))
             let pj = apRead(d + "/prerun.json") as? [String: Any]
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
@@ -3501,6 +3538,8 @@ extension APRecords {
                         if let sb = rows.first(where: { $0["sandbox"] != nil })?["sandbox"] as? String { detail.append(sb) }
                         self.prerunNote = note
                         self.setLine("prerun", "done", note: note, detail: detail)
+                        self.setProbeLine(pj)
+                        if critic { self.runCritic(d); return }
                     }
                     self.finishCheck()
                 }
@@ -3549,6 +3588,7 @@ extension APRecords {
     private func finishCheck() {
         let wasPreparing = preparing
         preparing = false
+        fixing = false
         rechecking = false
         prepared = true
         buildCards()
@@ -3570,6 +3610,10 @@ extension APRecords {
             out.append(c)
         }
         out += criterionCards
+        // 판정 비판(⑪-3): 반대 탐침·비판 세션 카드(뺀 단위의 것은 빼고), 약해진 고침 카드
+        let live = Set(units.filter { $0.excluded == nil && $0.blocked == nil }.map(\.id))
+        out += (probeCards + criticCards).filter { $0.unit.map { live.contains($0) } ?? true }
+        if let w = weakCard { out.append(w) }
         if source == "topic" { out += draftCards + harnessCards }   // 주제로 시작(⑪-2): 초안 세션이 물은 것·지시가 다루지 않은 하네스 확인 지점
         let outside = openParked.filter { includeParked.contains($0.id) }.map { APCarry(id: $0.id, unit: $0.unit, kind: $0.kind, title: $0.title, why: $0.why) }
         for c in carryPark + outside {
@@ -3609,6 +3653,7 @@ extension APRecords {
     func answer(_ card: APCard, _ key: String) {
         let before = chosen.map(\.id)
         answers[card.id] = key
+        if card.kind == "fix_weak", key == "accept" { acceptFix() }   // 약해진 고침을 받기로 골랐을 때만 바꿔 끼운다(⑪-3)
         if chosen.map(\.id) != before, let i = cards.firstIndex(of: card) { changedBy = "카드 \(i + 1) 답으로 바뀜"; flash += 1 }
     }
     // 모두 추천대로 — 아직 안 고른 카드만 추천안으로 채운다(이미 고른 답은 그대로, 사용자 결정)
@@ -3906,6 +3951,8 @@ extension APRecords {
         step = 2
         preparing = true; prepared = false
         problems = []; prerunPassed = []; units = []; cards = []; draftResult = [:]; draftCards = []; harnessCards = []; scenarioCards = []; criterionCards = []
+        probeCards = []; criticCards = []; criticSummary = [:]; weakCard = nil; fixRound = 0; fixing = false; missInfo = [:]; judgeChanges = []; judgeChangeFrom = ""
+        missesUsed = []; pendingSet = nil; critRound = 0; keepHistory = false
         let new = t.pathMode == "new"
         topicNew = new
         project = t.projectName
@@ -3946,6 +3993,7 @@ extension APRecords {
             ls.append(APPrepLine(id: "skeleton", title: "저장소 보기(출발 가지)"))
             ls.append(APPrepLine(id: "harness", title: "하네스 읽기"))
         }
+        ls.append(APPrepLine(id: "misses", title: "판정 놓침(이 프로젝트)"))
         ls.append(APPrepLine(id: "draft", title: "초안 세션"))
         ls.append(APPrepLine(id: "draftcheck", title: "초안 기계 검사"))
         ls.append(APPrepLine(id: "scenarios", title: "판정 시나리오 커밋"))
@@ -3953,6 +4001,8 @@ extension APRecords {
         ls.append(APPrepLine(id: "env", title: "시험 실행기 환경 확인"))
         ls.append(APPrepLine(id: "where", title: "따로 작업 트리 확인"))
         ls.append(APPrepLine(id: "prerun", title: "판정 미리 돌리기"))
+        ls.append(APPrepLine(id: "probe", title: "반대 탐침"))
+        ls.append(APPrepLine(id: "critic", title: "판정 비판 세션"))
         lines = ls
         for lid in linkURLs.keys.sorted(by: { $0.localizedStandardCompare($1) == .orderedAscending }) { readLink(lid) }
         let finishLater: @MainActor () -> Void = {
@@ -4086,7 +4136,7 @@ extension APRecords {
                     self.pickDefaultBases(self.project, self.settings)
                     if self.topicNew { self.promotion = apDefaultPromotion(self.repoInfo[rootNow]?.branches ?? []) }
                     self.writeTopic()
-                    self.seedBase { ok in if ok { self.runDraft() } }
+                    self.seedBase { ok in if ok { self.runMisses { self.runDraft() } } }   // 초안 세션 글에 이 프로젝트의 지난 판정 놓침 요약(⑪-3)
                 }
             }
         }
@@ -4225,7 +4275,7 @@ extension APRecords {
         estimates = calibrate()
         setLine("check", "run")
         writeDraft(units)
-        runStatus(prerun: true, ids: Set(units.map(\.id)))
+        runStatus(prerun: true, ids: Set(units.map(\.id)), critic: true)
     }
 
     // 초안 세션 카드(모호한 점, 객관식) → 출발 카드. 답은 answers.json 으로 엔진·모델에 간다(단위를 빼지는 않는다)
@@ -4312,6 +4362,9 @@ extension APRecords {
         if promotionEdited, !promotionProblems.isEmpty { l.append("바꾼 승격 차례에 고칠 것이 \(promotionProblems.count)개 있습니다") }
         if editingSet { l.append("자율주행 지시를 고치는 중입니다. 저장하거나 그만둔 뒤 출발합니다") }
         if topicReseeding { l.append("출발 전 자율주행 가지를 새 출발 가지에서 다시 만드는 중입니다") }
+        if case .offer(let k)? = fixNext, !fixPicked.isEmpty {
+            l.append("판정 고치기를 고른 카드 \(fixPicked.count)장이 있습니다. 출발 카드 상자의 '판정 고치기 \(k)차 돌리기'를 누르거나 답을 그대로·빼기로 바꿉니다")
+        }
         if !publishProblems.isEmpty { l.append("게시 방식의 받을 곳에 고칠 것이 \(publishProblems.count)개 있습니다") }
         if jira {
             if epic.isEmpty { l.append("에픽 번호를 넣어 주세요(출발 준비 1단계)") }
@@ -4377,6 +4430,7 @@ extension APRecords {
         apWriteJSON(dir + "/cards.json", cards.map(\.json))
         apWriteJSON(dir + "/answers.json", answers)
         if source == "topic", let why = writeTopicSet() { starting = false; startError = why; return }
+        if source != "topic", pendingSet != nil, let why = writeRevisedSet() { starting = false; startError = why; return }
         let src = dir, dst = autopilotRoot + "/runs/" + id, dev = apDevBuild, runId = id, topicRun = source == "topic"
         queue.async {
             var moved = src == dst
@@ -4461,6 +4515,253 @@ extension APRecords {
         }
         try? FileManager.default.createDirectory(atPath: autopilotRoot + "/projects", withIntermediateDirectories: true)
         if !apWriteJSON(path, o) { boardLog("자율주행: 프로젝트 설정을 쓰지 못했습니다 \(path)") }
+    }
+}
+
+// 판정 차이 칸 이름: check 판정 명령 · scenarios 시나리오 목록 · scenario:<파일> 그 시나리오 글
+func apJudgeFieldLabel(_ f: String) -> String {
+    f == "check" ? "판정 명령" : f == "scenarios" ? "시나리오 목록" : f.hasPrefix("scenario:") ? "시나리오 \(f.dropFirst(9)) 글" : f
+}
+
+// MARK: 5단계 ⑪-3 판정 비판 — 반대 탐침 줄·비판 세션·판정 고치기 차례(주제로 시작)·판정 놓침·세트 이어 쓰기(이어 가기).
+// 모두 앱 안 엔진(prerun·critic·draft --fix·misses·revise)을 백그라운드 한 줄에서 부르고 보드는 결과 파일을 읽어 줄·카드로 그린다(기록 저장소는 엔진만 씀)
+extension APStart {
+    // 판정 고치기 다음 차례(주제로 시작만, 규칙 apFixNext): 지금 확인된 지적(탐침 카드 + 비판 세션의 확인된 지적) 수로
+    var fixNext: APFixNext? {
+        guard source == "topic", !fixing, prepared else { return nil }
+        return apFixNext(roundsDone: fixRound, confirmedNow: probeCards.count + criticCards.filter { $0.kind == "critic" }.count)
+    }
+    // "판정 고치기"를 고른 확인된 지적(탐침·비판 세션)
+    var fixPicked: [APCard] { (probeCards + criticCards).filter { ["probe", "critic"].contains($0.kind) && answers[$0.id] == apFixCheck } }
+
+    nonisolated static func critCard(_ c: [String: Any], topic: Bool) -> APCard? {
+        guard let id = c["id"] as? String else { return nil }
+        let kind = c["kind"] as? String ?? ""
+        let label = ["probe": "반대 탐침 · 망친 결과물로도 통과", "critic": "판정 비판 · 확인된 지적", "critic_unverified": "판정 비판 · 확인 안 됨",
+                     "critic_reading": "판정 비판 · 해석 고르기", "fix_weak": "판정 고치기 · 약해진 고침"][kind] ?? "판정 비판"
+        let notes: [String: String] = [
+            apFixCheck: topic ? "작성 세션(초안)이 판정을 고치고 탐침·반례를 다시 돌립니다(출발 전, 최대 2번). 고치기 전에는 이 단위가 출발에서 빠집니다"
+                              : "이 단위는 이번 실행에서 빼고 판정 놓침으로 남겨 다음 출발에서 고칩니다",
+            "keep": kind == "critic_unverified" ? "실행으로 확인하지 못한 지적이라 판정은 그대로 둡니다" : "판정을 그대로 두고 단위에 넣습니다. 그 틀린 결과물도 통과할 수 있습니다",
+            "drop": "이번 실행에서 뺍니다",
+            "reject": "앞 판정 그대로 둡니다(판정을 약하게 하는 고침은 자동으로 들이지 않습니다)", "accept": "약해진 판정으로 바꿔 끼우고 탐침·반례를 다시 돌립니다"]
+        let opts = (c["options"] as? [[String: Any]] ?? []).map { o -> APOption in
+            let k = o["key"] as? String ?? ""
+            return APOption(key: k, label: o["label"] as? String ?? "", note: o["note"] as? String ?? notes[k] ?? "")
+        }
+        return APCard(id: id, kind: kind, label: label, title: c["title"] as? String ?? "", why: c["why"] as? String ?? "", options: opts,
+                      recommended: c["recommended"] as? String ?? "", unit: kind == "fix_weak" ? nil : c["unit_id"] as? String)
+    }
+
+    // 반대 탐침 줄과 카드(prerun.json 의 units[].probes·probe_cards)
+    func setProbeLine(_ pj: [String: Any]) {
+        let cs = (pj["probe_cards"] as? [[String: Any]] ?? []).compactMap { APStart.critCard($0, topic: source == "topic") }
+        probeCards = cs
+        if pj["probes"] as? Bool == false { setLine("probe", "skip", note: "반대 탐침을 끄고 돌렸습니다"); return }
+        var ran = 0, detail: [String] = []
+        for r in pj["units"] as? [[String: Any]] ?? [] {
+            guard let p = r["probes"] as? [String: Any] else { continue }
+            let t = r["title"] as? String ?? ""
+            if let n = p["note"] as? String { detail.append("\(t): \(n)"); continue }
+            let runs = p["runs"] as? [[String: Any]] ?? []
+            ran += runs.count
+            detail.append("\(t) · 대상 \((p["targets"] as? [String] ?? []).joined(separator: ", ")): " + runs.map { x -> String in
+                let n = (x["passed_steps"] as? [Any])?.count ?? 0
+                return "\(x["label"] as? String ?? "") " + ((x["note"] as? String).map { "(\($0))" } ?? (n == 0 ? "막힘" : "통과 \(n)곳"))
+            }.joined(separator: " · ") + " · 증거 \(p["evidence"] as? String ?? "")")
+        }
+        let hist = (pj["probe_history"] as? [Any])?.count ?? 0
+        let note = ran == 0 ? "망친 결과물을 넣을 판정이 없습니다" : cs.isEmpty ? "망친 결과물 \(ran)개를 판정이 모두 막았습니다"
+            : "판정 \(cs.count)곳이 망친 결과물로도 통과합니다(출발 카드로, 판정 고치기 추천)"
+        setLine("probe", ran == 0 ? "skip" : cs.isEmpty ? "done" : "warn",
+                note: note + (hist > 0 ? " · 판정 고치기 \(hist)차 뒤" : "") + " · 모델 0 · 버리는 작업 트리에서(저장소에는 쓰지 않음)", detail: detail)
+    }
+
+    // 판정 비판 세션(엔진 critic) — 작성 세션과 다른 모델, 결과는 critic.json 의 마지막 차례
+    func runCritic(_ d: String) {
+        let dev = apDevBuild, devClaude = APTopic.devClaudeArgs, round = critRound
+        let author = settings["model"] as? String ?? apDraftModel
+        setLine("critic", "run", note: "작성 모델 \(author) 와 다른 모델 \(apCriticModel(author: author)) 로 단위 글·수용 기준·판정·근거 묶음만 읽습니다(읽기 도구만 · 결과 자리만 씀 · Bash·웹·MCP 없음)")
+        queue.async {
+            let r = apEngine(["critic", d, "--round", "\(round)"] + (dev ? ["--dev"] + devClaude : []))
+            let o = (try? JSONSerialization.jsonObject(with: Data(r.out.utf8))) as? [String: Any] ?? [:]
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard self.dir == d else { return }
+                    self.criticSummary = o
+                    self.criticCards = (o["cards"] as? [[String: Any]] ?? []).compactMap { APStart.critCard($0, topic: self.source == "topic") }
+                    let c = o["counts"] as? [String: Any] ?? [:]
+                    func n(_ k: String) -> Int { (c[k] as? NSNumber)?.intValue ?? 0 }
+                    if o["ok"] as? Bool != true {
+                        self.setLine("critic", "warn", note: "비판 세션이 끝나지 않았습니다: \(o["note"] as? String ?? apShort(r.out, 200)). 출발은 막지 않습니다",
+                                     detail: apStrings(o["problems"]))
+                    } else {
+                        let res = o["results"] as? [[String: Any]] ?? []
+                        let label = ["confirmed": "확인된 지적(판정을 통과함)", "refuted": "판정이 반례를 막음", "unverified": "확인 안 됨", "reading": "해석이 갈림"]
+                        var detail = res.map { x in
+                            "\(x["unit"] as? String ?? "") · \((x["judge"] as? String).map { $0 == "check" ? "판정 명령" : $0 } ?? "판정"): \(label[x["verdict"] as? String ?? ""] ?? "") · \(x["why"] as? String ?? "")"
+                                + ((x["note"] as? String).map { " (\($0))" } ?? "")
+                        }
+                        detail += apStrings(o["skipped"]) + apStrings(o["problems"]).map { "결과 꼴: " + $0 }
+                        detail.append("모델 \(o["model"] as? String ?? "?")(작성 \(o["author_model"] as? String ?? "?"))" + ((o["model_note"] as? String).map { " · " + $0 } ?? "")
+                                      + " · 도구 " + apStrings(o["tools"]).joined(separator: ",") + " · 증거 \(o["evidence"] as? String ?? "")")
+                        let same = o["repo_same"] as? Bool == true
+                        self.setLine("critic", n("confirmed") > 0 ? "warn" : "done",
+                                     note: "모델 \(o["model"] as? String ?? "?")(작성 \(o["author_model"] as? String ?? "?")) · 지적 \(res.count): 확인 \(n("confirmed")) · 확인 안 됨 \(n("unverified")) · 해석 \(n("reading")) · 판정이 막음 \(n("refuted"))"
+                                        + (same ? " · 저장소·하네스 그대로" : " · 저장소·하네스가 앞뒤로 다릅니다"),
+                                     detail: detail)
+                    }
+                    self.fixing = false
+                    self.finishCheck()
+                }
+            }
+        }
+    }
+
+    // 판정 놓침(엔진 misses → misses.json) — 열린 것이 있으면 다음 세션(초안·비판·세트 이어 쓰기)에 근거로 넘긴다
+    func runMisses(_ then: @escaping @MainActor () -> Void) {
+        let d = dir, dev = apDevBuild
+        setLine("misses", "run")
+        queue.async {
+            let r = apEngine(["misses", d] + (dev ? ["--dev"] : []))
+            let o = (try? JSONSerialization.jsonObject(with: Data(r.out.utf8))) as? [String: Any] ?? [:]
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard self.dir == d else { return }
+                    self.missInfo = o
+                    let open = (o["open"] as? NSNumber)?.intValue ?? 0, oj = (o["open_judge"] as? NSNumber)?.intValue ?? 0
+                    let rows = o["rows"] as? [[String: Any]] ?? []
+                    if r.code != 0, o.isEmpty {
+                        self.setLine("misses", "warn", note: "판정 놓침을 읽지 못했습니다: \(apShort(r.out, 200))")
+                    } else {
+                        self.setLine("misses", open > 0 ? "warn" : "done",
+                                     note: open > 0 ? "열린 판정 놓침 \(open)건(판정 쪽 \(oj) · 지시 쪽 \(open - oj)) · 다음 세션에 근거로 넘깁니다"
+                                                    : (o["project"] is String ? "열린 판정 놓침이 없습니다" : "이 프로젝트의 기록이 아직 없습니다"),
+                                     detail: rows.map { "[\($0["label"] as? String ?? "")] \($0["title"] as? String ?? "") · \($0["why"] as? String ?? "")" })
+                        self.missesUsed = open > 0 ? rows.compactMap { $0["id"] as? String } : []
+                    }
+                    then()
+                }
+            }
+        }
+    }
+
+    // 세트 이어 쓰기(이어 가기, 규칙 apSetRewrite): 하네스 그대로·새 요구 없음·판정 놓침 없음이면 그대로(모델 0), 판정 놓침이 있으면 엔진 revise
+    func runRevise(_ then: @escaping @MainActor () -> Void) {
+        let open = (missInfo["open"] as? NSNumber)?.intValue ?? 0
+        let need = apSetRewrite(harnessChanged: false, newRequest: false, openMisses: open)
+        guard need.rewrite else { setLine("revise", "done", note: "하네스 그대로 · 새 요구 없음 · 판정 놓침 없음: 지난 세트를 그대로 씁니다(모델 0)"); then(); return }
+        let d = dir, dev = apDevBuild, devClaude = APTopic.devClaudeArgs
+        setLine("revise", "run", note: need.reasons.joined(separator: " · ") + ": 지난 판정·놓친 기록·지난 지시만 읽고 고친 초안을 씁니다(모델 \(model), 읽기 도구만, 저장소·하네스는 읽지 않음)")
+        queue.async {
+            let r = apEngine(["revise", d] + (dev ? ["--dev"] + devClaude : []))
+            let o = (try? JSONSerialization.jsonObject(with: Data(r.out.utf8))) as? [String: Any] ?? [:]
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard self.dir == d else { return }
+                    guard o["ok"] as? Bool == true else {
+                        self.setLine("revise", "warn", note: "세트 이어 쓰기가 끝나지 않았거나 검사에 걸려 지난 세트를 그대로 씁니다",
+                                     detail: apStrings(o["problems"]).isEmpty ? [apShort(r.out, 300)] : apStrings(o["problems"]))
+                        then(); return
+                    }
+                    let changes = o["changes"] as? [[String: Any]] ?? []
+                    for c in changes where c["field"] as? String == "check" {
+                        guard let uid = c["unit"] as? String, let i = self.units.firstIndex(where: { $0.id == uid }), let nc = c["new"] as? String,
+                              var def = (try? JSONSerialization.jsonObject(with: self.units[i].def)) as? [String: Any] else { continue }
+                        def["check"] = nc
+                        self.units[i].check = nc
+                        self.units[i].def = (try? JSONSerialization.data(withJSONObject: def, options: [.sortedKeys])) ?? self.units[i].def
+                    }
+                    self.judgeChanges = changes; self.judgeChangeFrom = "revise"
+                    if let ins = o["instruction"] as? String, !ins.isEmpty { self.pendingSet = ins; self.setText = ins; self.setAt = Date().timeIntervalSince1970 }
+                    self.setLine("revise", "done", note: "판정 명령 \(changes.count)곳을 고쳤습니다" + (self.pendingSet != nil ? " · 지시도 고침" : "")
+                                    + " · 출발 확인에서 지난 판과의 차이로 보입니다(출발할 때 세트에 씀)",
+                                 detail: changes.map { "\($0["title"] as? String ?? ""): \($0["old"] as? String ?? "") → \($0["new"] as? String ?? "")" }
+                                    + ["모델 \(o["model"] as? String ?? "?") · " + String(format: "%.0f초", (o["sec"] as? NSNumber)?.doubleValue ?? 0)])
+                    then()
+                }
+            }
+        }
+    }
+
+    // 판정 고치기(주제로 시작) — 고른 지적을 엔진 draft --fix 로 작성 세션(초안)에 넘기고, 고친 판정이면 시나리오 다시 커밋 → 확인·미리 돌리기·탐침·비판 세션.
+    // 약해졌으면 받지 않고 카드(받지 않기 추천)
+    func runFix() {
+        guard source == "topic", case .offer(let k)? = fixNext, !fixPicked.isEmpty, !preparing, !starting else { return }
+        let ids = fixPicked.map(\.id).joined(separator: ","), picked = fixPicked.count
+        let d = dir, dev = apDevBuild, devClaude = APTopic.devClaudeArgs
+        fixing = true; preparing = true; prepared = false; step = 2
+        if !lines.contains(where: { $0.id == "fix" }), let i = lines.firstIndex(where: { $0.id == "scenarios" }) { lines.insert(APPrepLine(id: "fix", title: "판정 고치기"), at: i) }
+        for l in ["scenarios", "check", "env", "where", "prerun", "probe", "critic"] { setLine(l, "wait", note: "") }
+        setLine("fix", "run", note: "\(k)차: 작성 세션(초안, 모델 \(model))이 고른 지적 \(picked)건을 막도록 판정을 고칩니다(읽기 도구만)")
+        let before = draftResult["units"] as? [[String: Any]] ?? []
+        queue.async {
+            let r = apEngine(["draft", d, "--fix", "\(k)", "--cards", ids] + (dev ? ["--dev"] + devClaude : []))
+            let o = (try? JSONSerialization.jsonObject(with: Data(r.out.utf8))) as? [String: Any] ?? [:]
+            DispatchQueue.main.async { MainActor.assumeIsolated { guard self.dir == d else { return }; self.afterFix(o, round: k, before: before, raw: r.out) } }
+        }
+    }
+    func acceptFix() {
+        guard source == "topic", let w = weakCard, !preparing, !starting else { return }
+        let k = Int(w.id.split(separator: "-").last ?? "") ?? fixRound
+        let d = dir, dev = apDevBuild
+        fixing = true; preparing = true; prepared = false; step = 2
+        setLine("fix", "run", note: "\(k)차: 사람이 약해진 고침을 받았습니다. 바꿔 끼웁니다(모델 0)")
+        let before = draftResult["units"] as? [[String: Any]] ?? []
+        queue.async {
+            let r = apEngine(["draft", d, "--accept-fix", "\(k)"] + (dev ? ["--dev"] : []))
+            let o = (try? JSONSerialization.jsonObject(with: Data(r.out.utf8))) as? [String: Any] ?? [:]
+            DispatchQueue.main.async { MainActor.assumeIsolated { guard self.dir == d else { return }; self.weakCard = nil; self.afterFix(o, round: k, before: before, raw: r.out) } }
+        }
+    }
+    private func afterFix(_ o: [String: Any], round k: Int, before: [[String: Any]], raw: String) {
+        fixRound = max(fixRound, k)
+        if let wc = o["weak_card"] as? [String: Any] {
+            weakCard = APStart.critCard(wc, topic: true)
+            setLine("fix", "warn", note: "\(k)차: 판정이 약해져 자동으로 들이지 않았습니다(출발 카드: 받지 않기 추천) · 앞 판정 그대로", detail: apStrings(o["weak"]))
+            for l in ["scenarios", "check", "env", "where", "prerun", "probe", "critic"] { setLine(l, "skip", note: "앞 판정 그대로라 다시 돌리지 않았습니다") }
+            fixing = false; preparing = false; prepared = true; buildCards(); return
+        }
+        guard o["ok"] as? Bool == true else {
+            setLine("fix", "fail", note: "\(k)차: " + (o["note"] as? String ?? apShort(raw, 200)) + " · 앞 판정 그대로", detail: apStrings(o["problems"]))
+            for l in ["scenarios", "check", "env", "where", "prerun", "probe", "critic"] { setLine(l, "skip", note: "앞 판정 그대로라 다시 돌리지 않았습니다") }
+            fixing = false; preparing = false; prepared = true; buildCards(); return
+        }
+        draftResult = o
+        let cards = o["cards"] as? [[String: Any]] ?? []
+        draftCards = cards.filter { $0["criterion"] == nil }.compactMap(APStart.draftCard)
+        harnessCards = (o["harness_missing"] as? [[String: Any]] ?? []).compactMap(APStart.harnessCard)
+        let after = o["units"] as? [[String: Any]] ?? []
+        let ch = apJudgeChanges(old: before, new: after)
+        judgeChanges = ch.map { ["unit": $0.unit, "title": $0.title, "field": $0.field, "old": $0.old, "new": $0.new] } + (o["scenario_changes"] as? [[String: Any]] ?? [])
+        judgeChangeFrom = "fix"
+        let items = o["fix_items"] as? [[String: Any]] ?? []
+        let weakTaken = apStrings(o["accepted_weak"])
+        setLine("fix", weakTaken.isEmpty ? "done" : "warn",
+                note: "\(k)차: " + (weakTaken.isEmpty ? "고친 판정을 받았습니다(판정 \(judgeChanges.count)곳 바뀜 · 약해지지 않음)"
+                                                    : "사람이 약해진 고침을 받았습니다(판정 \(judgeChanges.count)곳 바뀜 · \(weakTaken.first ?? "")\(weakTaken.count > 1 ? " 외 \(weakTaken.count - 1)" : ""))")
+                    + " · 시나리오 다시 커밋 → 탐침·반례를 다시 돌립니다",
+                detail: items.map { "\($0["unit"] as? String ?? "") · \(($0["judge"] as? String).map { $0 == "check" ? "판정 명령" : $0 } ?? "판정"): \($0["why"] as? String ?? "")" }
+                    + judgeChanges.map { "\($0["title"] as? String ?? "") \(apJudgeFieldLabel($0["field"] as? String ?? "")): \($0["old"] as? String ?? "") → \($0["new"] as? String ?? "")" })
+        critRound = k; keepHistory = true
+        seedScenarios { ok in if ok { self.topicCheck() } else { self.fixing = false } }
+    }
+
+    // 세트 이어 쓰기가 고친 지시를 출발할 때 세트에(이어 가기, 고치기 전 글은 set-backup/). 못 쓰면 까닭
+    func writeRevisedSet() -> String? {
+        guard let p = project, let t = pendingSet else { return nil }
+        let fm = FileManager.default
+        let dirSet = autopilotRoot + "/private/projects/\(p)/set", bdir = autopilotRoot + "/private/projects/\(p)/set-backup"
+        try? fm.createDirectory(atPath: dirSet, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let path = dirSet + "/autopilot.md", data = Data((t + "\n").utf8)
+        if let old = fm.contents(atPath: path), old != data {
+            try? fm.createDirectory(atPath: bdir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            let stamp = formatter("yyyyMMdd-HHmmss").string(from: Date())
+            guard fm.createFile(atPath: bdir + "/autopilot-\(stamp).md", contents: old, attributes: [.posixPermissions: 0o600]) else { return "고치기 전 지시를 남기지 못해 출발하지 않았습니다" }
+        }
+        let tmp = path + ".tmp-\(getpid())"
+        guard fm.createFile(atPath: tmp, contents: data, attributes: [.posixPermissions: 0o600]), rename(tmp, path) == 0 else { unlink(tmp); return "세트 지시를 쓰지 못해 출발하지 않았습니다" }
+        return nil
     }
 }
 
@@ -5192,7 +5493,10 @@ struct APConfirm: View {
                 }
             }
         }
-        .onAppear { if s.source == "topic" { open.insert("set"); open.insert("checks") } }   // 주제로 시작: 초안 지시와 판정을 펼친 채로(⑪-2 보안 검토)
+        .onAppear {
+            if s.source == "topic" { open.insert("set"); open.insert("checks") }
+            if !s.judgeChanges.isEmpty { open.insert("set"); open.insert("judgediff") }   // 판정 차이(⑪-3)는 펼친 채로
+        }   // 주제로 시작: 초안 지시와 판정을 펼친 채로(⑪-2 보안 검토)
         .onChange(of: s.flash) { _, _ in
             hl = true
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) { withAnimation(.easeOut(duration: 0.6)) { hl = false } }
@@ -5378,6 +5682,7 @@ struct APConfirm: View {
     private var cardsBox: some View {
         let left = s.cards.filter { s.answers[$0.id] == nil }.count
         return APBox(title: "출발 카드 \(s.cards.count)장", note: "객관식, 추천안 표시", axid: "ap-cards") {
+            critiqueRow
             if s.cards.isEmpty {
                 apNote("이번 출발에는 사람이 정할 카드가 없습니다")
             } else {
@@ -5403,6 +5708,41 @@ struct APConfirm: View {
                     }
                 }
             }
+        }
+    }
+
+    // 판정 비판(⑪-3): 반대 탐침·비판 세션 요약과 판정 고치기 차례(주제로 시작만 작성 세션이 고침, 최대 2번, 확인된 지적이 없으면 멈춤)
+    @ViewBuilder private var critiqueRow: some View {
+        let probes = s.probeCards.count, conf = s.criticCards.filter { $0.kind == "critic" }.count
+        let unv = s.criticCards.filter { $0.kind == "critic_unverified" }.count, rd = s.criticCards.filter { $0.kind == "critic_reading" }.count
+        let cs = s.criticSummary
+        if !s.lines.filter({ ["probe", "critic"].contains($0.id) }).isEmpty {
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    APChip(text: "판정 비판", color: probes + conf > 0 ? APColor.limit : APColor.ok, strong: true)
+                    apNote("반대 탐침 \(probes)곳 · 비판 세션 확인 \(conf) · 확인 안 됨 \(unv) · 해석 \(rd)"
+                           + ((cs["model"] as? String).map { " · 비판 모델 \($0)(작성 \(cs["author_model"] as? String ?? "?"))" } ?? ""))
+                }
+                .accessibilityElement(children: .combine).accessibilityIdentifier("ap-critique-sum")
+                if s.source == "topic" {
+                    switch s.fixNext {
+                    case .offer(let k)?:
+                        HStack(spacing: 6) {
+                            APButton(title: "판정 고치기 \(k)차 돌리기" + (s.fixPicked.isEmpty ? "" : " (\(s.fixPicked.count)건)"), enabled: !s.fixPicked.isEmpty && !s.starting,
+                                     help: "판정 고치기를 고른 확인된 지적을 작성 세션(초안)에 넘겨 판정을 고치고 탐침·반례를 다시 돌립니다(최대 2번)", axid: "ap-fix-run") { s.runFix() }
+                            apNote(s.fixPicked.isEmpty ? "확인된 지적 카드에서 판정 고치기를 고르면 작성 세션이 고칩니다(\(k)차 · 최대 \(apFixRoundMax)번)" : "고른 지적을 막도록 고칩니다. 판정을 약하게 하는 고침은 자동으로 들이지 않습니다")
+                        }
+                    case .stop(let why)?:
+                        apNote(why + (s.fixRound > 0 ? " (판정 고치기 \(s.fixRound)번 함)" : ""), s.fixRound > 0 ? APColor.ok : Color.secondary)
+                            .accessibilityIdentifier("ap-fix-stop")
+                    case nil:
+                        if s.fixing { APChip(text: "판정을 고치는 중", color: APColor.work, strong: true) }
+                    }
+                } else if probes + conf > 0 {
+                    apNote("이어 가기에는 판정을 고칠 작성 세션이 없어, 판정 고치기는 그 단위를 이번 실행에서 빼고 판정 놓침으로 남겨 다음 출발에서 고칩니다")
+                }
+            }
+            .padding(.bottom, 4)
         }
     }
 
@@ -5677,6 +6017,23 @@ struct APConfirm: View {
                     }
                 }
                 apNote("판정은 샌드박스 안에서 돕니다. 쓰기는 작업 폴더·쓰기 범위·증거 폴더만, 네트워크는 실행의 localhost 설정과 단위 check_ports 만 엽니다.")
+            }
+            // 판정 차이(⑪-3): 세트 이어 쓰기(판정 놓침이 있어 다시 씀) 또는 판정 고치기로 바뀐 판정. 하네스가 그대로여도 보인다
+            if !s.judgeChanges.isEmpty {
+                APFold(title: "판정 차이 \(s.judgeChanges.count)곳",
+                       summary: s.judgeChangeFrom == "revise" ? "세트 이어 쓰기 · 판정 놓침 \((s.missInfo["open"] as? NSNumber)?.intValue ?? 0)건이 있어 다시 씀(하네스 그대로)"
+                                                              : "판정 고치기 \(s.fixRound)차 · 지난 초안과 견줌",
+                       axid: "ap-fold-judge-diff", open: bind("judgediff")) {
+                    ForEach(Array(s.judgeChanges.enumerated()), id: \.offset) { _, c in
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("\(c["title"] as? String ?? "") · \(apJudgeFieldLabel(c["field"] as? String ?? ""))").boardFont(10.5, weight: .semibold)
+                            Text("− " + (c["old"] as? String ?? "")).boardFont(10.5, design: .monospaced).foregroundStyle(APColor.fail).fixedSize(horizontal: false, vertical: true)
+                            Text("+ " + (c["new"] as? String ?? "")).boardFont(10.5, design: .monospaced).foregroundStyle(APColor.ok).fixedSize(horizontal: false, vertical: true)
+                            if let w = c["why"] as? String, !w.isEmpty { apNote(w) }
+                        }
+                        .accessibilityElement(children: .combine).accessibilityIdentifier("ap-judge-diff-\(c["unit"] as? String ?? "")")
+                    }
+                }
             }
             apNote("하네스 지문: 출발 때 엔진이 하네스 사본과 지문을 남기고, 끝나면 같은지 확인합니다. 저장소 하네스는 고치지 않습니다.")
             if s.source == "topic" {
