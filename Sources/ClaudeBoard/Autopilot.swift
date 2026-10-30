@@ -2725,7 +2725,13 @@ extension APRecords {
     @Published private(set) var baseNote = ""
     @Published private(set) var promotion: [APStep] = []
     @Published private(set) var promotionSaved = false
-    @Published var epic = ""
+    @Published var epic = "" { didSet { if epic != oldValue { refreshEpic() } } }
+    // 4단계 ⑩-2 — 에픽 칸의 제목·상태(앱 안 엔진 read epic, 연결이 없으면 번호 꼴만), 주제로 시작의 링크 읽기 줄
+    @Published private(set) var epicInfo: APEpicSeen?
+    private var epicWork: DispatchWorkItem?
+    private var topicOtherDone = false
+    private(set) var topicBundle = ""
+    private var linkURLs: [String: String] = [:]     // 준비 줄 id(link-<n>) → 주소
     @Published var stories: [APStory] = []
     @Published private(set) var estimates: [String: APEstimate] = [:]
     @Published private(set) var starting = false
@@ -2868,6 +2874,7 @@ extension APRecords {
     }
 
     private func present() {
+        APConnections.shared.loadOnce()   // 자료 링크 줄·만들 티켓 나무의 읽기 상태(4단계 ⑩-2)가 연결 목록·키체인 있음 여부를 본다
         guard window != nil, window.attachedSheet == nil else { return }
         let size = sheetSize()
         let w = NSWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: [.titled, .resizable], backing: .buffered, defer: false)
@@ -2908,6 +2915,7 @@ extension APRecords {
         problems = []; mode = ""; modeReason = ""; repos = []; repoInfo = [:]; storyBranch = [:]; prerunPassed = []; prerunIds = []; prerunNote = ""
         cards = []; answers = [:]; policyLoaded = []; bases = [:]; baseNote = ""; promotion = []; promotionSaved = false
         epic = ""; stories = []; estimates = [:]; starting = false; startError = nil; changedBy = nil; leftBranches = []
+        epicInfo = nil; topicOtherDone = false; topicBundle = ""; linkURLs = [:]
         id = ""; dir = ""; settings = [:]; tickets = [:]; needNewId = false; proposedOnce = false
         settingsFrom = "past"; settingsEdited = false; settingsProblems = []; promotionEdited = false; promotionBefore = []
         lastSet = nil; editingSet = false; setDraft = ""; setNote = nil; openParked = []; includeParked = []
@@ -3002,6 +3010,7 @@ extension APRecords {
         carryPark = carried.filter { $0.kind == "next_start" && !["decide", "close"].contains(later.answered[$0.id] ?? "") }
         carryNew = carried.filter { $0.kind == "new_work" }
         jira = !tickets.isEmpty || units.contains { $0.story != nil }
+        refreshEpic()   // 에픽 칸은 jira 가 정해진 뒤에 읽는다(위에서 epic 을 채울 때는 아직 jira 가 앞 값이라 건너뜀)
         var seen = Set<String>()
         for u in units { if let s = u.story, seen.insert(s).inserted { stories.append(APStory(id: s, key: s, kind: u.kind)) } }
         let setPath = autopilotRoot + "/private/projects/\(proj)/set/autopilot.md"
@@ -3615,9 +3624,23 @@ extension APRecords {
         let t = topic
         let new = t.pathMode == "new"
         var ls: [APPrepLine] = []
-        ls.append(APPrepLine(id: "links", title: "링크 읽기", state: "skip",
-                             note: t.links.isEmpty ? "자료 링크가 없습니다" : "\(t.links.count)개 · 바깥 연결(4단계) 뒤에 메타 정보만 읽습니다. 지금은 읽지 않습니다(연결 필요)",
-                             detail: t.links.map { "\($0.kind) · \($0.url) · \($0.state == "unreadable" ? "읽을 수 없음: " : "연결 필요: ")\($0.why)" }))
+        // 링크 읽기(4단계 ⑩-2) — 링크마다 한 줄, 앱 안 엔진(read)이 차례로 읽어 근거 묶음(drafts/<준비>/context/links/)에 메타 형식으로 넣는다.
+        // 못 읽은 줄은 실패로 서고 이유와 "다시 읽기 / 이 링크 빼고 계속"(사람이 고를 때까지 준비가 끝나지 않는다, 와이어프레임 출발 준비 ⑭)
+        topicOtherDone = false
+        linkURLs = [:]
+        if t.links.isEmpty {
+            ls.append(APPrepLine(id: "links", title: "링크 읽기", state: "skip", note: "자료 링크가 없습니다"))
+        } else {
+            let stamp = formatter("yyyyMMdd-HHmmss").string(from: Date())
+            topicBundle = apDraftsRoot + "/\(stamp)-" + String((t.projectName ?? "topic").map { $0.isLetter || $0.isNumber || "._-".contains($0) ? $0 : "-" }).prefix(40) + "/context/links"
+            try? FileManager.default.createDirectory(atPath: topicBundle, withIntermediateDirectories: true)
+            for (i, l) in t.links.enumerated() {
+                let v = t.linkView(l)
+                let lid = "link-\(i + 1)"
+                linkURLs[lid] = l.url
+                ls.append(APPrepLine(id: lid, title: "링크 읽기 · \(v.kind) \(apShortURL(l.url))", state: "wait"))
+            }
+        }
         if new || !t.locked {
             ls.append(APPrepLine(id: "versions", title: "버전 목록 받기", state: t.catalog == nil ? "wait" : "done", sec: 0,
                                  note: t.catalog == nil ? "" : t.catalogLabel + " · " + Set(APFeed.allCases.map(\.label)).sorted().joined(separator: " · ")))
@@ -3644,10 +3667,10 @@ extension APRecords {
         lines = ls
         project = t.projectName
         root = t.root
+        for lid in linkURLs.keys.sorted(by: { $0.localizedStandardCompare($1) == .orderedAscending }) { readLink(lid) }
         let finishLater: @MainActor () -> Void = {
-            self.preparing = false
-            self.prepared = true
-            if !self.shown { TerminalHub.shared.toast("자율주행 출발 준비(주제로 시작)가 끝났습니다. 초안 세션(5단계) 전이라 여기서 멈춥니다") }
+            self.topicOtherDone = true
+            self.checkTopicDone()
         }
         // 버전 목록이 아직이면 받은 뒤 그 줄을 채우고 끝낸다(새 폴더·감지에 실패한 기존 저장소)
         let afterFolder: @MainActor () -> Void = {
@@ -3674,6 +3697,91 @@ extension APRecords {
         }
     }
 
+    // 링크 하나 읽기 — 연결이 없거나 읽을 수 없는 주소는 요청 없이 실패 줄. 읽은 것은 엔진이 근거 묶음에 넣고(형식 검사·비밀 가리기를 지난 것만) 그 요약을 줄에 보인다
+    func readLink(_ lid: String) {
+        guard let url = linkURLs[lid], !topicBundle.isEmpty else { return }
+        let t = topic
+        let v = t.linkView(APLink(url: url, kind: "", state: "", why: ""))
+        if v.state == "unreadable" || v.state == "needs_connection" {
+            setLine(lid, "fail", note: "읽을 수 없음: \(v.why) (요청 0)", detail: [])
+            checkTopicDone(); return
+        }
+        setLine(lid, "wait", note: "", detail: [])
+        var args = ["read", topicBundle, "--json"] + (root.isEmpty ? [] : ["--cwd", root]) + (apDevBuild ? ["--dev"] : [])
+        if v.state == "mcp", let m = t.linkMCP[url] { args += ["--mcp", m] + APTopic.devMCPArgs + APTopic.devClaudeArgs }
+        args.append(url)
+        let server = t.linkMCP[url].flatMap { m in t.servers.first { $0.name == m } }
+        queue.async {
+            DispatchQueue.main.async { MainActor.assumeIsolated { if self.linkURLs[lid] == url { self.setLine(lid, "run") } } }
+            let r = apEngine(args)
+            let d = ((try? JSONSerialization.jsonObject(with: Data(r.out.utf8))) as? [[String: Any]])?.first ?? [:]
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard self.source == "topic", self.linkURLs[lid] == url else { return }
+                    let note = apDocText(d["note"] as? String ?? (r.out.isEmpty ? "엔진이 답하지 않았습니다(\(r.code))" : r.out), 300)
+                    var detail: [String] = []
+                    let req = (d["requests"] as? NSNumber)?.intValue ?? 0
+                    if d["via"] as? String == "mcp", let sv = server { detail.append("MCP 서버 \(sv.name)(\(sv.scope)) · \(sv.allow)") }
+                    if d["ok"] as? Bool == true {
+                        detail.append("근거 묶음 \(d["file"] as? String ?? "")" + ((d["image"] as? String).map { " · 그림 \($0)" } ?? ""))
+                        detail.append((d["via"] as? String == "mcp" ? "MCP 읽기 세션" + ((d["cost_usd"] as? NSNumber).map { String(format: " · %.3f USD", $0.doubleValue) } ?? "")
+                                       : "요청 \(req)건") + " · 가린 비밀 \((d["redacted"] as? NSNumber)?.intValue ?? 0)개")
+                        if let im = d["image_note"] as? String { detail.append(apDocText(im, 200)) }
+                        self.setLine(lid, "done", note: "'\(apDocText(d["title"] as? String ?? "", 80))' · \(apDocText(d["summary"] as? String ?? "", 120))", detail: detail)
+                    } else {
+                        if req > 0 { detail.append("요청 \(req)건") }
+                        self.setLine(lid, "fail", note: note, detail: detail)
+                    }
+                    self.checkTopicDone()
+                }
+            }
+        }
+    }
+    func retryLink(_ lid: String) { readLink(lid) }
+    func skipLink(_ lid: String) {
+        setLine(lid, "skip", note: "이 링크를 빼고 계속합니다(근거 묶음에 넣지 않습니다)")
+        checkTopicDone()
+    }
+    var linkUndecided: Bool { lines.contains { $0.id.hasPrefix("link-") && $0.state == "fail" } }
+    // 주제로 시작 준비가 다 끝났나 — 다른 줄이 끝나고, 링크 줄이 모두 끝·뺌이면(실패한 링크는 사람이 다시 읽기나 빼고 계속을 골라야)
+    private func checkTopicDone() {
+        guard source == "topic" else { return }
+        let pending = lines.contains { $0.id.hasPrefix("link-") && ["wait", "run", "fail"].contains($0.state) }
+        if let i = lines.firstIndex(where: { $0.id == "draft" }) {
+            lines[i].note = pending && !lines.filter({ $0.id.hasPrefix("link-") }).isEmpty
+                ? "링크 읽기를 정하면 시작합니다(못 읽은 링크는 다시 읽거나 빼고 계속). 명세·단위를 쓰는 초안 세션은 5단계에서 엽니다"
+                : "명세·단위·판정 시나리오·출발 카드·지시 초안을 쓰는 초안 세션은 5단계에서 엽니다. 그때까지 주제로 시작은 여기서 멈춥니다" + (topicBundle.isEmpty ? "" : ". 근거 묶음: \(apHome(topicBundle))")
+        }
+        guard topicOtherDone, !pending, preparing else { return }
+        preparing = false
+        prepared = true
+        if !shown { TerminalHub.shared.toast("자율주행 출발 준비(주제로 시작)가 끝났습니다. 초안 세션(5단계) 전이라 여기서 멈춥니다") }
+    }
+
+    // 에픽 칸 — 번호 꼴이 맞고 Jira 연결 프로젝트면 0.5초 뒤 앱 안 엔진이 제목·상태를 읽는다(연결이 없으면 요청 0, 번호 꼴만)
+    func refreshEpic() {
+        epicWork?.cancel()
+        let k = epic.trimmingCharacters(in: .whitespaces)
+        guard jira, k.range(of: "^[A-Z][A-Z0-9_]*-[0-9]+$", options: .regularExpression) != nil else { epicInfo = nil; return }
+        if epicInfo?.key == k, epicInfo?.loading == false { return }
+        epicInfo = APEpicSeen(key: k, loading: true)
+        let dev = apDevBuild
+        let w = DispatchWorkItem {
+            let r = apEngine(["read", "epic", k] + (dev ? ["--dev"] : []))
+            let o = (try? JSONSerialization.jsonObject(with: Data(r.out.utf8))) as? [String: Any] ?? [:]
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard self.epic.trimmingCharacters(in: .whitespaces) == k else { return }
+                    self.epicInfo = APEpicSeen(key: k, read: o["read"] as? Bool ?? false, found: o["found"] as? Bool ?? false, isEpic: o["epic"] as? Bool ?? false,
+                                               title: apDocText(o["title"] as? String ?? "", 200), status: apDocText(o["status"] as? String ?? "", 80),
+                                               note: apDocText(o["note"] as? String ?? r.out, 300), loading: false)
+                }
+            }
+        }
+        epicWork = w
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.5, execute: w)
+    }
+
     // 출발을 막는 까닭(모두 풀려야 출발 단추가 풀린다)
     var locks: [String] {
         var l: [String] = []
@@ -3690,6 +3798,7 @@ extension APRecords {
         if jira {
             if epic.isEmpty { l.append("에픽 번호를 넣어 주세요(출발 준비 1단계)") }
             else if epic.range(of: "^[A-Z][A-Z0-9_]*-[0-9]+$", options: .regularExpression) == nil { l.append("에픽 번호 꼴이 아닙니다(예: SHOP-10)") }
+            else if let e = epicInfo, e.key == epic, e.read, !(e.found && e.isEpic) { l.append(e.found ? "에픽이 아닌 번호입니다: \(e.note)" : "없는 에픽 번호입니다(\(e.key))") }
             let t = ticketsToMake
             if t.stories + t.tasks + t.moved > 0 {
                 l.append("만들거나 고칠 티켓이 \(t.stories + t.tasks + t.moved)건 있습니다. 티켓 만들기는 Jira 연결(4단계)과 함께 만듭니다. 지금은 이미 있는 티켓의 단위만 출발합니다")
@@ -3968,7 +4077,8 @@ struct APStartFoot: View {
             if s.source == "topic" { apNote(tp.blocker ?? "원천은 하나만 고릅니다", tp.blocker == nil ? .secondary : APColor.limit) }
             else { apNote(s.hasDraft ? "원천은 하나만 고릅니다" : (s.past.isEmpty ? "이어 갈 지난 실행이 아직 없습니다. 주제로 시작을 고를 수 있습니다" : "원천을 하나 고릅니다")) }
         case 2:
-            if s.preparing { apNote("준비하는 중입니다. 끝나면 다음으로 갈 수 있습니다. 시트를 닫아도 뒤에서 이어 갑니다") }
+            if s.preparing, s.linkUndecided { apNote("못 읽은 링크가 있습니다. 줄마다 다시 읽거나 이 링크를 빼고 계속합니다", APColor.limit) }
+            else if s.preparing { apNote("준비하는 중입니다. 끝나면 다음으로 갈 수 있습니다. 시트를 닫아도 뒤에서 이어 갑니다") }
             else if s.source == "topic" { apNote("주제로 시작은 초안 세션(5단계)을 만들 때까지 여기서 멈춥니다. 단위 제안과 출발 확인은 초안 세션이 단위를 쓴 뒤에 열립니다", APColor.limit) }
             else if !s.problems.isEmpty { apNote("엔진이 출발 전 확인에서 고칠 것을 찾았습니다. 단위 제안은 볼 수 있고 출발은 잠깁니다", APColor.limit) }
             else if s.mode == "in_place", !s.modeReason.contains("설정으로") { apNote("따로 작업 트리 확인이 실패해 원래 작업 트리에서 돕니다", APColor.limit) }
@@ -4029,7 +4139,7 @@ struct APStep1: View {
                 source("list", "바깥 목록", "Jira 필터나 Notion 데이터베이스. 연결이 있을 때만 고를 수 있습니다", lock: "바깥 연결(4단계) 뒤 7단계에서 엽니다")
                 source("legacy", "옛 자동화 옮기기", "다른 도구로 돌던 자동화의 멈춘 자리 기록과 원장을 가져옵니다", lock: "7단계에서 엽니다")
                 source("topic", "주제로 시작", "주제 글과 자료 링크를 주면 초안 세션이 명세와 단위를 씁니다. 새 폴더에서도 됩니다", lock: nil,
-                       after: "입력 판은 지금 열고, 링크 읽기는 바깥 연결(4단계), 명세·단위를 쓰는 초안 세션은 5단계에서 엽니다")
+                       after: "자료 링크는 연결이 있으면 다음 단계(보드가 준비)에서 메타 정보만 읽고, 명세·단위를 쓰는 초안 세션은 5단계에서 엽니다")
             }
             if s.source == "topic" {
                 APTopicStep1(s: s, t: s.topic)
@@ -4183,16 +4293,43 @@ struct APEpicBox: View {
                     .boardFont(12, design: .monospaced)
                     .frame(maxWidth: 220)
                     .accessibilityIdentifier("ap-epic")
-                if ok { APChip(text: "번호 꼴 맞음", color: APColor.ok, strong: true) }
-                else { APChip(text: s.epic.isEmpty ? "비어 있음" : "에픽 번호 꼴이 아님", color: APColor.fail, strong: true) }
+                if !ok { APChip(text: s.epic.isEmpty ? "비어 있음" : "에픽 번호 꼴이 아님", color: APColor.fail, strong: true) }
+                else if let e = s.epicInfo, e.key == s.epic, !e.loading, e.read {
+                    if e.found && e.isEpic { APChip(text: "에픽", color: APColor.ok, strong: true); Text(e.title).boardFont(12, weight: .semibold).lineLimit(1); if !e.status.isEmpty { APChip(text: "상태 \(e.status)", color: APColor.board) } }
+                    else { APChip(text: e.found ? "에픽이 아님" : "없는 번호", color: APColor.fail, strong: true) }
+                } else if s.epicInfo?.loading == true { APChip(text: "읽는 중", color: APColor.board) }
+                else { APChip(text: "번호 꼴 맞음", color: APColor.ok, strong: true) }
             }
+            .accessibilityElement(children: .contain).accessibilityIdentifier("ap-epic-row")
             if !ok { apNote("에픽 번호를 넣어 주세요. 그때까지 출발이 잠깁니다.", APColor.limit) }
+            if let e = s.epicInfo, e.key == s.epic, !e.loading {
+                if e.read, !(e.found && e.isEpic) { apNote(e.note + (e.note.hasSuffix(".") ? " " : ". ") + "그때까지 출발이 잠깁니다.", APColor.limit) }
+                else if !e.read { apNote(e.note) }
+            }
             apNote(past.isEmpty ? "지난 실행에 에픽 기록이 없어 빈 칸으로 열었습니다. 지난 실행의 에픽은 이어 가기일 때만 채웁니다."
                    : s.epic == past ? "이어 가기라 지난 실행의 에픽을 채워 열었습니다. 다른 번호로 바꿀 수 있습니다."
                    : "지난 실행의 에픽(\(past))에서 바꿨습니다.")
-            apNote("에픽의 제목과 상태는 Jira 연결(4단계) 뒤에 보드가 읽어 보입니다. 지금은 번호 꼴만 봅니다.")
+            apNote("Atlassian 연결에 읽기 범위가 있으면 보드가 에픽의 제목과 상태를 읽어 보입니다(이슈 하나 읽기 요청). 연결이 없으면 번호 꼴만 봅니다.")
         }
+        .onAppear { s.refreshEpic() }
     }
+}
+
+// 에픽 칸이 읽은 것(앱 안 엔진 read epic)
+struct APEpicSeen: Equatable {
+    var key = ""
+    var read = false
+    var found = false
+    var isEpic = false
+    var title = ""
+    var status = ""
+    var note = ""
+    var loading = false
+}
+func apShortURL(_ u: String) -> String {
+    let c = URLComponents(string: u)
+    let t = (c?.host ?? "") + (c?.path ?? "")
+    return t.isEmpty ? apShort(u, 50) : apShort(t, 50)
 }
 
 // 2단계 보드가 준비 — 보드가 혼자 하는 일을 줄마다(이름·상태 꼬리표·걸린 시간·짧은 결과). 하는 중인 줄의 시계만 1초마다(시트 안에서만 돈다)
@@ -4218,9 +4355,15 @@ struct APStep2: View {
                     Text(sec < 1 ? "1초 안" : apDur(sec)).boardFont(10.5).foregroundStyle(.secondary).fixedSize()
                 }
             }
-            if !l.note.isEmpty { apNote(l.note) }
+            if !l.note.isEmpty { apNote(l.note, l.state == "fail" ? APColor.fail : .secondary) }
             ForEach(Array(l.detail.prefix(8).enumerated()), id: \.offset) { _, d in
                 Text("· " + d).boardFont(10.5).foregroundStyle(l.state == "fail" ? APColor.fail : .secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            if l.id.hasPrefix("link-"), l.state == "fail" {   // 못 읽은 링크(와이어프레임 출발 준비 ⑭) — 출발 전이라 사람이 고른다
+                HStack(spacing: 6) {
+                    APButton(title: "다시 읽기", axid: "ap-link-retry-\(l.id.dropFirst(5))") { s.retryLink(l.id) }
+                    APButton(title: "이 링크 빼고 계속", axid: "ap-link-skip-\(l.id.dropFirst(5))") { s.skipLink(l.id) }
+                }
             }
         }
         .padding(8)
@@ -4872,8 +5015,15 @@ struct APConfirm: View {
                       axid: "ap-fold-tickets", open: bind("tickets"), tint: make > 0 ? APColor.limit : nil) {
             HStack(spacing: 6) {
                 APTicket(key: s.epic.isEmpty ? "에픽 없음" : s.epic)
-                apNote("에픽 · 번호만 확인했습니다(제목은 연결 뒤)")
+                if let e = s.epicInfo, e.key == s.epic, e.read, e.found, e.isEpic { APChip(text: "에픽 · 있음", color: APColor.ok); Text(e.title).boardFont(11.5, weight: .semibold).lineLimit(1) }
+                else { apNote("에픽 · 번호만 확인했습니다(Atlassian 연결에 읽기 범위가 있으면 제목을 읽습니다)") }
             }
+            // 단위 시작 전 티켓 읽기(4단계 ⑩-2) — 어느 단위가 어느 티켓을 읽는지는 아래 나무의 작업 줄(단위 하나에 작업 티켓 하나)
+            let cn = APConnections.shared
+            let why = apReadBlocker(.atlassian, connection: cn.conn("atlassian"), hasSecret: cn.secrets.contains("atlassian"), dev: apDevBuild, now: Date(), tz: .current)
+            apNote(why == nil ? "단위를 시작하기 전에 엔진이 그 단위의 작업 티켓을 읽어 단위 근거 묶음에 넣습니다(메타 칸과 단위 글이 이름으로 가리킨 절만, 믿지 않는 자료 표시로 감쌈)"
+                              : "단위 시작 전 티켓 읽기: \(why ?? ""). 읽지 않고 단위를 시작합니다(요청 0)", why == nil ? .secondary : APColor.limit)
+                .accessibilityIdentifier("ap-ticket-read-note")
             ForEach(st) { story in
                 VStack(alignment: .leading, spacing: 3) {
                     HStack(spacing: 6) {
@@ -4892,7 +5042,7 @@ struct APConfirm: View {
                     }
                 }
             }
-            apNote("작업 티켓은 스토리 아래 둘 수 있는 하위 작업 종류로 만듭니다. 번호는 대기열과 함께 고정되어 실행 중에는 Jira 요청이 없습니다.")
+            apNote("작업 티켓은 스토리 아래 둘 수 있는 하위 작업 종류로 만듭니다. 번호는 대기열과 함께 고정되어 실행 중에는 티켓을 만들지 않습니다(실행 중 Jira 요청은 단위 시작 전 티켓 읽기와, 켰으면 댓글뿐).")
             if make > 0 { apNote("티켓 만들기(새 스토리·새 작업, 옮긴 작업의 부모 바꾸기)는 Jira 연결(4단계)과 함께 만듭니다. 그때까지 출발이 잠깁니다. 이미 있는 티켓의 단위만 고르면 출발할 수 있습니다.", APColor.limit) }
         }
     }

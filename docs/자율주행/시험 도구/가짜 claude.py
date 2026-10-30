@@ -23,6 +23,11 @@
 #     SIGINT(엔진의 멈춤)를 받으면 진짜 claude 처럼(2026-10-20 실측) result subtype error_during_execution·is_error true·
 #     terminal_reason aborted_tools 를 내고 종료 코드 0 으로 끝난다.
 #
+#  3) MCP 읽기 세션(인자에 --mcp-config 가 있을 때, 4단계 ⑩-2): `claude -p --output-format json` 처럼 표준 입력의 질문을 받고 결과 JSON 한 줄을 낸다.
+#     받은 인자·--settings·--mcp-config 파일 내용·ENABLE_TOOL_SEARCH 를 지금 폴더(엔진이 만든 빈 임시 폴더)의 fake-read.json 에 남긴다.
+#     MCP 서버는 띄우지 않고 바깥으로 아무것도 보내지 않는다. 질문의 "주소:" 줄 주소에 ?fake=<꼴> 이 있으면 그 꼴로 답한다:
+#       ok(기본) · html(절 글에 태그) · extra(형식 밖 칸) · long(요약 400자) · secret(요약에 가짜 토큰) · text(JSON 앞에 다른 글) · fence(```json 울타리)
+#       · write(쓰기 도구를 부르려 했다고 치고, 그 이름이 --disallowedTools 의 어느 꼴에 걸리는지 남김) · slow(600초 기다림, 엔진 시간 상한 시험) · error(오류 결과)
 # 남기는 것(단위 폴더 $CLAUDE_BOARD_UNIT_DIR): fake-args.log(띄울 때 인자 한 줄), fake-in.log(표준 입력 줄 원문, 띄울 때마다 머리 줄),
 # fake-signals.log(받은 신호와 시각), fake-runs.count(이 단위에서 띄운 횟수). 뜰 때 진짜 claude 처럼 작업 폴더에서 git status 를 한 번 부른다
 # (샌드박스 밖에서 도는 claude 의 git, 2026-10-30 5-4 실측 흉내)
@@ -44,6 +49,61 @@ except Exception:
     runs = 1
 open(runs_path, "w").write(str(runs))
 log("fake-in.log", "### run %d pid %d %s\n" % (runs, os.getpid(), "resume" if "--resume" in args else "new"))
+
+if "--mcp-config" in args:
+    import fnmatch, re as _re
+    from urllib.parse import urlsplit, parse_qs
+    def after(k):
+        return args[args.index(k) + 1] if k in args and args.index(k) + 1 < len(args) else None
+    files = {}
+    for k in ("--mcp-config", "--settings"):
+        try:
+            files[k] = json.load(open(after(k)))
+        except Exception as ex:
+            files[k] = "읽지 못함: %s" % ex
+    prompt = sys.stdin.read()
+    m = _re.search(r"^주소: (\S+)", prompt, _re.M)
+    link = m.group(1) if m else ""
+    mode = (parse_qs(urlsplit(link).query).get("fake") or ["ok"])[0]
+    servers = list((files["--mcp-config"] or {}).get("mcpServers", {}).keys()) if isinstance(files["--mcp-config"], dict) else []
+    rec = {"argv": args, "mcp_config": files["--mcp-config"], "settings": files["--settings"], "env_tool_search": os.environ.get("ENABLE_TOOL_SEARCH"),
+           "cwd": os.getcwd(), "servers": servers, "mode": mode, "prompt_head": prompt[:600]}
+    if mode == "write":
+        srv = servers[0] if servers else "x"
+        deny = (after("--disallowedTools") or "").split(" ")
+        allow = (after("--allowedTools") or "").split(" ")
+        tried = {}
+        for t in ("mcp__%s__createPage" % srv, "mcp__%s__update_page" % srv, "mcp__%s__purge_and_get_status" % srv, "mcp__%s__get_page" % srv, "Bash", "Write"):
+            tried[t] = {"denied_by": [d for d in deny if d and fnmatch.fnmatchcase(t, d)][:3],
+                        "allowed_by": [a for a in allow if a and fnmatch.fnmatchcase(t, a)][:3],
+                        "builtin_tools_flag": after("--tools")}
+        rec["tried"] = tried
+    json.dump(rec, open("fake-read.json", "w"), ensure_ascii=False, indent=1)
+    if mode == "slow":
+        time.sleep(600)
+    meta = {"format": "claude-board-meta", "version": 1, "source": "mcp", "id": "wiki-7", "url": link, "title": "위키 문서(가짜 MCP 읽기)",
+            "kind": "위키 문서", "modified": "2026-10-29T09:00:00Z", "author": "가짜 작성자",
+            "toc": [{"level": 1, "title": "개요"}, {"level": 2, "title": "운영 규칙"}],
+            "fields": [{"name": "상태", "value": "게시됨"}], "links": [{"title": "첨부 1", "url": "https://wiki.example.com/a/1", "kind": "attachment"}],
+            "length": 640, "summary": ["회의실 운영 규칙을 정리한 위키 문서입니다."], "sections": []}
+    if mode == "html":
+        meta["sections"] = [{"title": "개요", "text": "<p>본문을 통째로 옮김</p>"}]
+    if mode == "extra":
+        meta["body"] = "본문 전체"
+    if mode == "long":
+        meta["summary"] = ["가" * 400]
+    if mode == "secret":
+        meta["summary"].append("배포 토큰 " + "ATA" + "TT3x" + "Ff9" * 10 + "fakeZZ")
+    text = json.dumps(meta, ensure_ascii=False)
+    if mode == "text":
+        text = "읽은 결과입니다:\n" + text
+    if mode == "fence":
+        text = "```json\n" + text + "\n```"
+    res = {"type": "result", "subtype": "success", "is_error": False, "result": text, "total_cost_usd": 0, "num_turns": 1, "session_id": "fake-read"}
+    if mode == "error":
+        res = {"type": "result", "subtype": "error_during_execution", "is_error": True, "total_cost_usd": 0}
+    sys.stdout.write(json.dumps(res, ensure_ascii=False) + "\n")
+    sys.exit(0)
 
 sid = args[args.index("--resume") + 1] if "--resume" in args else args[args.index("--session-id") + 1]
 resume = "--resume" in args

@@ -208,9 +208,21 @@ struct APTopicRepo: Equatable {
     var pastRuns = 0
 }
 
+// 사용자 MCP 설정의 서버 하나(엔진 read servers 가 읽음, 값은 이름·범위·띄울 것·승인 여부·허용 꼴만 — 설정의 env·머리는 보드로 오지 않는다)
+struct APMCPServerInfo: Equatable, Identifiable {
+    var id: String { name }
+    var name = "", scope = "", transport = "", target = "", note = "", allow = ""
+    var approved = true
+}
+
 @MainActor final class APTopic: ObservableObject {
     @Published var text = "" { didSet { if text != oldValue { textChanged() } } }
     @Published private(set) var links: [APLink] = []
+    // 4단계 ⑩-2 — 그 밖 웹 주소를 읽을 MCP 서버(주소 → 서버 이름)와 사용자 MCP 설정의 서버 목록
+    @Published var linkMCP: [String: String] = [:]
+    @Published private(set) var servers: [APMCPServerInfo] = []
+    @Published private(set) var serversNote: String?
+    @Published private(set) var serversLoading = false
     @Published var linkInput = ""
     @Published private(set) var linkError: String?
     @Published var pathMode = "existing" { didSet { if pathMode != oldValue { modeChanged() } } }
@@ -235,6 +247,7 @@ struct APTopicRepo: Equatable {
     private let queue = DispatchQueue(label: "claude-board.autopilot.topic")
 
     func reset() {
+        linkMCP = [:]
         text = ""; links = []; linkInput = ""; linkError = nil; pathMode = "existing"; existingPath = ""; newParent = NSHomeDirectory() + "/workspace"; newName = ""
         repo = nil; reading = false; newProblems = []; newPlan = nil; detected = nil; conflicts = []; hits = []
         slots = ["front": APSlotPick(), "back": APSlotPick(), "db": APSlotPick()]; touched = []; created = nil; createdPath = nil
@@ -266,8 +279,47 @@ struct APTopicRepo: Equatable {
         links.append(l)
         linkInput = ""
         linkError = nil
+        if linkView(l).kind == "웹", servers.isEmpty, !serversLoading { loadServers() }
     }
-    func removeLink(_ url: String) { links.removeAll { $0.url == url } }
+    func removeLink(_ url: String) { links.removeAll { $0.url == url }; linkMCP[url] = nil }
+    // 줄의 종류·읽기 상태(연결 목록·키체인 있음·고른 MCP 서버로 매김, 규칙 apLinkState) — 시험 빌드의 가짜 서버 사이트(127.0.0.1)도 Atlassian 으로 본다
+    func linkView(_ l: APLink) -> APLink {
+        let c = APConnections.shared
+        c.loadOnce()
+        return apLinkState(l.url, connections: c.list, secrets: c.secrets, mcp: linkMCP[l.url], dev: apDevBuild, now: Date(), tz: .current)
+    }
+    // 시험 빌드만: 장난감 MCP 설정(설정 값 autopilotMCPFrom)과 가짜 claude(autopilotReadClaude) — 엔진도 --dev 일 때만 받는다
+    static var devMCPArgs: [String] {
+        guard apDevBuild else { return [] }
+        var a: [String] = []
+        if let f = UserDefaults.standard.string(forKey: "autopilotMCPFrom"), !f.isEmpty { a += ["--mcp-from", f] }
+        return a
+    }
+    static var devClaudeArgs: [String] {
+        guard apDevBuild, let c = UserDefaults.standard.string(forKey: "autopilotReadClaude"), !c.isEmpty else { return [] }
+        return ["--claude", c]
+    }
+    // 사용자 MCP 설정의 서버 — 앱 안 엔진(read servers)이 읽기만 한다. 저장소 .mcp.json 서버는 그 프로젝트에서 승인한 것만 고를 수 있다
+    func loadServers() {
+        serversLoading = true
+        let cwd = root
+        let args = ["read", "servers"] + (cwd.isEmpty ? [] : ["--cwd", cwd]) + (apDevBuild ? ["--dev"] : []) + APTopic.devMCPArgs
+        DispatchQueue.global(qos: .userInitiated).async {
+            let r = apEngine(args)
+            let list = ((try? JSONSerialization.jsonObject(with: Data(r.out.utf8))) as? [[String: Any]] ?? []).map { d in
+                APMCPServerInfo(name: apDocText(d["name"] as? String ?? "", 64), scope: d["scope"] as? String ?? "", transport: d["transport"] as? String ?? "",
+                                target: apDocText(d["target"] as? String ?? "", 200), note: apDocText(d["note"] as? String ?? "", 300),
+                                allow: apDocText(d["allow"] as? String ?? "", 400), approved: d["approved"] as? Bool ?? false)
+            }.filter { apMCPServerNameOK($0.name) }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self.serversLoading = false
+                    self.servers = list
+                    self.serversNote = r.code == 0 ? (list.isEmpty ? "사용자 MCP 설정에 서버가 없습니다" : nil) : apDocText(r.out, 200)
+                }
+            }
+        }
+    }
 
     // MARK: 주제 글 → 낱말 대조·경고·칸 미리 채우기
     private func textChanged() {
@@ -524,17 +576,35 @@ struct APTopicStep1: View {
         }
     }
 
-    // 자료 링크 — 줄마다 종류·주소·읽기 상태. 읽기는 바깥 연결(4단계)이라 지금은 "연결 필요"(와이어프레임 ⑥)
+    // 자료 링크 — 줄마다 종류·주소·읽기 상태(연결됨·연결 필요·읽을 수 없음, 그 밖 웹 주소는 MCP 서버 고르기). 읽기는 2단계 "보드가 준비"에서 줄마다(와이어프레임 ⑥, 4단계 ⑩-2)
     private var linksBox: some View {
         APBox(title: "자료 링크", note: "메타 정보만 읽습니다", axid: "ap-links-box") {
-            ForEach(t.links) { l in
-                HStack(spacing: 6) {
-                    APChip(text: l.kind, color: APColor.board)
-                    Text(l.url).boardFont(10.5, design: .monospaced).lineLimit(1).truncationMode(.middle)
-                    Spacer(minLength: 4)
-                    APChip(text: l.state == "unreadable" ? "읽을 수 없음" : "연결 필요", color: l.state == "unreadable" ? APColor.fail : APColor.limit, strong: true)
-                    if l.state != "unreadable" { APButton(title: "설정 › 연결", enabled: false, help: "바깥 연결 설정은 4단계에서 엽니다") {} }
-                    APButton(title: "빼기", help: "이 링크를 뺍니다", axid: "ap-link-remove") { t.removeLink(l.url) }
+            ForEach(t.links) { l0 in
+                let l = t.linkView(l0)
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 6) {
+                        APChip(text: l.kind, color: APColor.board)
+                        Text(l.url).boardFont(10.5, design: .monospaced).lineLimit(1).truncationMode(.middle)
+                        Spacer(minLength: 4)
+                        switch l.state {
+                        case "connected": APChip(text: "연결됨", color: APColor.ok, strong: true)
+                        case "mcp": APChip(text: "MCP 읽기", color: APColor.ok, strong: true)
+                        case "unreadable": APChip(text: "읽을 수 없음", color: APColor.fail, strong: true)
+                        default: APChip(text: "연결 필요", color: APColor.limit, strong: true)
+                        }
+                        if l.kind == "웹", l.state != "unreadable" { mcpMenu(l0.url) }
+                        else if l.state == "needs_connection" {
+                            APButton(title: "설정 › 연결", help: "연결 설정을 엽니다(준비는 남아 있습니다)", axid: "ap-link-settings") {
+                                APStart.shared.close(); SettingsScreen.shared.open(.connections)
+                            }
+                        }
+                        APButton(title: "빼기", help: "이 링크를 뺍니다", axid: "ap-link-remove") { t.removeLink(l.url) }
+                    }
+                    if l.state != "connected" { apNote(l.why, l.state == "unreadable" ? APColor.fail : .secondary) }
+                    if let m = t.linkMCP[l0.url], let sv = t.servers.first(where: { $0.name == m }) {
+                        apNote("\(sv.name) · \(sv.scope == "project" ? "저장소 .mcp.json" : sv.scope == "local" ? "이 프로젝트(local)" : "사용자(user)") · \(sv.transport) · \(sv.target)")
+                        apNote(sv.allow)
+                    }
                 }
                 .hint(l.why)
                 .accessibilityElement(children: .contain)
@@ -547,8 +617,29 @@ struct APTopicStep1: View {
                 APButton(title: "더하기", enabled: !t.linkInput.trimmingCharacters(in: .whitespaces).isEmpty, axid: "ap-link-add") { t.addLink() }
             }
             if let e = t.linkError { apNote(e, APColor.fail) }
-            apNote("연결이 없는 서비스의 링크에는 '연결 필요', 열리지 않는 주소에는 '읽을 수 없음'이 붙습니다. 링크 읽기는 바깥 연결(4단계)과 함께 열고, 지금은 주소를 읽지 않습니다(요청 0).")
+            apNote("연결이 없는 서비스의 링크에는 '연결 필요', 열리지 않는 주소에는 '읽을 수 없음'이 붙습니다. 링크는 다음 단계(보드가 준비)에서 줄마다 읽고, 본문 전체가 아니라 메타 정보(제목·목차·핵심 칸·링크·요약, 가리킨 절)만 근거 묶음에 남깁니다. 연결이 없는 링크는 요청하지 않습니다.")
         }
+    }
+
+    // 그 밖 웹 주소를 읽을 MCP 서버 고르기 — 사용자 MCP 설정의 서버 이름만(저장소 .mcp.json 서버는 그 프로젝트에서 승인한 것만)
+    private func mcpMenu(_ url: String) -> some View {
+        Menu {
+            if t.servers.isEmpty { Text(t.serversLoading ? "읽는 중…" : (t.serversNote ?? "서버 없음")) }
+            ForEach(t.servers) { sv in
+                Button(sv.approved ? "\(sv.name) (\(sv.scope))" : "\(sv.name) (승인 안 됨)") { t.linkMCP[url] = sv.name }
+                    .disabled(!sv.approved)
+                    .help(sv.approved ? sv.allow : sv.note)
+            }
+            if t.linkMCP[url] != nil { Divider(); Button("고르지 않음") { t.linkMCP[url] = nil } }
+            Divider()
+            Button("서버 목록 다시 읽기") { t.loadServers() }
+        } label: {
+            Text(t.linkMCP[url].map { "MCP: \($0)" } ?? "MCP 서버 고르기").boardFont(11)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .accessibilityIdentifier("ap-link-mcp")
+        .onAppear { if t.servers.isEmpty, !t.serversLoading { t.loadServers() } }
     }
 
     // 작업 경로 — 기존 저장소 또는 새 폴더 만들기(와이어프레임 ⑦)

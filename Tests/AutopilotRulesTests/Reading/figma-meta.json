@@ -1,0 +1,63 @@
+{
+  "author" : "",
+  "fields" : [
+    {
+      "name" : "프레임",
+      "value" : "1개"
+    },
+    {
+      "name" : "판",
+      "value" : "123"
+    }
+  ],
+  "format" : "claude-board-meta",
+  "frames" : [
+    {
+      "colors" : [
+        "#FFFFFF",
+        "#1A1A1A",
+        "#0066FF80"
+      ],
+      "components" : [
+        "Button / Primary"
+      ],
+      "fonts" : [
+        "Pretendard 700",
+        "Pretendard 400",
+        "Pretendard 600"
+      ],
+      "height" : 844,
+      "id" : "12:4",
+      "name" : "예약 화면",
+      "texts" : [
+        "회의실 예약",
+        "시작 시각",
+        "예약하기"
+      ],
+      "width" : 390
+    }
+  ],
+  "id" : "AbCdEfGhIjKlMn/12:4",
+  "kind" : "Figma 프레임",
+  "length" : 15,
+  "links" : [
+
+  ],
+  "modified" : "2026-10-27T05:00:00Z",
+  "sections" : [
+
+  ],
+  "source" : "figma",
+  "summary" : [
+    "프레임 1개 · 글 3개 · 예약 화면"
+  ],
+  "title" : "회의실 예약 › 예약 화면",
+  "toc" : [
+    {
+      "level" : 1,
+      "title" : "예약 화면"
+    }
+  ],
+  "url" : "https://www.figma.com/design/AbCdEfGhIjKlMn/%ED%9A%8C%EC%9D%98%EC%8B%A4?node-id=12-4",
+  "version" : 1
+}
