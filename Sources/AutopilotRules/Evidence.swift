@@ -90,15 +90,18 @@ public struct APEvidenceWrite: Equatable, Sendable {
     public init(entry: APEvidenceEntry? = nil, note: String = "") { self.entry = entry; self.note = note }
 }
 
-// 읽은 것 하나를 묶음에 넣는다 — 같은 주소면 같은 번호(옛 파일은 지움), 아니면 다음 번호. 그림 파일 이름을 메타 image 칸에 적고
-// 형식 검사(apMetaCheck)를 한 번 더 지난 것만 쓴다. 메타 파일 → 그림 → MANIFEST 차례(MANIFEST 가 가리키는 파일은 늘 있다)
+// 읽은 것 하나를 묶음에 넣는다 — 같은 주소면 같은 번호(옛 파일은 지움), 아니면 다음 번호. 그림 파일 이름을 메타 image 칸에 적는다.
+// 모든 길(내장 REST·MCP 읽기 세션·단위 시작 전 티켓)이 이 문을 지나므로 비밀 가리기(apMetaRedact)를 여기서 늘 하고, 가린 뒤 형식 검사(apMetaCheck)를
+// 다시 지난 것만 쓴다. redacted 는 앞서 가린 수(내장 읽기가 먼저 가렸으면 그 수)이고 여기서 더 가린 수를 더해 MANIFEST 에 적는다
+// (2026-10-30 자동 보안 검토 MEDIUM: 전에는 MCP 길의 가리기를 엔진이 따로 했다). 메타 파일 → 그림 → MANIFEST 차례(MANIFEST 가 가리키는 파일은 늘 있다)
 public func apAddEvidence(_ meta0: APMeta, image: Data?, imageHost: String, url: String, via: String, requests: Int, redacted: Int,
                           cost: Double? = nil, store: APEvidenceStore, clock: APClock) -> APEvidenceWrite {
     var entries = apManifestParse(store.read(apManifestName))
     let old = entries.first { $0.url == url }
     let n = old?.n ?? ((entries.map(\.n).max() ?? 0) + 1)
-    let file = apEvidenceName(n, source: meta0.source, id: meta0.id)
-    var meta = meta0
+    let (red, more) = apMetaRedact(meta0)
+    let file = apEvidenceName(n, source: red.source, id: red.id)
+    var meta = red
     let imageFile = image == nil ? "" : String(file.dropLast(5)) + ".png"
     meta.image = imageFile
     let checked = apMetaCheck(apMetaJSON(meta))
@@ -107,7 +110,7 @@ public func apAddEvidence(_ meta0: APMeta, image: Data?, imageHost: String, url:
     guard let sha = store.write(file, data) else { return APEvidenceWrite(note: "근거 묶음에 \(file) 을 쓰지 못했습니다") }
     var e = APEvidenceEntry()
     e.n = n; e.file = file; e.source = ok.source; e.via = via; e.url = url; e.id = ok.id; e.title = ok.title
-    e.readAt = clock.now.timeIntervalSince1970; e.sha256 = sha; e.bytes = data.count; e.redacted = redacted; e.requests = requests; e.costUSD = cost
+    e.readAt = clock.now.timeIntervalSince1970; e.sha256 = sha; e.bytes = data.count; e.redacted = redacted + more; e.requests = requests; e.costUSD = cost
     if let image {
         guard let ish = store.write(imageFile, image) else { store.remove(file); return APEvidenceWrite(note: "근거 묶음에 \(imageFile) 을 쓰지 못했습니다") }
         e.image = APEvidenceImage(file: imageFile, host: imageHost, sha256: ish, bytes: image.count)

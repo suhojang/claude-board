@@ -563,6 +563,15 @@ private let toolRows: [ToolRow] = [
     .init(note: "읽고 만들기", tool: "get_or_create_page", ok: false),
     .init(note: "대문자 꼴", tool: "DELETE_ROW", ok: false),
     .init(note: "다른 서버 도구", tool: "mcp__other__get_page", ok: false),
+    .init(note: "가운데 낀 get(쓰기 도구)", tool: "delete_and_get_x", ok: false),
+    .init(note: "거부 목록에 없는 쓰기 동사 뒤 get(전에는 *_get* 으로 허용됐음)", tool: "purge_and_get_status", ok: false),
+    .init(note: "가운데 낀 read(쓰기 꼴 없음이라도)", tool: "cleanup_read_cache", ok: false),
+    .init(note: "모르는 접두어 뒤 get", tool: "x_get_page", ok: false),
+    .init(note: "낙타 꼴 가운데 Get", tool: "notionGetPage", ok: false),
+    .init(note: "서버 이름 접두어", tool: "wiki_get_page", ok: true),
+    .init(note: "서버 이름 접두어(-)", tool: "wiki-search", ok: true),
+    .init(note: "다른 서버 이름 접두어", tool: "other_get_page", ok: false),
+    .init(note: "읽고 지우기", tool: "get_then_delete", ok: false),
     .init(note: "내장 Bash", tool: "Bash", ok: false),
 ]
 
@@ -576,13 +585,16 @@ private let toolRows: [ToolRow] = [
         func after(_ k: String) -> String? { a.firstIndex(of: k).map { a[$0 + 1] } }
         #expect(a.contains("--strict-mcp-config") && after("--mcp-config") == "/p/mcp.json" && after("--tools") == "")
         #expect(after("--permission-mode") == "dontAsk" && after("--output-format") == "json" && after("--max-budget-usd") == "0.30")
-        #expect(a.contains("--no-session-persistence") && after("--setting-sources") == "project,local" && after("--settings") == "/p/settings.json")
+        // 사용자·저장소·local 설정은 읽지 않는다(--restricted), 엔진이 쓴 --settings 만
+        #expect(a.contains("--no-session-persistence") && a.contains("--restricted") && !a.contains("--setting-sources") && after("--settings") == "/p/settings.json")
         let allow = after("--allowedTools")!.split(separator: " ").map(String.init), deny = after("--disallowedTools")!.split(separator: " ").map(String.init)
         #expect(allow.allSatisfy { $0.hasPrefix("mcp__wiki__") } && !allow.contains("Bash"))
         #expect(["Bash", "Write", "Edit", "Read", "WebFetch"].allSatisfy(deny.contains) && deny.contains("mcp__wiki__create*") && deny.contains("mcp__wiki__*Delete*"))
         let s = apMCPSettingsJSON("wiki")
         #expect(s["disableAllHooks"] as? Bool == true && ((s["permissions"] as? [String: Any])?["deny"] as? [String])?.contains("Bash") == true)
         #expect(apMCPPrompt(link: "https://wiki.example.com/p", server: "wiki", want: []).contains("주소: https://wiki.example.com/p"))
+        #expect(allow.allSatisfy { r in apMCPAllowPrefixes("wiki").contains { p in apMCPReadVerbs.contains { r == "mcp__wiki__\(p)\($0)*" } } })   // 가운데 낀 꼴(*_get*)이 없다
+        #expect(apMCPAllowSummary("wiki").contains("로 시작하는 것만"))
     }
 
     @Test("사용자 MCP 설정에서 서버 목록과 그 서버 한 줄만 옮겨 적기(local > project > user)")
@@ -591,10 +603,18 @@ private let toolRows: [ToolRow] = [
                                           "remote": ["type": "http", "url": "https://mcp.example.com/mcp", "headers": ["Authorization": "Bearer fake-x"]],
                                           "plain-http": ["type": "http", "url": "http://mcp.example.com"],
                                           "bad name": ["command": "x"], "nothing": ["type": "stdio"]],
-                           "projects": ["/w/app": ["mcpServers": ["wiki": ["command": "/usr/bin/true", "args": ["--local"]]]]]])
-        let project = body(["mcpServers": ["docs": ["type": "sse", "url": "https://docs.example.com/sse"], "wiki": ["command": "/bin/echo"]]])
+                           "projects": ["/w/app": ["mcpServers": ["wiki": ["command": "/usr/bin/true", "args": ["--local"]]],
+                                                   "enabledMcpjsonServers": ["docs", "off"], "disabledMcpjsonServers": ["off"]]]])
+        let project = body(["mcpServers": ["docs": ["type": "sse", "url": "https://docs.example.com/sse"], "wiki": ["command": "/bin/echo"],
+                                           "repo-tool": ["command": "./scripts/evil.sh"], "off": ["command": "/bin/echo"]]])
         let list = apMCPServers(claudeJSON: claude, projectMCP: project, cwd: "/w/app")
-        #expect(list.map { "\($0.name) \($0.transport) \($0.scope)" } == ["wiki stdio local", "docs sse project", "remote http user"])
+        #expect(list.map { "\($0.name) \($0.transport) \($0.scope) \($0.approved)" }
+                == ["wiki stdio local true", "docs sse project true", "off stdio project false", "repo-tool stdio project false", "remote http user true"])
+        #expect(list.first { $0.name == "repo-tool" }?.note.contains("승인한 뒤에만") == true && list.first { $0.name == "repo-tool" }?.target == "./scripts/evil.sh")
+        #expect(list.first { $0.name == "off" }?.note.contains("disabledMcpjsonServers") == true && list.first { $0.name == "docs" }?.target == "docs.example.com")
+        // 모든 프로젝트 서버를 켠 프로젝트
+        let all = body(["projects": ["/w/app": ["enableAllProjectMcpServers": true]]])
+        #expect(apMCPServers(claudeJSON: all, projectMCP: project, cwd: "/w/app").filter { !$0.approved }.isEmpty)
         let one = apMCPConfigJSON(list[0])
         let m = one["mcpServers"] as? [String: Any]
         #expect(m?.keys.sorted() == ["wiki"] && ((m?["wiki"] as? [String: Any])?["args"] as? [String]) == ["--local"])
@@ -614,5 +634,17 @@ private let toolRows: [ToolRow] = [
         #expect(out.text == "{}" && out.cost == 0.0123 && out.error == nil)
         #expect(apMCPOutput(Data(#"{"type":"result","subtype":"error_max_budget_usd","is_error":true}"#.utf8)).error?.contains("error_max_budget_usd") == true)
         #expect(apMCPOutput(Data("not json".utf8)).error == "세션이 결과를 내지 않았습니다")
+    }
+
+    @Test("MCP 길의 비밀도 근거 묶음에 넣는 문에서 가리고 MANIFEST 에 수를 적는다(가린 뒤 다시 검사)")
+    func 가리기() {
+        let raw = #"{"format":"claude-board-meta","version":1,"source":"mcp","title":"위키","summary":["배포 키 "# + FakeSecret.github + #""],"sections":[{"title":"설정","text":"password=hunter2-fake"}]}"#
+        let m = apMCPMeta(raw, server: "wiki", link: "https://wiki.example.com/p").meta!
+        let store = MemEvidence()
+        let w = apAddEvidence(m, image: nil, imageHost: "", url: "https://wiki.example.com/p", via: "mcp", requests: 0, redacted: 0, cost: 0.01, store: store, clock: PubClock(t0))
+        #expect(w.entry?.redacted == 2 && w.entry?.source == "mcp:wiki" && w.entry?.costUSD == 0.01)
+        let all = store.files.values.map { String(decoding: $0, as: UTF8.self) }.joined()
+        #expect(!all.contains(FakeSecret.github) && !all.contains("hunter2") && all.contains("[가림:GitHub 토큰]"))
+        #expect(apManifestParse(store.files[apManifestName]).first?.redacted == 2)
     }
 }

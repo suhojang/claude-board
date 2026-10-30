@@ -4,7 +4,11 @@
 // - 내장 도구는 모두 끈다(--tools ""): Bash·파일 읽기·쓰기·웹이 없다. 결과는 파일 쓰기가 아니라 표준 출력(-p --output-format json)이고,
 //   엔진이 형식 검사(apMetaCheck)를 지난 것만 정해진 파일 하나(근거 묶음의 메타 파일)로 쓴다
 // - 허용 도구는 그 서버의 읽기 꼴 이름만(mcp__<서버>__get* 등), 쓰기·지우기 꼴 이름은 거부 목록(거부가 이긴다). 목록 밖은 dontAsk 로 묻지 않고 거부
-// - 시간 상한(엔진이 끊음)·비용 상한(--max-budget-usd), 세션 기록을 남기지 않음(--no-session-persistence), 사용자 hook·플러그인 없음
+// - 시간 상한(엔진이 끊음)·비용 상한(--max-budget-usd), 세션 기록을 남기지 않음(--no-session-persistence)
+// - 사용자·저장소·local 설정 파일을 읽지 않는다(--restricted: "ignores user, project and local settings files (managed settings and --settings
+//   still apply)", claude 2.1.314 도움말). 엔진이 쓴 --settings 만 들어가고 cwd 는 엔진이 만든 빈 임시 폴더다(사용자 hook·플러그인·저장소 hook·허용 규칙 없음).
+//   단위 세션은 저장소 안에서 일하므로 --setting-sources project,local 로 저장소 설정을 읽는다(4장) — 읽기 세션은 저장소에서 돌지 않아 읽을 까닭이 없다
+//   (2026-10-30 자동 보안 검토 MEDIUM: 전에는 읽기 세션도 --setting-sources project,local 이었다)
 // 거부 목록 꼴은 claude 2.1.314 실행 파일 글자로 확인했다("globs are permitted only in the tool position after a literal mcp__<server>__ prefix",
 // "Deny and ask rules accept wildcards anywhere"). 진짜 claude 가 쓰기 도구를 정말 거부하는지는 사람이 잰다(진행 상황 남은 것)
 import Foundation
@@ -14,8 +18,11 @@ public struct APMCPServer: Equatable, Sendable {
     public var transport = ""    // stdio·http·sse
     public var scope = ""        // local·project·user(Claude Code 의 우선 차례)
     public var config = Data()   // 사용자 설정의 그 서버 한 줄(JSON 객체 그대로)
-    public init(name: String = "", transport: String = "", scope: String = "", config: Data = Data()) {
-        self.name = name; self.transport = transport; self.scope = scope; self.config = config
+    public var approved = true   // 쓸 수 있는가 — 저장소 .mcp.json(project) 서버는 사용자가 그 프로젝트에서 승인했을 때만
+    public var note = ""         // 승인되지 않은 까닭
+    public var target = ""       // 화면에 보일 띄울 것: stdio 는 명령(첫 낱말), http·sse 는 호스트
+    public init(name: String = "", transport: String = "", scope: String = "", config: Data = Data(), approved: Bool = true, note: String = "", target: String = "") {
+        self.name = name; self.transport = transport; self.scope = scope; self.config = config; self.approved = approved; self.note = note; self.target = target
     }
 }
 
@@ -23,12 +30,19 @@ public struct APMCPServer: Equatable, Sendable {
 public func apMCPServerNameOK(_ s: String) -> Bool { s.range(of: "^[A-Za-z0-9_-]{1,64}$", options: .regularExpression) != nil }
 
 // 사용자 MCP 설정에서 서버 목록 — ~/.claude.json 의 projects[<작업 경로>].mcpServers(local), <작업 경로>/.mcp.json(project), ~/.claude.json 의
-// mcpServers(user) 차례로, 같은 이름은 앞의 것. 이름·꼴이 틀린 줄은 버린다. 파일은 읽기만 한다(어댑터)
+// mcpServers(user) 차례로, 같은 이름은 앞의 것. 이름·꼴이 틀린 줄은 버린다. 파일은 읽기만 한다(어댑터).
+// 저장소 .mcp.json 의 서버는 저장소가 정한 명령이라, 그 프로젝트 항목의 enableAllProjectMcpServers 가 true 이거나 enabledMcpjsonServers 에
+// 이름이 있을 때만 approved(disabledMcpjsonServers 에 있으면 아님). 승인되지 않은 서버는 목록에 까닭과 함께 남고 쓰지 않는다
+// (2026-10-30 자동 보안 검토 MEDIUM: 전에는 승인 확인 없이 썼다)
 public func apMCPServers(claudeJSON: Data?, projectMCP: Data?, cwd: String?) -> [APMCPServer] {
     func obj(_ d: Data?) -> [String: Any]? { d.flatMap { $0.count <= 32 << 20 ? (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] : nil } }
     let cj = obj(claudeJSON) ?? [:]
+    let proj = cwd.flatMap { (cj["projects"] as? [String: Any])?[$0] as? [String: Any] } ?? [:]
+    let allProject = proj["enableAllProjectMcpServers"] as? Bool == true
+    let enabled = Set((proj["enabledMcpjsonServers"] as? [Any] ?? []).compactMap { $0 as? String })
+    let disabled = Set((proj["disabledMcpjsonServers"] as? [Any] ?? []).compactMap { $0 as? String })
     var groups: [(String, [String: Any])] = []
-    if let cwd, let p = (cj["projects"] as? [String: Any])?[cwd] as? [String: Any], let m = p["mcpServers"] as? [String: Any] { groups.append(("local", m)) }
+    if let m = proj["mcpServers"] as? [String: Any] { groups.append(("local", m)) }
     if let m = obj(projectMCP)?["mcpServers"] as? [String: Any] { groups.append(("project", m)) }
     if let m = cj["mcpServers"] as? [String: Any] { groups.append(("user", m)) }
     var out: [APMCPServer] = [], seen = Set<String>()
@@ -43,7 +57,16 @@ public func apMCPServers(claudeJSON: Data?, projectMCP: Data?, cwd: String?) -> 
             }
             guard let d = try? JSONSerialization.data(withJSONObject: c, options: [.sortedKeys]) else { continue }
             seen.insert(name)
-            out.append(APMCPServer(name: name, transport: type, scope: scope, config: d))
+            var sv = APMCPServer(name: name, transport: type, scope: scope, config: d)
+            sv.target = type == "stdio" ? String((c["command"] as? String ?? "").prefix(200)) : apHost(c["url"] as? String ?? "")
+            if scope == "project" {
+                if disabled.contains(name) { sv.approved = false; sv.note = "이 프로젝트에서 사용자가 끈 서버입니다(disabledMcpjsonServers)" }
+                else if !(allProject || enabled.contains(name)) {
+                    sv.approved = false
+                    sv.note = "저장소 .mcp.json 의 서버라 Claude Code 에서 이 프로젝트의 서버로 승인한 뒤에만 씁니다(저장소가 정한 명령을 띄우므로)"
+                }
+            }
+            out.append(sv)
         }
     }
     return out
@@ -66,11 +89,23 @@ public let apMCPWriteVerbs = ["create", "update", "delete", "remove", "write", "
 public let apMCPBuiltinDeny = ["Bash", "Edit", "Write", "MultiEdit", "NotebookEdit", "Read", "Glob", "Grep", "WebFetch", "WebSearch", "Task", "Agent",
                                "Skill", "TodoWrite", "BashOutput", "KillShell", "TaskStop", "Monitor", "SendMessage", "ToolSearch", "SlashCommand", "LSP"]
 
+// 쓰기 꼴 — 이름 어디에 와도(맨 앞, _·-·. 뒤, 낙타 꼴 대문자 자리) 거부한다
 private func shapes(_ prefix: String, _ v: String) -> [String] {
     let cap = v.prefix(1).uppercased() + v.dropFirst()
     return ["\(prefix)\(v)*", "\(prefix)*_\(v)*", "\(prefix)*-\(v)*", "\(prefix)*.\(v)*", "\(prefix)*\(cap)*"]
 }
-public func apMCPAllowRules(_ server: String) -> [String] { apMCPReadVerbs.flatMap { shapes("mcp__\(server)__", $0) } }
+// 읽기 꼴 앞에 와도 되는 정해 둔 접두어 — 없음, Notion 공식 서버의 API-·API_, 서버 이름 자신(wiki_get… · wiki-get…)
+public func apMCPAllowPrefixes(_ server: String) -> [String] { ["", "API-", "API_", "\(server)_", "\(server)-"] }
+// 허용은 읽기 동사가 이름의 첫 낱말(정해 둔 접두어 하나 뒤까지)일 때만 — 가운데에 get·read 가 낀 쓰기 도구(delete_and_get_x)는 허용 꼴에 맞지 않는다
+// (2026-10-30 자동 보안 검토 MEDIUM: 전에는 *_get*·*Get* 꼴이라 가운데 낀 이름도 허용했다. 거부 꼴은 그대로 이긴다)
+public func apMCPAllowRules(_ server: String) -> [String] {
+    apMCPReadVerbs.flatMap { v in apMCPAllowPrefixes(server).map { "mcp__\(server)__\($0)\(v)*" } }
+}
+// 화면에 보일 허용 꼴 한 줄(준비 화면의 MCP 읽기 줄)
+public func apMCPAllowSummary(_ server: String) -> String {
+    "허용 도구: 이름이 \(apMCPReadVerbs.joined(separator: "·")) 로 시작하는 것만(앞에 API- 나 \(server)_ 가 붙어도 됨). "
+        + "이름 어디에든 create·update·delete·edit·add 같은 쓰기 꼴이 있으면 거부. 내장 도구(Bash·파일·웹)는 없음"
+}
 public func apMCPDenyRules(_ server: String) -> [String] {
     apMCPBuiltinDeny + apMCPWriteVerbs.flatMap { shapes("mcp__\(server)__", $0) }
         + ["mcp__\(server)__*" + "DELETE*", "mcp__\(server)__*" + "CREATE*", "mcp__\(server)__*" + "UPDATE*", "mcp__\(server)__*" + "WRITE*"]
@@ -101,7 +136,7 @@ public let apMCPReadMaxSec = 180.0
 // claude 인자 — 질문은 표준 입력으로(--disallowedTools 가 뒤 글을 삼키므로, 4장 실측)
 public func apMCPReadArgs(server: String, mcpConfig: String, settings: String, model: String = apMCPReadModel, budgetUSD: Double = apMCPReadBudgetUSD) -> [String] {
     ["-p", "--output-format", "json", "--model", model, "--max-budget-usd", String(format: "%.2f", budgetUSD),
-     "--no-session-persistence", "--disable-slash-commands", "--setting-sources", "project,local",
+     "--no-session-persistence", "--disable-slash-commands", "--restricted",
      "--strict-mcp-config", "--mcp-config", mcpConfig, "--tools", "",
      "--permission-mode", "dontAsk", "--permission-prompts", "none", "--settings", settings,
      "--allowedTools", apMCPAllowRules(server).joined(separator: " "), "--disallowedTools", apMCPDenyRules(server).joined(separator: " ")]
