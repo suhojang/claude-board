@@ -147,7 +147,7 @@ import WebKit
                      detail: "개인 액세스 토큰(읽기). 프레임 읽기는 다음 조각에서 씁니다.", keywords: "figma 토큰 읽기", kind: .block) { AnyView(APConnectionCard(service: .figma)) },
         SettingsItem(id: "conn.webhook", section: .connections, card: "알림", title: "알림 webhook",
                      detail: "대화방 webhook 주소(주소 전체가 비밀이라 키체인에). 상태 알림·3시간 요약은 다음 조각에서 보냅니다.",
-                     keywords: "webhook slack 두레이 google chat 알림", kind: .block) { AnyView(APWebhookCard()) },
+                     keywords: "webhook slack google chat 메신저 대화방 알림", kind: .block) { AnyView(APWebhookCard()) },
     ]
 }
 
