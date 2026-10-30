@@ -477,7 +477,7 @@ struct APLogGroup: Identifiable {
             guard apReopenIntake(state: r.state, wrapped: r.wrapped, flag: r.restart != nil, asked: true, opened: false, project: r.project) else { continue }
             reopened.insert(id)
             let s = APStart.shared
-            if !s.shown, !s.preparing, !s.starting, s.source != "topic", !s.hasDraft || s.pastId == id {
+            if !s.shown, !s.preparing, !s.starting, s.source != "topic", !s.isImport, !s.hasDraft || s.pastId == id {
                 DispatchQueue.main.async { MainActor.assumeIsolated { APStart.shared.open(continuing: id) } }
             }
         }
@@ -2872,6 +2872,15 @@ extension APRecords {
     // 2단계 5-2b — 원천(continue·topic, 고르지 않았으면 빈 글자), 주제로 시작의 입력 판, 경로 카드 오른쪽 클릭 "이 경로에서 자율주행…"으로 연 경로
     @Published private(set) var source = ""
     let topic = APTopic()
+    // 가져오기(7단계 ⑫-7a): 원천 셋의 입력, 모으기 결과(import/gather.json), 가져오기 세션 결과(import-check.json), 이어 간 줄의 바뀐 본문(단위 id → 줄 차이),
+    // 단위 제안에서 되살린 키(다시 준비할 때 가리지 않음), 이 준비가 세트에 지시가 없어 초안 지시를 썼는지
+    let imp = APImportInput()
+    @Published private(set) var importGather: [String: Any] = [:]
+    @Published private(set) var importResult: [String: Any] = [:]
+    @Published private(set) var importChanged: [String: [String]] = [:]
+    @Published var importRevive: Set<String> = []
+    private(set) var importKey = ""
+    private(set) var importDraftedSet = false
     @Published private(set) var presetRoot: String?
     // 5-2b — 출발 확인의 설정 줄(모델·멈출 선)·승격 차례·자율주행 지시를 그 자리에서 바꾸기, 이어 간 줄 밖의 열린 미룬 몫
     @Published private(set) var settingsFrom = "past"            // 설정 값이 어디서 왔나(project·past·default, 규칙 apStartSettings)
@@ -2913,7 +2922,7 @@ extension APRecords {
     // 같은 경로·같은 프로젝트에서 도는 실행 — 끝날 때까지 출발을 잠근다. 6단계 ⑫-6 부터 엔진도 출발할 때 기록 저장소의 경로 자리로 거부한다(거의 같은 때 둘을 띄워도).
     // 경로는 실제 경로로 풀고 대소문자·유니코드 정규화를 접어 견준다(규칙 apPathOverlap, 엔진과 같은 규칙)
     var activeHere: String? {
-        guard hasDraft else { return nil }
+        guard hasDraft || isImport else { return nil }
         let key = root.isEmpty ? nil : apPathKey(apRealPath(root))
         return AutopilotStore.shared.runs.first { r in
             (key.map { k in r.repos.contains { apPathOverlap(k, apPathKey(apRealPath($0)), home: NSHomeDirectory()) } } ?? false)
@@ -2951,9 +2960,9 @@ extension APRecords {
     func open(continuing runId: String? = nil) {
         if !sweptDrafts { sweepDrafts() }
         if let runId, runId != pastId {
-            if (hasDraft || source == "topic"), !preparing, !starting { dropFolder(); clearAll() }
-            if !hasDraft, source != "topic" { load(select: runId) }
-        } else if !hasDraft, source != "topic" { reset(); load(select: nil) }
+            if (hasDraft || freshSource), !preparing, !starting { dropFolder(); clearAll() }
+            if !hasDraft, !freshSource { load(select: runId) }
+        } else if !hasDraft, !freshSource { reset(); load(select: nil) }
         checkLeftovers()
         present()
     }
@@ -2987,11 +2996,19 @@ extension APRecords {
         case "topic":
             let from = presetRoot ?? (root.isEmpty ? nil : root)
             let keep = past   // 이어 갈 실행 목록은 둔다(다시 이어 가기로 돌아올 수 있게)
-            if hasDraft { dropFolder(); reset() }
+            if hasDraft || isImport { dropFolder(); reset() }
             past = keep
             source = "topic"
             step = 1
             if topic.existingPath.isEmpty, topic.pathMode == "existing", let f = from { topic.existingPath = f }
+        case "todo", "list", "legacy":   // 가져오기(7단계 ⑫-7a) — 작업 경로는 경로 카드 경로 → 지금 경로 → 가장 최근 실행의 경로
+            let from = presetRoot ?? (root.isEmpty ? nil : root) ?? past.first?.root
+            let keep = past
+            if hasDraft || freshSource { dropFolder(); reset() }
+            past = keep
+            source = key
+            step = 1
+            if imp.path.isEmpty, let f = from { imp.path = f }
         default: break
         }
     }
@@ -3094,6 +3111,7 @@ extension APRecords {
         id = ""; dir = ""; settings = [:]; tickets = [:]; needNewId = false; proposedOnce = false
         settingsFrom = "past"; settingsEdited = false; settingsProblems = []; promotionEdited = false; promotionBefore = []
         lastSet = nil; editingSet = false; setDraft = ""; setNote = nil; openParked = []; includeParked = []
+        importGather = [:]; importResult = [:]; importChanged = [:]; importRevive = []; importKey = ""; importDraftedSet = false
         if source == "continue" { source = "" }
     }
     // 원천·주제 입력·경로 카드 경로까지 모두(준비 버리기·출발 뒤)
@@ -3102,6 +3120,7 @@ extension APRecords {
         source = ""
         presetRoot = nil
         topic.reset()
+        imp.reset()
     }
 
     private var db: String { autopilotRoot + "/private/records.sqlite" }
@@ -3420,6 +3439,8 @@ extension APRecords {
         if source == "topic" {
             run["source"] = "topic"
             if let sd = prev?["seed"] { run["seed"] = sd }   // 엔진(seed)이 쓴 출발 전 자율주행 가지 기록은 그대로 잇는다(5단계 ⑪-2)
+        } else if isImport {
+            run["source"] = source   // 가져오기(7단계 ⑫-7a): todo·list·legacy, 이어 간 실행은 없다
         } else {
             run["source"] = "continue"
             run["continues"] = pastId ?? ""
@@ -3660,7 +3681,7 @@ extension APRecords {
         let live = Set(units.filter { $0.excluded == nil && $0.blocked == nil }.map(\.id))
         out += (probeCards + criticCards).filter { $0.unit.map { live.contains($0) } ?? true }
         if let w = weakCard { out.append(w) }
-        if source == "topic" { out += draftCards + harnessCards }   // 주제로 시작(⑪-2): 초안 세션이 물은 것·지시가 다루지 않은 하네스 확인 지점
+        if source == "topic" || isImport { out += draftCards + harnessCards }   // 주제로 시작(⑪-2)·가져오기(⑫-7a): 세션이 물은 것·지시가 다루지 않은 하네스 확인 지점
         let outside = openParked.filter { includeParked.contains($0.id) }.map { APCarry(id: $0.id, unit: $0.unit, kind: $0.kind, title: $0.title, why: $0.why) }
         for c in carryPark + outside {
             out.append(APCard(id: c.id, kind: "next_start", label: carryPark.contains(c) ? "지난 실행에서 미룬 사람 몫" : "이어 간 줄 밖에서 미룬 사람 몫", title: c.title,
@@ -3950,8 +3971,8 @@ extension APRecords {
     func saveSet() {
         guard let p = project, !starting else { return }
         if let why = apInstructionSaveProblem(setDraft) { setNote = why; return }
-        // 주제로 시작(⑪-2 보안 검토): 세트는 출발을 누를 때만 쓴다. 여기서는 출발 때 쓸 글만 바꾼다(준비를 버리면 세트는 그대로)
-        if source == "topic" {
+        // 주제로 시작(⑪-2 보안 검토)·가져오기 세션이 쓴 초안 지시(⑫-7a): 세트는 출발을 누를 때만 쓴다. 여기서는 출발 때 쓸 글만 바꾼다(준비를 버리면 세트는 그대로)
+        if source == "topic" || (isImport && importDraftedSet) {
             setText = setDraft.trimmingCharacters(in: .whitespacesAndNewlines)
             editingSet = false
             setNote = "저장했습니다. 출발을 누를 때 이 글을 세트에 씁니다(지금 세트는 그대로입니다)."
@@ -4477,7 +4498,11 @@ extension APRecords {
         apWriteJSON(dir + "/answers.json", answers)
         if source == "topic", let why = writeTopicSet() { starting = false; startError = why; return }
         if source != "topic", pendingSet != nil, let why = writeRevisedSet() { starting = false; startError = why; return }
-        let src = dir, dst = autopilotRoot + "/runs/" + id, dev = apDevBuild, runId = id, topicRun = source == "topic"
+        if isImport {   // 가져오기(⑫-7a): 세션이 쓴 초안 지시는 출발할 때만 세트에, 고른 단위·고르지 않은 후보는 가져오기 줄로(엔진 start 가 기록 저장소에)
+            if importDraftedSet, let t = setText, !t.isEmpty, let why = writeSetFiles([("autopilot.md", Data((t + "\n").utf8))]) { starting = false; startError = why; return }
+            writeImportQueue()
+        }
+        let src = dir, dst = autopilotRoot + "/runs/" + id, dev = apDevBuild, runId = id, topicRun = source == "topic" || isImport
         queue.async {
             var moved = src == dst
             if !moved {
@@ -4511,15 +4536,19 @@ extension APRecords {
     // 주제로 시작의 세트(5단계 ⑪-2, 설계 5장 5절): 출발할 때(동결 직전) 명세 spec.md·기술 스택 stack.json·자율주행 지시 autopilot.md 를
     // private/projects/<프로젝트>/set/ 에 쓴다(0600, 고치기 전 글은 set-backup/). 엔진 start 가 이 세트를 고정 설정과 pinned/set/ 으로 뜬다. 못 쓰면 까닭
     private func writeTopicSet() -> String? {
+        let spec = (try? String(contentsOfFile: dir + "/draft/spec.md", encoding: .utf8)) ?? ""
+        let stack = (try? JSONEncoder().encode(topicStack)).flatMap { try? JSONSerialization.jsonObject(with: $0) }.flatMap { try? JSONSerialization.data(withJSONObject: $0, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]) } ?? Data("{}".utf8)
+        var files: [(String, Data)] = [("spec.md", Data(spec.utf8)), ("stack.json", stack + Data("\n".utf8))]
+        if let t = setText, !t.isEmpty { files.append(("autopilot.md", Data((t + "\n").utf8))) }
+        return writeSetFiles(files)
+    }
+    // 세트 파일 쓰기(주제로 시작·가져오기 세션 초안 지시) — 0600, 고치기 전 글은 set-backup/, 임시 파일 + rename. 못 쓰면 까닭
+    private func writeSetFiles(_ files: [(String, Data)]) -> String? {
         guard let p = project else { return "프로젝트 이름이 없어 세트를 쓰지 못했습니다" }
         let fm = FileManager.default
         let dirSet = autopilotRoot + "/private/projects/\(p)/set", bdir = autopilotRoot + "/private/projects/\(p)/set-backup"
         try? fm.createDirectory(atPath: dirSet, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         let stamp = formatter("yyyyMMdd-HHmmss").string(from: Date())
-        let spec = (try? String(contentsOfFile: dir + "/draft/spec.md", encoding: .utf8)) ?? ""
-        let stack = (try? JSONEncoder().encode(topicStack)).flatMap { try? JSONSerialization.jsonObject(with: $0) }.flatMap { try? JSONSerialization.data(withJSONObject: $0, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]) } ?? Data("{}".utf8)
-        var files: [(String, Data)] = [("spec.md", Data(spec.utf8)), ("stack.json", stack + Data("\n".utf8))]
-        if let t = setText, !t.isEmpty { files.append(("autopilot.md", Data((t + "\n").utf8))) }
         for (name, data) in files {
             let path = dirSet + "/" + name
             if let old = fm.contents(atPath: path), old != data {
@@ -4812,6 +4841,274 @@ extension APStart {
 }
 
 // 출발 화면의 상자 — 제목과 작은 설명, 안에 줄들
+// MARK: 7단계 ⑫-7a 가져오기 — 원천 셋(저장소 할 일 문서·바깥 목록·옛 자동화 옮기기)의 2단계 "보드가 준비": 모으기(앱 안 엔진 import gather: 원천 읽기·
+// 이미 끝난 것·진행 중인 것 가리기·근거 묶음과 비밀 가리기·하네스 확인 지점) → 지난 자율주행 세트 → 판정 놓침 → 가져오기 세션(엔진 import session: 읽기 도구만,
+// 단위·카드 초안 → 기계 검사) → 이어 가기와 같은 단위마다 기계 검사(status --json)·환경·따로 작업 트리·판정 미리 돌리기·반대 탐침·비판 세션.
+// 같은 항목이 다시 오면(대기열에 정의가 남은 열린 줄) 가져오기 세션을 거치지 않고 그 줄의 정의로 잇는다(모델 0, 바뀐 본문은 단위 제안에 줄 차이).
+// 가린 항목은 준비 화면에 수와 까닭만, 되살리기는 단위 제안에서 고른 뒤 다시 준비한다(되살린 키는 가리지 않음)
+
+extension APStart {
+    var isImport: Bool { ["todo", "list", "legacy"].contains(source) }
+    var freshSource: Bool { source == "topic" || isImport }
+    var importSource: APImportSource? { APImportSource(rawValue: source) }
+    // 모은 항목(gather.json items) — 가린 것·이어 가는 것·새 것
+    var importItems: [[String: Any]] { importGather["items"] as? [[String: Any]] ?? [] }
+    var importHidden: [[String: Any]] { importItems.filter { $0["decision"] as? String == "hidden" } }
+
+    func prepareImport() {
+        guard isImport, !preparing, !starting, imp.blocker(source) == nil, let src = importSource else { return }
+        let key = imp.key(source) + "\u{1}" + importRevive.sorted().joined(separator: "\u{2}")
+        if prepared, key == importKey, !dir.isEmpty { step = 2; return }   // 같은 입력이면 다시 준비하지 않는다(가져오기 세션은 모델 비용이 든다)
+        if !dir.isEmpty { dropFolder(); id = ""; dir = "" }
+        importKey = key
+        step = 2
+        preparing = true; prepared = false
+        problems = []; prerunPassed = []; prerunIds = []; units = []; cards = []; draftCards = []; harnessCards = []; scenarioCards = []; criterionCards = []
+        probeCards = []; criticCards = []; criticSummary = [:]; weakCard = nil; fixRound = 0; fixing = false; missInfo = [:]; judgeChanges = []; judgeChangeFrom = ""
+        missesUsed = []; pendingSet = nil; critRound = 0; keepHistory = false
+        importGather = [:]; importResult = [:]; importChanged = [:]; importDraftedSet = false
+        project = imp.projectName; root = imp.root
+        // 실행 설정(주제로 시작과 같은 꼴): 프로젝트 설정에 남긴 모델·멈출 선이 있으면 그것(규칙 apStartSettings), 없으면 기본
+        let proj = project ?? "import"
+        let ps = apRead(autopilotRoot + "/projects/\(proj).json") as? [String: Any] ?? [:]
+        let pick = apStartSettings(project: ps, past: [:])
+        settingsFrom = pick.from
+        settings = ["model": pick.model ?? apDraftModel, "title": src.label + " 가져오기", "project": proj,
+                    "stopline": ["seven_day": pick.week ?? 0.80, "five_hour": pick.five ?? 0.95]]
+        if apDevBuild {   // 시험 빌드만: 가짜 claude(설정 값 autopilotReadClaude)·장난감 사용량 파일(autopilotUsagePath, 6단계 ⑫-6 의 usage_path)
+            if let c = UserDefaults.standard.string(forKey: "autopilotReadClaude"), !c.isEmpty { settings["claude_path"] = c }
+            if let u = UserDefaults.standard.string(forKey: "autopilotUsagePath"), !u.isEmpty { settings["usage_path"] = u }
+        }
+        var pp = apPublishParse(ps["publish"]).publish
+        if pp.notify == nil { APConnections.shared.loadOnce(); pp.notify = APConnections.shared.webhooks.filter { $0.scopes.contains("notify") }.map(\.id) }
+        publish = pp; publishEdited = false; publishProblems = []
+        pubService = pp.report?.service.rawValue ?? "none"; pubSpace = pp.report?.space ?? ""; pubParent = pp.report?.parent ?? ""
+        settings["publish"] = apPublishJSON(pp)
+        tickets = ps["tickets"] as? [String: Any] ?? [:]
+        jira = !tickets.isEmpty
+        lastSet = APRecords.lastSet(db, project: proj).map { APSetVersion(text: $0.text, at: $0.at, run: $0.run) }
+        let setPath = autopilotRoot + "/private/projects/\(proj)/set/autopilot.md"
+        setText = (try? String(contentsOfFile: setPath, encoding: .utf8)).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.flatMap { $0.isEmpty ? nil : $0 }
+        setAt = mtime(setPath)?.timeIntervalSince1970
+        assignId()
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        lines = [
+            APPrepLine(id: "collect", title: "모으기 · " + src.label),
+            APPrepLine(id: "hide", title: "이미 끝난 것·진행 중인 것 가리기"),
+            APPrepLine(id: "set", title: "지난 자율주행 세트"),
+            APPrepLine(id: "harness", title: "하네스 읽기"),
+            APPrepLine(id: "misses", title: "판정 놓침(이 프로젝트)"),
+            APPrepLine(id: "import", title: "가져오기 세션"),
+            APPrepLine(id: "importcheck", title: "가져오기 기계 검사"),
+            APPrepLine(id: "check", title: "단위마다 기계 검사 · 엔진 출발 전 확인"),
+            APPrepLine(id: "env", title: "시험 실행기 환경 확인"),
+            APPrepLine(id: "where", title: "따로 작업 트리 확인"),
+            APPrepLine(id: "prerun", title: "판정 미리 돌리기"),
+            APPrepLine(id: "probe", title: "반대 탐침"),
+            APPrepLine(id: "critic", title: "판정 비판 세션"),
+        ]
+        setLine("collect", "run")
+        let rootNow = root, d = dir
+        var cfg = imp.json(source)
+        cfg["name"] = proj
+        cfg["include"] = importRevive.sorted()
+        queue.async {
+            let info = APStart.readRepos(roots: [rootNow])
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard self.dir == d, self.isImport, self.preparing else { return }
+                    self.repos = info.repos; self.repoInfo = info.info
+                    self.pickDefaultBases(self.project, self.settings)
+                    apWriteJSON(d + "/import.json", cfg)
+                    self.writeDraft([])
+                    self.runGather()
+                }
+            }
+        }
+    }
+
+    // 실패한 줄에서 멈춘다 — 뒤 줄은 하지 않음과 까닭. 1단계로 돌아가 고친 뒤 다시 준비한다
+    private func importStop(_ why: String) {
+        for i in lines.indices where ["wait", "run"].contains(lines[i].state) { lines[i].state = "skip"; lines[i].note = why }
+        preparing = false; prepared = false
+        importKey = ""
+        if !shown { TerminalHub.shared.toast("자율주행 출발 준비(가져오기)가 멈췄습니다: \(why)") }
+    }
+
+    private func runGather() {
+        let d = dir, dev = apDevBuild
+        queue.async {
+            let r = apEngine(["import", d, "gather"] + (dev ? ["--dev"] : []))
+            let o = (try? JSONSerialization.jsonObject(with: Data(r.out.utf8))) as? [String: Any] ?? [:]
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard self.dir == d, self.isImport else { return }
+                    self.importGather = o
+                    guard r.code == 0, o["ok"] as? Bool == true else {
+                        let probs = apStrings(o["problems"])
+                        self.setLine("collect", "fail", note: probs.first ?? (r.out.isEmpty ? "엔진이 답하지 않았습니다(\(r.code))" : apShort(r.out)), detail: Array(probs.dropFirst()))
+                        self.importStop("원천을 모으지 못해 여기서 멈춥니다(1단계에서 고쳐 다시 준비합니다)")
+                        return
+                    }
+                    let c = o["counts"] as? [String: Any] ?? [:]
+                    func n(_ k: String) -> Int { (c[k] as? NSNumber)?.intValue ?? 0 }
+                    let hidden = (c["hidden"] as? [String: Any] ?? [:]).mapValues { ($0 as? NSNumber)?.intValue ?? 0 }
+                    let req = (o["requests"] as? NSNumber)?.intValue ?? 0, red = (o["redacted"] as? NSNumber)?.intValue ?? 0
+                    let skippedFiles = apStrings(o["legacy_skipped"]), refused = apStrings(o["evidence_refused"])
+                    self.setLine("collect", "done",
+                                 note: "\(o["origin"] as? String ?? "") · 항목 \(n("total"))" + (req > 0 ? " · 바깥 요청 \(req)건" : "") + " · 근거 묶음 \((o["manifest"] as? NSNumber)?.intValue ?? 0)개 · 가린 비밀 \(red)",
+                                 detail: apStrings(o["notes"]) + skippedFiles.map { "읽지 않은 파일 · \($0)" } + refused.map { "근거 묶음에 넣지 않음 · \($0)" })
+                    let hideKinds: [(String, String)] = [("source_done", "원천에서 끝남"), ("source_progress", "원천에서 진행 중"), ("records_done", "이미 끝남"),
+                                                         ("running", "도는 실행에서 진행 중"), ("queue_state", "대기열에서 뺀·보류한 줄")]
+                    let parts = hideKinds.compactMap { k, l in (hidden[k] ?? 0) > 0 ? "\(l) \(hidden[k]!)" : nil }
+                    let hiddenN = hidden.values.reduce(0, +)
+                    var note = hiddenN == 0 ? "뺀 것 없음" : "\(hiddenN)개 뺌: " + parts.joined(separator: " · ") + ". 되살리기는 다음 단계(단위 제안)에서 합니다"
+                    if n("continue") > 0 { note += " · 대기열 줄을 이음 \(n("continue"))" + (n("changed") > 0 ? "(바뀐 본문 \(n("changed")))" : "") }
+                    if let a = self.activeHere { note = "이 경로에서 자율주행이 돌고 있습니다(\(a)). 그 실행이 끝난 뒤에 출발합니다 · " + note }
+                    self.setLine("hide", self.activeHere == nil ? "done" : "warn", note: note,
+                                 detail: self.importHidden.map { "\($0["title"] as? String ?? ""): \($0["why"] as? String ?? "")" })
+                    let need = o["need_instruction"] as? Bool ?? false
+                    self.setLine("set", "done", note: need ? "이 프로젝트 세트에 지시(autopilot.md)가 없어 가져오기 세션이 지시 초안을 씁니다(출발할 때만 세트에 씀)"
+                                                         : "지시 \(self.setText?.count ?? 0)자를 불러왔습니다(\(apDay(self.setAt))). 출발 때 엔진이 고정해 자율주행 세션에만 얹습니다")
+                    let hp = (o["harness_points"] as? NSNumber)?.intValue ?? 0
+                    self.setLine("harness", hp > 0 ? "done" : "skip", note: hp > 0 ? "확인 지점 \(hp)곳을 찾았습니다(" + (need ? "초안 지시가 모두 다뤄야 합니다)" : "세트의 지시가 다루지 않은 곳은 출발 카드로 묻습니다)")
+                                                                          : "하네스 확인 지점이 없습니다")
+                    self.runMisses { self.runImportSession() }
+                }
+            }
+        }
+    }
+
+    private func runImportSession() {
+        let d = dir, dev = apDevBuild, devClaude = APTopic.devClaudeArgs
+        let fresh = (importGather["counts"] as? [String: Any]).flatMap { ($0["new"] as? NSNumber)?.intValue } ?? 0
+        setLine("import", "run", note: fresh == 0 ? "" : "새 항목 \(fresh)개로 단위 초안을 씁니다(모델 \(settings["model"] as? String ?? apDraftModel), 읽기 도구만 · Bash·웹·MCP 없음)")
+        queue.async {
+            let r = apEngine(["import", d, "session"] + (dev ? ["--dev"] + devClaude : []))
+            let o = (try? JSONSerialization.jsonObject(with: Data(r.out.utf8))) as? [String: Any] ?? [:]
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard self.dir == d, self.isImport else { return }
+                    self.importResult = o
+                    let note = o["note"] as? String ?? (r.out.isEmpty ? "엔진이 답하지 않았습니다(\(r.code))" : apShort(r.out))
+                    if o["session"] as? Bool == false, o["ok"] as? Bool == true {
+                        self.setLine("import", "skip", note: note)
+                        self.setLine("importcheck", "skip", note: "세션 결과가 없습니다")
+                        self.importUnits()
+                        return
+                    }
+                    let sessionFailed = o.isEmpty || o["session"] as? Bool == false
+                    let units = o["units"] as? [[String: Any]] ?? [], cards = o["cards"] as? [[String: Any]] ?? [], skipped = o["skipped"] as? [[String: Any]] ?? []
+                    let sec = (o["sec"] as? NSNumber)?.doubleValue ?? 0, usd = (o["cost_usd"] as? NSNumber)?.doubleValue
+                    self.setLine("import", sessionFailed ? "fail" : "done",
+                                 note: sessionFailed ? note : "항목 \((o["items"] as? NSNumber)?.intValue ?? 0) → 단위 \(units.count) · 카드 \(cards.count) · 건너뜀 \(skipped.count)"
+                                    + ((o["instruction_chars"] as? NSNumber).map { $0.intValue > 0 ? " · 지시 초안 \($0)자" : "" } ?? ""),
+                                 detail: [String(format: "%.0f초", sec) + (usd.map { String(format: " · %.3f USD", $0) } ?? "") + " · 모델 \(o["model"] as? String ?? "?")"]
+                                    + skipped.map { "건너뜀 · \($0["key"] as? String ?? ""): \($0["why"] as? String ?? "")" })
+                    if sessionFailed { self.setLine("importcheck", "skip", note: "가져오기 세션이 결과를 쓰지 못했습니다"); self.importStop("가져오기 세션이 끝나지 않아 여기서 멈춥니다"); return }
+                    let probs = apStrings(o["problems"]), warns = apStrings(o["warnings"])
+                    guard o["ok"] as? Bool == true else {
+                        self.setLine("importcheck", "fail", note: "고칠 것 \(probs.count)개: \(probs.first ?? "")", detail: probs + warns)
+                        self.importStop("가져오기 결과가 기계 검사를 지나지 않아 여기서 멈춥니다(1단계에서 덧붙일 말을 고쳐 다시 준비합니다)")
+                        return
+                    }
+                    let missing = o["harness_missing"] as? [[String: Any]] ?? []
+                    self.setLine("importcheck", warns.isEmpty ? "done" : "warn",
+                                 note: "칸·상한·HTML 없음·비밀 꼴 없음·판정 명령 있음·항목마다 단위·카드·건너뜀 · 원천 항목 키 겹침 없음"
+                                    + ((o["harness_points"] as? NSNumber)?.intValue ?? 0 > 0 ? " · 하네스 확인 지점 \(missing.isEmpty ? "모두 다룸" : "\(missing.count)곳 빠짐(출발 카드로)")" : ""),
+                                 detail: warns)
+                    self.importUnits()
+                }
+            }
+        }
+    }
+
+    // 이어 가는 줄(대기열에 남은 정의) + 가져오기 세션 단위 → 출발 준비의 단위, 그 뒤는 이어 가기와 같은 확인
+    private func importUnits() {
+        var list: [APDraftUnit] = [], changed: [String: [String]] = [:]
+        let bundle = importGather["bundle"] as? String
+        var k = 0
+        func unit(_ d: [String: Any], _ last: String) -> APDraftUnit {
+            var u = APDraftUnit(id: d["id"] as? String ?? "u\(list.count + 1)")
+            u.n = list.count + 1
+            u.title = d["title"] as? String ?? ""; u.kind = d["kind"] as? String ?? ""; u.check = d["check"] as? String ?? ""
+            u.sourceKey = d["source_key"] as? String ?? ""
+            u.est = apNum(d["est_min"])
+            u.depends = d["depends"] as? [String] ?? []
+            u.story = apText(d["story"]); u.origStory = u.story
+            u.task = u.story == nil ? nil : apStrings(d["tickets"]).first
+            u.last = last
+            // 판정 범위를 넓히는 칸은 한 번 더 버린다(⑪-2 보안 검토와 같은 꼴, 작업 폴더·근거 묶음·티켓은 엔진이 정한 값)
+            let keep = d.filter { k, _ in ["cwd", "context", "tickets", "story", "source_key", "source_digest"].contains(k) || !apDraftWideningKeys.contains(k) }
+            u.def = (try? JSONSerialization.data(withJSONObject: keep, options: [.sortedKeys])) ?? Data()
+            return u
+        }
+        for it in importItems where it["decision"] as? String == "continue" {
+            var item = APImportItem()
+            item.key = it["key"] as? String ?? ""
+            for c in it["carry"] as? [[String: Any]] ?? [] {
+                guard let raw = c["def"] as? String, let def = (try? JSONSerialization.jsonObject(with: Data(raw.utf8))) as? [String: Any],
+                      var q = apCarryQueueUnit(def: def, id: "c\(k + 1)", item: item, context: bundle) else { continue }
+                k += 1
+                q["source_digest"] = it["digest"] as? String ?? ""
+                let u = unit(q, "이어 감")
+                if let ch = it["changed"] as? [String], !ch.isEmpty { changed[u.id] = ch }
+                list.append(u)
+            }
+        }
+        for d in importResult["units"] as? [[String: Any]] ?? [] { list.append(unit(d, "새 단위")) }
+        units = list
+        importChanged = changed
+        // Jira 하위 작업(상위 스토리가 있는 항목)은 그 스토리로 묶는다(원천이 Jira 목록이면 이미 있는 스토리를 그대로, 설계 2장 끝)
+        stories = []
+        var seen = Set<String>()
+        for u in units { if let st = u.story, seen.insert(st).inserted { stories.append(APStory(id: st, key: st, kind: u.kind)) } }
+        if !stories.isEmpty { jira = true; refreshEpic() }
+        draftCards = (importResult["cards"] as? [[String: Any]] ?? []).compactMap { c in
+            APStart.draftCard(c).map { var x = $0; x.label = "가져오기 세션이 물음"; return x }
+        }
+        harnessCards = (importResult["harness_missing"] as? [[String: Any]] ?? []).compactMap(APStart.harnessCard)
+        if importResult["need_instruction"] as? Bool == true,
+           let t = (try? String(contentsOfFile: dir + "/import/out/autopilot.md", encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty {
+            setText = t; setAt = Date().timeIntervalSince1970; importDraftedSet = true
+        }
+        estimates = calibrate()
+        if units.isEmpty {
+            for l in ["env", "where", "prerun", "probe", "critic"] { setLine(l, "skip", note: "") }
+            setLine("check", "skip", note: "가져올 단위가 없습니다(모두 가렸거나 카드·건너뜀)")
+            preparing = false; prepared = true
+            buildCards()
+            return
+        }
+        setLine("check", "run")
+        writeDraft(units)
+        runStatus(prerun: true, ids: Set(units.map(\.id)), critic: true)
+    }
+
+    // 단위 제안의 "되살리기" — 가린 항목을 고른 뒤 다시 준비한다(되살린 키는 가리지 않음, 가져오기 세션·비판 세션은 다시 돈다)
+    func toggleRevive(_ key: String) { if importRevive.contains(key) { importRevive.remove(key) } else { importRevive.insert(key) } }
+    func reviveImport() {
+        guard isImport, !importRevive.isEmpty, !preparing, !starting else { return }
+        prepareImport()
+    }
+
+    // 출발할 때 가져오기 줄(import-queue.json) — 고를 수 있는 단위 모두(고르지 않은 후보도 대기열에 남는다). 엔진 start 가 기록 저장소 대기열에 한 줄씩
+    private func writeImportQueue() {
+        guard let p = project, let src = importSource else { return }
+        let items = importItems
+        func item(_ key: String) -> [String: Any]? { items.first { apKeyFamily($0["key"] as? String ?? "", key) } }
+        let lines = choosable.compactMap { u -> APImportQueueLine? in
+            guard !u.sourceKey.isEmpty, let d = (try? JSONSerialization.jsonObject(with: u.def)) as? [String: Any],
+                  let def = try? JSONSerialization.data(withJSONObject: d, options: [.sortedKeys]) else { return nil }
+            let it = item(u.sourceKey)
+            return APImportQueueLine(key: u.sourceKey, title: u.title, kind: u.kind, estMin: u.est, digest: d["source_digest"] as? String ?? "",
+                                     summary: (it?["body_lines"] as? [String] ?? []).joined(separator: "\n"), source: it?["source"] as? String ?? src.rawValue,
+                                     def: String(decoding: def, as: UTF8.self))
+        }
+        apWriteJSON(dir + "/import-queue.json", apImportQueueJSON(project: p, source: src, lines: lines))
+    }
+}
+
 struct APBox<Content: View>: View {
     let title: String
     var note = ""
@@ -4954,10 +5251,11 @@ struct APStartSheet: View {
             APMark()
             Text(s.step == 4 ? "출발 확인" : "새 자율주행").boardFont(15, weight: .bold).fixedSize()
             if s.source == "topic" { APChip(text: "주제로 시작", color: Palette.accent) }
-            if let p = s.project, s.source != "topic" || s.step > 1 { APChip(text: p, color: APColor.board) }
+            if let src = s.importSource { APChip(text: src.label, color: Palette.accent) }
+            if let p = s.project, !s.freshSource || s.step > 1 { APChip(text: p, color: APColor.board) }
             if s.jira { APChip(text: "Jira 연결", color: APColor.jira) }
             Spacer(minLength: 4)
-            if s.hasDraft || s.source == "topic" {
+            if s.hasDraft || s.freshSource {
                 APButton(title: "준비 버리기", icon: "trash", enabled: !s.starting && !s.preparing,
                          help: s.source == "topic" ? "이 준비(주제 글·링크·고른 스택·초안 결과)와 준비가 만든 자율주행 가지를 버립니다. 보드가 만든 새 폴더는 지우지 않습니다" : "출발하지 않은 이 준비와 실행 폴더를 지웁니다",
                          axid: "ap-start-discard") { s.discard() }
@@ -4972,7 +5270,7 @@ struct APStartSheet: View {
         return WrapRow(spacing: 6) {
             ForEach(0..<4, id: \.self) { i in
                 let n = i + 1
-                let can = n == 1 || (n == 2 && (s.preparing || s.prepared || (s.source == "topic" && !s.lines.isEmpty))) || (n >= 3 && s.prepared && !s.preparing)
+                let can = n == 1 || (n == 2 && (s.preparing || s.prepared || (s.freshSource && !s.lines.isEmpty))) || (n >= 3 && s.prepared && !s.preparing)
                 Button {
                     guard can, n != s.step, !s.starting else { return }
                     if n == 4 { s.toConfirm() } else if n == 3 { s.toProposal() } else { s.step = n }
@@ -5001,6 +5299,8 @@ struct APStartFoot: View {
     @ObservedObject var s: APStart
     @ObservedObject private var ap = AutopilotStore.shared   // 같은 경로에서 도는 실행이 끝나면 잠금이 풀리게
     @ObservedObject private var tp = APStart.shared.topic    // 주제로 시작 입력이 바뀌면 다음 단추가 풀리게
+    @ObservedObject private var im = APStart.shared.imp      // 가져오기 입력이 바뀌면 다음 단추가 풀리게(7단계 ⑫-7a)
+    @ObservedObject private var cn = APConnections.shared
     var body: some View {
         HStack(alignment: .center, spacing: 8) {
             if s.step > 1 { APButton(title: "이전", enabled: !s.starting, axid: "ap-prev") { s.step == 4 ? s.toProposal() : (s.step = s.step - 1) } }
@@ -5013,11 +5313,13 @@ struct APStartFoot: View {
         switch s.step {
         case 1:
             if s.source == "topic" { apNote(tp.blocker ?? "원천은 하나만 고릅니다", tp.blocker == nil ? .secondary : APColor.limit) }
+            else if s.isImport { let b = im.blocker(s.source); apNote(b ?? "원천은 하나만 고릅니다", b == nil ? .secondary : APColor.limit) }
             else { apNote(s.hasDraft ? "원천은 하나만 고릅니다" : (s.past.isEmpty ? "이어 갈 지난 실행이 아직 없습니다. 주제로 시작을 고를 수 있습니다" : "원천을 하나 고릅니다")) }
         case 2:
             if s.preparing, s.linkUndecided { apNote("못 읽은 링크가 있습니다. 줄마다 다시 읽거나 이 링크를 빼고 계속합니다", APColor.limit) }
             else if s.preparing { apNote("준비하는 중입니다. 끝나면 다음으로 갈 수 있습니다. 시트를 닫아도 뒤에서 이어 갑니다") }
             else if s.source == "topic", !s.prepared { apNote("주제로 시작 준비가 멈췄습니다. 실패한 줄의 까닭을 보고 1단계에서 고친 뒤 다시 준비합니다", APColor.limit) }
+            else if s.isImport, !s.prepared { apNote("가져오기 준비가 멈췄습니다. 실패한 줄의 까닭을 보고 1단계에서 고친 뒤 다시 준비합니다", APColor.limit) }
             else if !s.problems.isEmpty { apNote("엔진이 출발 전 확인에서 고칠 것을 찾았습니다. 단위 제안은 볼 수 있고 출발은 잠깁니다", APColor.limit) }
             else if s.mode == "in_place", !s.modeReason.contains("설정으로") { apNote("따로 작업 트리 확인이 실패해 원래 작업 트리에서 돕니다", APColor.limit) }
             else { apNote("준비가 끝났습니다") }
@@ -5039,6 +5341,11 @@ struct APStartFoot: View {
                 APButton(title: "다음: 보드가 준비", primary: true, enabled: tp.ready && (!s.preparing || s.topicRedoable), help: tp.blocker ?? "보드가 혼자 준비합니다(새 폴더면 이때 만듭니다)", axid: "ap-next") {
                     s.prepareTopic()
                 }
+            } else if s.isImport {
+                let b = im.blocker(s.source)
+                APButton(title: "다음: 보드가 준비", primary: true, enabled: b == nil && !s.preparing, help: b ?? "보드가 원천을 모으고 가져오기 세션으로 단위 초안을 씁니다", axid: "ap-next") {
+                    s.prepareImport()
+                }
             } else {
                 APButton(title: "다음: 보드가 준비", primary: true, enabled: s.hasDraft && !s.units.isEmpty && s.noDefs == nil,
                          help: s.units.isEmpty ? "이어 갈 단위가 없습니다" : "보드가 혼자 준비합니다", axid: "ap-next") {
@@ -5059,6 +5366,7 @@ struct APStartFoot: View {
 // 1단계 원천 고르기 — 원천 다섯(이어 가기 말고는 잠금과 까닭), 이어 갈 실행, 작업 경로, 에픽(Jira 연결 프로젝트), 가져올 것
 struct APStep1: View {
     @ObservedObject var s: APStart
+    @ObservedObject private var cn = APConnections.shared   // 바깥 목록 원천의 잠금(연결·키체인 있음)이 늦게 읽혀도 다시 그리게(7단계 ⑫-7a)
     @State private var pickRun = false
     @State private var openParked = false
     var body: some View {
@@ -5073,14 +5381,16 @@ struct APStep1: View {
             }
             APBox(title: "어디서 일을 가져올까요?", note: "하나만 고릅니다") {
                 source("continue", "지난 실행 이어 가기", continueSummary, lock: continueLock)
-                source("todo", "저장소 할 일 문서", "docs/TODO.md 같은 파일과 그 안의 절을 고릅니다", lock: "가져오기 세션이 항목마다 단위 초안을 쓰는 7단계에서 엽니다")
-                source("list", "바깥 목록", "Jira 필터나 Notion 데이터베이스. 연결이 있을 때만 고를 수 있습니다", lock: "바깥 연결(4단계) 뒤 7단계에서 엽니다")
-                source("legacy", "옛 자동화 옮기기", "다른 도구로 돌던 자동화의 멈춘 자리 기록과 원장을 가져옵니다", lock: "7단계에서 엽니다")
+                source("todo", "저장소 할 일 문서", "docs/TODO.md 같은 파일과 그 안의 절을 고릅니다. 항목마다 가져오기 세션이 단위 초안을 씁니다", lock: nil)
+                source("list", "바깥 목록", "Jira 필터·에픽이나 Notion 데이터베이스. 연결이 있을 때만 고를 수 있습니다", lock: s.imp.listLock)
+                source("legacy", "옛 자동화 옮기기", "다른 도구로 돌던 자동화의 멈춘 자리 기록과 원장을 가져옵니다. 비밀은 가린 근거 묶음으로만 넘깁니다", lock: nil)
                 source("topic", "주제로 시작", "주제 글과 자료 링크를 주면 초안 세션이 명세와 단위를 씁니다. 새 폴더에서도 됩니다", lock: nil,
                        after: "자료 링크는 연결이 있으면 다음 단계(보드가 준비)에서 메타 정보만 읽고, 그 근거 묶음으로 초안 세션이 명세·단위·판정 시나리오를 씁니다")
             }
             if s.source == "topic" {
                 APTopicStep1(s: s, t: s.topic)
+            } else if s.isImport {
+                APImportStep1(s: s, m: s.imp)
             } else {
                 if !s.past.isEmpty, s.source == "continue" { pastList }
                 if s.hasDraft { pathBox }
@@ -5351,6 +5661,7 @@ struct APStep3: View {
                 Label(w, systemImage: "exclamationmark.triangle.fill").boardFont(11).foregroundStyle(APColor.limit).fixedSize(horizontal: false, vertical: true)
             }
             goneBox
+            if s.isImport { APImportHiddenBox(s: s) }
             otherBox
             cardsLine
         }
@@ -5366,7 +5677,8 @@ struct APStep3: View {
                         Text("\(u.n). \(u.title)").boardFont(12, weight: .semibold).fixedSize(horizontal: false, vertical: true)
                         WrapRow(spacing: 4) {
                             if !u.kind.isEmpty { APChip(text: apKind(u.kind), color: APColor.board) }
-                            APChip(text: u.last == "새 단위" ? "새 단위(초안 세션)" : "지난번 " + apUnitLabel(u.last), color: APColor.unit(u.last))
+                            APChip(text: u.last == "새 단위" ? (s.isImport ? "새 단위(가져오기 세션)" : "새 단위(초안 세션)") : u.last == "이어 감" ? "대기열 줄을 이음" : "지난번 " + apUnitLabel(u.last),
+                                   color: APColor.unit(u.last))
                             if let t = u.task { APTicket(key: t) }
                             if !u.depends.isEmpty {
                                 APChip(text: "앞: " + u.depends.map { d in s.units.first { $0.id == d }.map { "\($0.n)" } ?? "지난 실행" }.joined(separator: "·"), color: APColor.muted)
@@ -5377,6 +5689,8 @@ struct APStep3: View {
                             if dec == "out", u.checked { APChip(text: "카드 답으로 뺌", color: APColor.muted, strong: true) }
                         }
                         if !u.check.isEmpty { Text("판정 " + u.check).boardFont(10, design: .monospaced).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle) }
+                        if s.isImport, !u.sourceKey.isEmpty { Text("원천 " + u.sourceKey).boardFont(10, design: .monospaced).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle) }
+                        if let ch = s.importChanged[u.id] { APImportChangedNote(lines: ch) }
                     }
                     Spacer(minLength: 6)
                     VStack(alignment: .trailing, spacing: 1) {
@@ -5524,6 +5838,7 @@ struct APConfirm: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             whereBox
+            if s.isImport { APImportSourceBox(s: s) }
             if !s.problems.isEmpty { APProblems(problems: s.problems) }
             if let e = s.startError { startErrorBox(e) }
             if s.jira { ticketTree }
@@ -5540,7 +5855,7 @@ struct APConfirm: View {
             }
         }
         .onAppear {
-            if s.source == "topic" { open.insert("set"); open.insert("checks") }
+            if s.source == "topic" || (s.isImport && s.importDraftedSet) { open.insert("set"); open.insert("checks") }
             if !s.judgeChanges.isEmpty { open.insert("set"); open.insert("judgediff") }   // 판정 차이(⑪-3)는 펼친 채로
         }   // 주제로 시작: 초안 지시와 판정을 펼친 채로(⑪-2 보안 검토)
         .onChange(of: s.flash) { _, _ in
@@ -6000,7 +6315,7 @@ struct APConfirm: View {
         let counts = apDiffCount(diff)
         return APFold(title: "자율주행 지시", summary: head, axid: "ap-fold-set", open: bind("set"), tag: s.editingSet ? "고치는 중" : nil) {
             if s.editingSet {
-                apNote(s.source == "topic" ? "지시 글 · 이 자리에서 고치는 중입니다. 저장하면 출발 때 세트에 쓸 글이 바뀝니다(출발을 누르기 전에는 세트를 바꾸지 않습니다)."
+                apNote(s.source == "topic" || (s.isImport && s.importDraftedSet) ? "지시 글 · 이 자리에서 고치는 중입니다. 저장하면 출발 때 세트에 쓸 글이 바뀝니다(출발을 누르기 전에는 세트를 바꾸지 않습니다)."
                                            : "지시 글 · 이 자리에서 고치는 중입니다. 저장하면 세트(private/projects/\(s.project ?? "")/set/autopilot.md)가 바뀌고 다음 출발의 기준이 됩니다.")
                 TextEditor(text: $s.setDraft)
                     .font(.system(size: 11, design: .monospaced))
@@ -6084,6 +6399,9 @@ struct APConfirm: View {
             apNote("하네스 지문: 출발 때 엔진이 하네스 사본과 지문을 남기고, 끝나면 같은지 확인합니다. 저장소 하네스는 고치지 않습니다.")
             if s.source == "topic" {
                 apNote("주제로 시작: 이 지시는 초안 세션(모델)이 쓴 초안이고 지금은 준비 폴더(drafts/\(s.id)/draft/)에만 있습니다. 출발을 누를 때만 세트(private/projects/\(s.project ?? "")/set/autopilot.md)에 쓰고(고치기 전 글은 set-backup/), 준비를 버리면 세트는 그대로입니다. 하네스 확인 지점 가운데 지시가 다루지 않은 곳은 출발 카드로 묻습니다.")
+            } else if s.isImport {
+                apNote(s.importDraftedSet ? "가져오기: 이 프로젝트 세트에 지시가 없어 가져오기 세션(모델)이 쓴 초안입니다. 지금은 준비 폴더(drafts/\(s.id)/import/out/)에만 있고 출발을 누를 때만 세트에 씁니다. 하네스 확인 지점 가운데 지시가 다루지 않은 곳은 출발 카드로 묻습니다."
+                                          : "가져오기: 이 프로젝트 세트의 지시를 그대로 씁니다. 하네스 확인 지점 가운데 그 지시가 다루지 않은 곳은 출발 카드로 묻습니다(하네스가 바뀌면 다시 쓰는 일반판은 7단계 뒤 조각).")
             } else {
                 apNote("하네스 확인 지점 읽기와 지시 초안은 하네스 읽기(7단계)에서 엽니다.")
             }
