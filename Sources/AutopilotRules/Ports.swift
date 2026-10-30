@@ -2,7 +2,8 @@
 // 새 폴더 만들기(NewRepo.swift)가 바깥(폴더·git)을, 기술 스택 감지(Stack.swift)가 바깥(저장소 빌드 파일)을,
 // 버전 목록(Versions.swift)이 바깥(공식 목록 받기·하루 캐시)을, 원문 지우기(Purge.swift)가 바깥(실행 폴더·지운 기록)을,
 // 보고서 그리기(Report.swift, 3단계)가 바깥(실행 폴더·기록 저장소 읽기, 보고서 파일 쓰기)을, 시험 실행기(Scenarios.swift, 5단계 ⑪-1)가 바깥(도구 찾기·판정 돌리기)을,
-// 주제로 시작의 초안 세션·뼈대(Draft.swift·Skeleton.swift, 5단계 ⑪-2)가 바깥(초안 결과 폴더 읽기·뼈대 쓰기와 생성기 돌리기)을 부르는 자리.
+// 주제로 시작의 초안 세션·뼈대(Draft.swift·Skeleton.swift, 5단계 ⑪-2)가 바깥(초안 결과 폴더 읽기·뼈대 쓰기와 생성기 돌리기)을,
+// 판정 비판(Critique.swift, 5단계 ⑪-3)이 바깥(버리는 작업 트리에 망친 결과물·반례를 넣고 판정 돌리기)을 부르는 자리.
 // 진짜 어댑터는 보드(Sources/ClaudeBoard/AutopilotTopic.swift)에, 가짜 어댑터는 Tests/AutopilotRulesTests 에만 둔다(BoardRules 의 Ports.swift 와 같은 꼴, 이슈 #9).
 // 이름의 AP 는 보드 자율주행 절의 이름 짓기를 따르고, 보드가 BoardRules 도 import 하므로 겹치지 않게 한다(BoardRules.Clock 과 APClock).
 // 포트는 역할로 나눈다(범용 파일 포트를 두면 시험이 경로 글자 시험이 된다)
@@ -176,4 +177,17 @@ public protocol APSkeletonWork {
     func download(_ url: String, into relative: String) -> String?
     /// 바뀐 것을 모두 add 해 커밋한다. 커밋 sha, 바뀐 것이 없으면 nil
     func commit(_ message: String) -> (sha: String?, error: String?)
+}
+
+// MARK: - 판정 비판 (Critique.swift, 5단계 ⑪-3)
+
+// 버리는 작업 트리(반대 탐침·반례 확인) — 출발 기준(출발 전 자율주행 가지 머리 또는 출발 가지 머리)의 분리 작업 트리. 저장소에는 쓰지 않는다.
+// 진짜 어댑터는 엔진: 쓰기는 그 작업 트리 안 상대 경로만(링크를 따라가지 않음), 판정은 ⑪-1 판정 샌드박스 안에서 고정본으로
+public protocol APProbeWorkspace {
+    /// 단위 n 의 버리는 작업 트리를 출발 기준 그대로 되돌린다(없으면 만든다). 되면 nil, 아니면 까닭
+    func reset(unit n: Int) -> String?
+    /// 그 작업 트리의 단위 작업 폴더 기준 상대 경로에 파일을 쓴다. 되면 nil, 아니면 까닭
+    func put(unit n: Int, _ relative: String, _ data: Data) -> String?
+    /// 단위 판정을 그 작업 트리에서 돌린다. label 은 증거 폴더 이름 조각(probe-<종류> · case-<지적 id>)
+    func judge(unit n: Int, label: String) -> APJudgeOutcome
 }

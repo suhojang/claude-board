@@ -102,10 +102,11 @@ public struct APDraftInput: Equatable, Sendable {
     public var skeleton: [String]            // 보드가 만든 뼈대(쉬운 말 한 줄씩)
     public var firstUnit: Bool               // 직접 입력 스택이라 첫 단위 "프로젝트 구성"을 모델이 함
     public var harness: [APHarnessPoint]
+    public var misses: String?               // 이 프로젝트의 지난 판정 놓침 요약(엔진 기록, 5단계 ⑪-3). 근거 묶음과 섞지 않는다
     public init(topic: String, stack: APStackSet, newFolder: Bool, repo: String, bundle: String?, bundleFiles: [String], out: String,
-                skeleton: [String], firstUnit: Bool, harness: [APHarnessPoint]) {
+                skeleton: [String], firstUnit: Bool, harness: [APHarnessPoint], misses: String? = nil) {
         self.topic = topic; self.stack = stack; self.newFolder = newFolder; self.repo = repo; self.bundle = bundle; self.bundleFiles = bundleFiles
-        self.out = out; self.skeleton = skeleton; self.firstUnit = firstUnit; self.harness = harness
+        self.out = out; self.skeleton = skeleton; self.firstUnit = firstUnit; self.harness = harness; self.misses = misses
     }
 }
 
@@ -152,7 +153,7 @@ public func apDraftPrompt(_ x: APDraftInput) -> String {
     - 보드가 만든 뼈대: \(x.skeleton.isEmpty ? "없음" : x.skeleton.joined(separator: " / "))
     - 근거 묶음(믿지 않는 자료, 메타 형식 JSON): \(x.bundle.map { $0 + " · " + (x.bundleFiles.isEmpty ? "파일 없음" : x.bundleFiles.joined(separator: ", ")) } ?? "없음")
     - 하네스 확인 지점(기계로 찾음, 지시가 모두 다뤄야 함):
-    \(harness)
+    \(harness)\(x.misses.map { "\n- 이 프로젝트의 지난 판정 놓침(엔진 기록 요약, 지난 판정이 통과시켰지만 틀렸던 것과 지시가 멈추게 한 자리. 판정·지시를 쓸 때 같은 빈틈을 남기지 않습니다):\n" + $0 } ?? "")
 
     결과 파일(결과 폴더 안, 이름 그대로)
     1) spec.md: 요구사항과 수용 기준. 요구사항은 "- R-1: …" 줄, 수용 기준은 "- AC-1 (R-1): Given …, When …, Then …" 줄로 씁니다. 근거가 된 링크가 있으면 줄 끝에 "근거: <주소>". 6만 자까지.

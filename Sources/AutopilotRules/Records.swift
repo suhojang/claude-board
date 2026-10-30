@@ -3,8 +3,8 @@
 // 규칙 라이브러리에 두어 Tests/AutopilotRulesTests 가 SQLite 로 직접 건다(라이브러리는 Foundation 만, SQLite 는 엔진·보드·시험이)
 import Foundation
 
-public let apRecordsVersion: Int32 = 1
-public let apRecordsTables = ["projects", "runs", "units", "queue_items", "cards", "carry", "sets", "tickets", "imports"]
+public let apRecordsVersion: Int32 = 2
+public let apRecordsTables = ["projects", "runs", "units", "queue_items", "cards", "carry", "sets", "tickets", "imports", "judge_misses"]
 public let apRecordsSchemaV1 = """
 CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT NOT NULL, root TEXT UNIQUE, kind TEXT, repos TEXT, created REAL, updated REAL);
 CREATE TABLE runs (id TEXT PRIMARY KEY, project_id TEXT, title TEXT, source TEXT, continues TEXT, state TEXT, reason TEXT, model TEXT,
@@ -28,3 +28,14 @@ CREATE TABLE tickets (project_id TEXT NOT NULL, key TEXT NOT NULL, kind TEXT, pa
   created_run TEXT, created REAL, PRIMARY KEY (project_id, key));
 CREATE TABLE imports (path TEXT NOT NULL, sha256 TEXT NOT NULL, rows INTEGER, at REAL, PRIMARY KEY (path, sha256));
 """
+
+// 판 2(5단계 ⑪-3, 2026-10-30): 판정 놓침 표(설계 5장 7절). 실행·단위·신호 종류·판정 경로와 지문·짧은 까닭·쓰인 세트·상태(open·used·fixed)
+public let apRecordsSchemaV2 = """
+CREATE TABLE judge_misses (id TEXT PRIMARY KEY, project_id TEXT, run_id TEXT, unit_n INTEGER, unit_id TEXT, source_key TEXT, title TEXT,
+  signal TEXT, side TEXT, judge TEXT, judge_digest TEXT, why TEXT, set_id TEXT, state TEXT, created REAL, used_run TEXT);
+CREATE INDEX judge_misses_project ON judge_misses(project_id, state);
+"""
+
+// 판 올리기 차례: 판 n 으로 올리는 SQL. 엔진이 열 때 지금 판보다 높은 것을 차례로(한 transaction 안에서, 잠금을 잡은 뒤 판을 다시 보고) 건다
+public let apRecordsMigrations: [(version: Int32, sql: String)] = [(1, apRecordsSchemaV1), (2, apRecordsSchemaV2)]
+public func apRecordsSteps(from v: Int32) -> [(version: Int32, sql: String)] { apRecordsMigrations.filter { $0.version > v } }
