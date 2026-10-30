@@ -552,18 +552,8 @@ func passEnv(_ env: [String: String], extra: [String]) -> [String: String] {
 // 계정 사용률(0~1)과 초기화 시각. stream 의 rate_limit_event 를 주로 쓰고, 오래됐으면 보드·상태줄이 함께 쓰는 캐시, 그다음 사용량 API
 let usageCache = "/tmp/.claude-usage-cache.json"
 
-func usageFrom(apiJSON j: [String: Any], from: String, at: Double) -> [String: Any]? {
-    guard let five = j["five_hour"] as? [String: Any] else { return nil }
-    var u: [String: Any] = ["at": r3(at), "from": from]
-    // 캐시·API 는 퍼센트(84.0), stream 은 비율(0.84) — 비율로 맞춘다
-    if let v = num(five["utilization"]) { u["five_hour"] = v / 100 }
-    if let r = isoDate(five["resets_at"] as? String) { u["five_hour_resets"] = r }
-    if let seven = j["seven_day"] as? [String: Any] {
-        if let v = num(seven["utilization"]) { u["seven_day"] = v / 100 }
-        if let r = isoDate(seven["resets_at"] as? String) { u["seven_day_resets"] = r }
-    }
-    return u
-}
+// 퍼센트 꼴(캐시·API) → run.json usage 꼴은 규칙 apUsageFromPercent(AutopilotRules/Stopline.swift, 6단계 ⑫-6 에서 옮김)
+func usageFrom(apiJSON j: [String: Any], from: String, at: Double) -> [String: Any]? { apUsageFromPercent(j, from: from, at: at) }
 
 func usageFromCache() -> [String: Any]? {
     guard let m = (try? fm.attributesOfItem(atPath: usageCache))?[.modificationDate] as? Date,
@@ -2334,26 +2324,9 @@ final class Engine {
 
     // 새 단위를 시작해도 되는가. 계정 사용률이 멈출 선 이상이면 초기화 시각까지 기다리고 false(다시 확인하게)
     func stoplineGate() -> Bool {
-        let line = cfg["stopline"] as? [String: Any] ?? [:]
-        let l7 = num(line["seven_day"]) ?? 0.80, l5 = num(line["five_hour"]) ?? 0.95
-        var until: Double?, reason = ""
-        if let u = freshUsage() {
-            let t = now()
-            let r7 = num(u["seven_day_resets"]) ?? 0, r5 = num(u["five_hour_resets"]) ?? 0
-            let v7 = r7 > 0 && r7 <= t ? 0 : num(u["seven_day"]) ?? 0     // 초기화 시각이 지났으면 그 창은 0 으로 본다
-            let v5 = r5 > 0 && r5 <= t ? 0 : num(u["five_hour"]) ?? 0
-            if v7 >= l7 {
-                until = (r7 > t ? r7 : t + 600) + 120
-                reason = "계정 주간 사용률 \(Int((v7 * 100).rounded()))% 가 멈출 선 \(Int((l7 * 100).rounded()))% 에 닿아 새 단위를 시작하지 않고 \(when(until!)) 까지 기다립니다."
-            } else if v5 >= l5 {
-                until = (r5 > t ? r5 : t + 600) + 120
-                reason = "계정 5시간 사용률 \(Int((v5 * 100).rounded()))% 가 멈출 선 \(Int((l5 * 100).rounded()))% 에 닿아 새 단위를 시작하지 않고 \(when(until!)) 까지 기다립니다."
-            }
-        } else {
-            until = now() + 600
-            reason = "계정 사용률을 알 수 없어 새 단위를 시작하지 않고 10분 뒤 다시 확인합니다."
-        }
-        guard let until else { return true }
+        // 견주기·기다릴 때·글은 규칙 apStoplineWait(AutopilotRules/Stopline.swift, 6단계 ⑫-6 에서 같은 동작으로 옮김)
+        guard let w = apStoplineWait(usage: freshUsage(), stopline: cfg["stopline"] as? [String: Any] ?? [:], now: now(), tz: .current) else { return true }
+        let until = w.until, reason = w.reason
         if run["reason"] as? String != reason { event("board", reason) }
         setState("waiting_stopline", reason, until: until)
         switch waitUntil(until) {
