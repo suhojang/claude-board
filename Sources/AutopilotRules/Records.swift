@@ -3,7 +3,7 @@
 // 규칙 라이브러리에 두어 Tests/AutopilotRulesTests 가 SQLite 로 직접 건다(라이브러리는 Foundation 만, SQLite 는 엔진·보드·시험이)
 import Foundation
 
-public let apRecordsVersion: Int32 = 3
+public let apRecordsVersion: Int32 = 4
 public let apRecordsTables = ["projects", "runs", "units", "queue_items", "cards", "carry", "sets", "tickets", "imports", "judge_misses",
                                  "path_claims", "stopline_slots"]
 public let apRecordsSchemaV1 = """
@@ -47,6 +47,15 @@ CREATE TABLE stopline_slots (run_id TEXT PRIMARY KEY, project_id TEXT, unit_n IN
   since REAL, beat REAL);
 """
 
+// 판 4(7단계 ⑫-7a, 2026-10-30): 가져오기 줄의 칸 넷(설계 5장 7절) — queue_items 에 원천 지문 digest(제목·본문의 FNV-1a 64), 본문 요약 summary(바뀐 본문을
+// 다음 가져오기에서 줄로 견줌), 원천 source(todo·list·legacy), 단위 정의 def(같은 항목이 다시 오면 새 단위를 만들지 않고 이 정의로 잇는다)
+public let apRecordsSchemaV4 = """
+ALTER TABLE queue_items ADD COLUMN digest TEXT;
+ALTER TABLE queue_items ADD COLUMN summary TEXT;
+ALTER TABLE queue_items ADD COLUMN source TEXT;
+ALTER TABLE queue_items ADD COLUMN def TEXT;
+"""
+
 // 판 올리기 차례: 판 n 으로 올리는 SQL. 엔진이 열 때 지금 판보다 높은 것을 차례로(한 transaction 안에서, 잠금을 잡은 뒤 판을 다시 보고) 건다
-public let apRecordsMigrations: [(version: Int32, sql: String)] = [(1, apRecordsSchemaV1), (2, apRecordsSchemaV2), (3, apRecordsSchemaV3)]
+public let apRecordsMigrations: [(version: Int32, sql: String)] = [(1, apRecordsSchemaV1), (2, apRecordsSchemaV2), (3, apRecordsSchemaV3), (4, apRecordsSchemaV4)]
 public func apRecordsSteps(from v: Int32) -> [(version: Int32, sql: String)] { apRecordsMigrations.filter { $0.version > v } }

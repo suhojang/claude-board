@@ -318,8 +318,8 @@ private let aliveRows: [AliveRow] = [
         #expect(sqlite3_open(":memory:", &db) == SQLITE_OK)
         for s in apRecordsSteps(from: 0) where s.version <= 2 { #expect(exec(db, s.sql) == SQLITE_OK) }
         #expect(exec(db, "PRAGMA user_version=2; INSERT INTO runs(id,state) VALUES('r1','done'); INSERT INTO units(run_id,n,status) VALUES('r1',1,'done')") == SQLITE_OK)
-        #expect(apRecordsSteps(from: 2).map(\.version) == [3])
-        for s in apRecordsSteps(from: 2) { #expect(exec(db, s.sql) == SQLITE_OK); #expect(exec(db, "PRAGMA user_version=\(s.version)") == SQLITE_OK) }
+        #expect(apRecordsSteps(from: 2).map(\.version).first == 3)   // 판 4(⑫-7a)는 RecordsV4Tests
+        for s in apRecordsSteps(from: 2) where s.version <= 3 { #expect(exec(db, s.sql) == SQLITE_OK); #expect(exec(db, "PRAGMA user_version=\(s.version)") == SQLITE_OK) }
         #expect(one(db, "PRAGMA user_version") == "3")
         #expect(one(db, "SELECT COUNT(*) FROM units") == "1")
         #expect(exec(db, "INSERT INTO path_claims(key,path,run_id,claimed) VALUES('/w/zz-toy-a','/w/zz-toy-a','r2',1)") == SQLITE_OK)

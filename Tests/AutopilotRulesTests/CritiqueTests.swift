@@ -454,20 +454,20 @@ private let caseFiles: [String: String] = ["findings.json": findingsJSON, "cases
         sqlite3_close(db)
         #expect(sqlite3_open(path, &db) == SQLITE_OK)
         #expect(migrate(db) == apRecordsVersion)
-        #expect(apRecordsVersion == 3)   // ⑫-6 에서 판 3(자리 표 둘)
+        #expect(apRecordsVersion == 4)   // ⑫-6 에서 판 3(자리 표 둘), ⑫-7a 에서 판 4(가져오기 줄 칸 넷)
         #expect(one(db, "SELECT state FROM runs WHERE id='r1'") == "done")
         #expect(exec(db, "INSERT INTO judge_misses(id,project_id,run_id,signal,side,why,state,created) VALUES('r1/1/discard/1','zz-toy','r1','discard','judge','x','open',1)") == SQLITE_OK)
         #expect(one(db, "SELECT COUNT(*) FROM judge_misses WHERE project_id='zz-toy' AND state='open'") == "1")
-        #expect(apRecordsSteps(from: 3).isEmpty)
+        #expect(apRecordsSteps(from: 4).isEmpty)
         sqlite3_close(db)
     }
 
-    @Test("빈 저장소는 판 1·2·3 을 차례로")
+    @Test("빈 저장소는 판 1·2·3·4 를 차례로")
     func 새저장소() {
         var db: OpaquePointer?
         #expect(sqlite3_open(":memory:", &db) == SQLITE_OK)
-        #expect(apRecordsSteps(from: 0).map(\.version) == [1, 2, 3])
-        #expect(migrate(db) == 3)
+        #expect(apRecordsSteps(from: 0).map(\.version) == [1, 2, 3, 4])
+        #expect(migrate(db) == 4)
         for t in apRecordsTables { #expect(one(db, "SELECT name FROM sqlite_master WHERE type='table' AND name='\(t)'") == t) }
         sqlite3_close(db)
     }
@@ -511,5 +511,30 @@ private let caseFiles: [String: String] = ["findings.json": findingsJSON, "cases
     func 겹침() {
         let v = APJudgeView(unit: 1, unitId: "u1", title: "t", check: "test -f out.json && test -f OUT.json && test -f .Git", scenarios: [])
         #expect(apProbeTargets(v) == ["out.json"])
+    }
+}
+
+@Suite("자율주행 실행 기록 저장소 판 4") struct RecordsV4Tests {
+    private func exec(_ db: OpaquePointer?, _ sql: String) -> Int32 { sqlite3_exec(db, sql, nil, nil, nil) }
+    private func one(_ db: OpaquePointer?, _ sql: String) -> String? {
+        var st: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &st, nil) == SQLITE_OK else { return nil }
+        defer { sqlite3_finalize(st) }
+        guard sqlite3_step(st) == SQLITE_ROW, let c = sqlite3_column_text(st, 0) else { return nil }
+        return String(cString: c)
+    }
+
+    @Test("판 3 저장소를 판 4 로 올리면 대기열 줄은 그대로이고 가져오기 칸 넷(digest·summary·source·def)이 생긴다")
+    func 판4() {
+        var db: OpaquePointer?
+        #expect(sqlite3_open(":memory:", &db) == SQLITE_OK)
+        for s in apRecordsSteps(from: 0) where s.version <= 3 { #expect(exec(db, s.sql) == SQLITE_OK) }
+        #expect(exec(db, "PRAGMA user_version=3; INSERT INTO queue_items(project_id,source_key,title,state) VALUES('zz-toy','todo:a#b','가','open')") == SQLITE_OK)
+        #expect(apRecordsSteps(from: 3).map(\.version) == [4])
+        for s in apRecordsSteps(from: 3) { #expect(exec(db, s.sql) == SQLITE_OK); #expect(exec(db, "PRAGMA user_version=\(s.version)") == SQLITE_OK) }
+        #expect(one(db, "SELECT title FROM queue_items WHERE source_key='todo:a#b'") == "가")
+        #expect(exec(db, "UPDATE queue_items SET digest='d1', summary='줄', source='todo', def='{}' WHERE source_key='todo:a#b'") == SQLITE_OK)
+        #expect(one(db, "SELECT digest || source || def FROM queue_items") == "d1todo{}")
+        sqlite3_close(db)
     }
 }

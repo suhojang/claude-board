@@ -343,7 +343,9 @@ private func str(_ v: Any?) -> String { v as? String ?? "" }
 
 // 단위 하나(units.json 의 한 칸)의 기계 검사 — apDraftCheck 의 단위 줄(2026-10-30 7단계 ⑫-7a 에서 가져오기 세션 검사와 함께 쓰려고 그대로 떼어 냄).
 // earlier: 앞선 단위 id(depends·겹침 확인). 객체가 아니면 단위 없이(nil) 까닭만
-public func apDraftUnitParse(_ v: Any, n: Int, files: APDraftFiles, earlier unitIds: [String]) -> (unit: APDraftedUnit?, problems: [String], warnings: [String]) {
+// allowed·who: 받는 칸 허용 목록과 까닭 글의 세션 이름(가져오기 세션은 apImportUnitKeys·"가져오기 세션")
+public func apDraftUnitParse(_ v: Any, n: Int, files: APDraftFiles, earlier unitIds: [String], allowed: Set<String> = apDraftUnitKeys,
+                             who: String = "초안 세션") -> (unit: APDraftedUnit?, problems: [String], warnings: [String]) {
     var problems: [String] = [], warnings: [String] = []
     func bad(_ s: String) { problems.append(s) }
     func secretIn(_ s: String, _ where_: String) { if apRedact(s).count > 0 { bad("\(where_) 에 비밀 꼴(토큰·키 등)이 있습니다") } }
@@ -354,8 +356,8 @@ public func apDraftUnitParse(_ v: Any, n: Int, files: APDraftFiles, earlier unit
     guard let o = v as? [String: Any] else { bad("단위 \(n) 이 JSON 객체가 아닙니다"); return (nil, problems, warnings) }
     // 받는 칸은 허용 목록뿐(⑪-2 보안 검토): 샌드박스 밖에서 돌거나(precheck·action) 판정·세션 범위를 넓히는(check_sandbox·local_binding·쓰기 범위·
     // 근거 묶음 자리·작업 폴더) 칸은 모델이 쓸 수 없다. 그런 칸이 있으면 기계 검사 실패 줄로 보이고 준비가 멈춘다(사람이 넣는 길은 대기열·출발 확인)
-    for k in o.keys.sorted() where !apDraftUnitKeys.contains(k) {
-        bad(apDraftWideningKeys.contains(k) ? "단위 \(n) 의 \(k) 는 초안 세션이 쓸 수 없는 칸입니다(샌드박스 밖에서 돌거나 범위를 넓힘, 사람만 넣음)"
+    for k in o.keys.sorted() where !allowed.contains(k) {
+        bad(apDraftWideningKeys.contains(k) ? "단위 \(n) 의 \(k) 는 \(who)이 쓸 수 없는 칸입니다(샌드박스 밖에서 돌거나 범위를 넓힘, 사람만 넣음)"
                                              : "단위 \(n) 에 형식 밖 칸 \(k) 가 있습니다")
     }
     let id = str(o["id"])
