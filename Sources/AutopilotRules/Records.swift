@@ -3,8 +3,9 @@
 // 규칙 라이브러리에 두어 Tests/AutopilotRulesTests 가 SQLite 로 직접 건다(라이브러리는 Foundation 만, SQLite 는 엔진·보드·시험이)
 import Foundation
 
-public let apRecordsVersion: Int32 = 2
-public let apRecordsTables = ["projects", "runs", "units", "queue_items", "cards", "carry", "sets", "tickets", "imports", "judge_misses"]
+public let apRecordsVersion: Int32 = 3
+public let apRecordsTables = ["projects", "runs", "units", "queue_items", "cards", "carry", "sets", "tickets", "imports", "judge_misses",
+                                 "path_claims", "stopline_slots"]
 public let apRecordsSchemaV1 = """
 CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT NOT NULL, root TEXT UNIQUE, kind TEXT, repos TEXT, created REAL, updated REAL);
 CREATE TABLE runs (id TEXT PRIMARY KEY, project_id TEXT, title TEXT, source TEXT, continues TEXT, state TEXT, reason TEXT, model TEXT,
@@ -36,6 +37,16 @@ CREATE TABLE judge_misses (id TEXT PRIMARY KEY, project_id TEXT, run_id TEXT, un
 CREATE INDEX judge_misses_project ON judge_misses(project_id, state);
 """
 
+// 판 3(6단계 ⑫-6, 2026-10-30): 여러 실행 함께 돌리기의 자리 표 둘(설계 5장 7절, 규칙 Multirun.swift).
+// path_claims — 출발할 때 잡는 저장소 경로 자리(접은 경로 key 하나에 실행 하나, 끝 정리를 마치면 지움). stopline_slots — 새 단위 앞에서 잡는 멈출 선 자리
+// (실행마다 한 줄, kind hold 단위가 도는 중·wait 기다리는 차례, pp·used 주간 %p, beat 가 15분 지나면 죽은 엔진의 자리)
+public let apRecordsSchemaV3 = """
+CREATE TABLE path_claims (key TEXT PRIMARY KEY, path TEXT NOT NULL, run_id TEXT NOT NULL, run_dir TEXT, label TEXT, pid INTEGER, claimed REAL);
+CREATE INDEX path_claims_run ON path_claims(run_id);
+CREATE TABLE stopline_slots (run_id TEXT PRIMARY KEY, project_id TEXT, unit_n INTEGER, kind TEXT NOT NULL, pp REAL, used REAL, pid INTEGER,
+  since REAL, beat REAL);
+"""
+
 // 판 올리기 차례: 판 n 으로 올리는 SQL. 엔진이 열 때 지금 판보다 높은 것을 차례로(한 transaction 안에서, 잠금을 잡은 뒤 판을 다시 보고) 건다
-public let apRecordsMigrations: [(version: Int32, sql: String)] = [(1, apRecordsSchemaV1), (2, apRecordsSchemaV2)]
+public let apRecordsMigrations: [(version: Int32, sql: String)] = [(1, apRecordsSchemaV1), (2, apRecordsSchemaV2), (3, apRecordsSchemaV3)]
 public func apRecordsSteps(from v: Int32) -> [(version: Int32, sql: String)] { apRecordsMigrations.filter { $0.version > v } }

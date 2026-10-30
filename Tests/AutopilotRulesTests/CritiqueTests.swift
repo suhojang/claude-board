@@ -441,7 +441,7 @@ private let caseFiles: [String: String] = ["findings.json": findingsJSON, "cases
         return Int32(one(db, "PRAGMA user_version") ?? "0") ?? 0
     }
 
-    @Test("옛 판(1) 저장소를 열어 판 2 로 올리면 행은 그대로이고 판정 놓침 표가 생긴다")
+    @Test("옛 판(1) 저장소를 열어 지금 판으로 올리면 행은 그대로이고 판정 놓침 표가 생긴다")
     func 옛판() throws {
         let path = NSTemporaryDirectory() + "zz-records-v1-\(getpid()).sqlite"
         unlink(path)
@@ -454,20 +454,20 @@ private let caseFiles: [String: String] = ["findings.json": findingsJSON, "cases
         sqlite3_close(db)
         #expect(sqlite3_open(path, &db) == SQLITE_OK)
         #expect(migrate(db) == apRecordsVersion)
-        #expect(apRecordsVersion == 2)
+        #expect(apRecordsVersion == 3)   // ⑫-6 에서 판 3(자리 표 둘)
         #expect(one(db, "SELECT state FROM runs WHERE id='r1'") == "done")
         #expect(exec(db, "INSERT INTO judge_misses(id,project_id,run_id,signal,side,why,state,created) VALUES('r1/1/discard/1','zz-toy','r1','discard','judge','x','open',1)") == SQLITE_OK)
         #expect(one(db, "SELECT COUNT(*) FROM judge_misses WHERE project_id='zz-toy' AND state='open'") == "1")
-        #expect(apRecordsSteps(from: 2).isEmpty)
+        #expect(apRecordsSteps(from: 3).isEmpty)
         sqlite3_close(db)
     }
 
-    @Test("빈 저장소는 판 1·2 를 차례로")
+    @Test("빈 저장소는 판 1·2·3 을 차례로")
     func 새저장소() {
         var db: OpaquePointer?
         #expect(sqlite3_open(":memory:", &db) == SQLITE_OK)
-        #expect(apRecordsSteps(from: 0).map(\.version) == [1, 2])
-        #expect(migrate(db) == 2)
+        #expect(apRecordsSteps(from: 0).map(\.version) == [1, 2, 3])
+        #expect(migrate(db) == 3)
         for t in apRecordsTables { #expect(one(db, "SELECT name FROM sqlite_master WHERE type='table' AND name='\(t)'") == t) }
         sqlite3_close(db)
     }
