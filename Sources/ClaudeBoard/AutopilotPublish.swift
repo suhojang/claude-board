@@ -103,6 +103,25 @@ import WebKit
         let used = Set(webhooks.map(\.id))
         return (1...999).map { "webhook-\($0)" }.first { !used.contains($0) } ?? "webhook-999"
     }
+    // 시험 글 보내기(4단계 ⑩-3) — 앱 안 엔진 notify test 가 그 webhook 에 시험 글 하나(첫 줄 표지). 결과는 화면 줄에만(주소는 받지 않는다)
+    func testWebhook(_ id: String) {
+        guard !checking.contains(id) else { return }
+        checking.insert(id)
+        notes[id] = ("보내는 중…", false)
+        let dev = apDevBuild
+        DispatchQueue.global(qos: .userInitiated).async {
+            let r = apEngine(["notify", "test", id] + (dev ? ["--dev"] : []))
+            let o = (try? JSONSerialization.jsonObject(with: Data(r.out.utf8))) as? [String: Any] ?? [:]
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self.checking.remove(id)
+                    let ok = o["ok"] as? Bool ?? false
+                    let note = (o["note"] as? String).map { apDocText($0, 300) } ?? (r.out.isEmpty ? "엔진이 답하지 않았습니다(\(r.code))" : apDocText(r.out, 300))
+                    self.notes[id] = (ok ? "시험 글을 보냈습니다(요청 \((o["requests"] as? NSNumber)?.intValue ?? 1)건)" : note, !ok)
+                }
+            }
+        }
+    }
     // 연결 확인 — 앱 안 엔진이 읽기 요청 하나(토큰이 없거나 주소 규칙 밖이면 요청 0). 결과를 연결 목록에 적는다
     func check(_ id: String) {
         guard !checking.contains(id) else { return }
@@ -146,7 +165,7 @@ import WebKit
         SettingsItem(id: "conn.figma", section: .connections, card: "서비스", title: "Figma",
                      detail: "개인 액세스 토큰(읽기). 프레임 읽기는 다음 조각에서 씁니다.", keywords: "figma 토큰 읽기", kind: .block) { AnyView(APConnectionCard(service: .figma)) },
         SettingsItem(id: "conn.webhook", section: .connections, card: "알림", title: "알림 webhook",
-                     detail: "대화방 webhook 주소(주소 전체가 비밀이라 키체인에). 상태 알림·3시간 요약은 다음 조각에서 보냅니다.",
+                     detail: "대화방 webhook 주소(주소 전체가 비밀이라 키체인에)와 글 꼴. 자율주행의 상태 알림·3시간 요약을 보내고, 시험 글로 닿는지 봅니다.",
                      keywords: "webhook slack google chat 메신저 대화방 알림", kind: .block) { AnyView(APWebhookCard()) },
     ]
 }
@@ -268,22 +287,38 @@ func apConnDay(_ ts: Double) -> String {
     return f.string(from: Date(timeIntervalSince1970: ts))
 }
 
-// 알림 webhook — 여러 개(이름 + 주소). 주소는 키체인에, 목록에는 이름·호스트만. 읽는 요청이 없어 연결 확인은 주소 꼴만(요청 0)
+// 알림 webhook — 여러 개(이름 + 주소 + 글 꼴). 주소는 키체인에, 목록에는 이름·호스트·꼴만. 읽는 요청이 없어 "시험 글 보내기"(앱 안 엔진 notify test,
+// 첫 줄 표지 오토파일럿 작성)로 닿는지 본다(4단계 ⑩-3). 글 꼴은 받는 쪽마다: 일반 JSON·Slack 꼴·Google Chat 꼴
 struct APWebhookCard: View {
     @ObservedObject private var m = APConnections.shared
     @State private var name = ""
     @State private var url = ""
+    @State private var format = APNotifyFormat.json
     @State private var problem: String?
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             if m.webhooks.isEmpty { apNote("아직 없습니다.") }
             ForEach(m.webhooks, id: \.id) { h in
-                HStack(spacing: 6) {
-                    APChip(text: m.secrets.contains(h.id) ? "주소 있음" : "주소 없음", color: m.secrets.contains(h.id) ? APColor.ok : APColor.fail)
-                    Text(h.name.isEmpty ? h.id : h.name).boardFont(11.5, weight: .semibold)
-                    Text(h.host).boardFont(10.5, design: .monospaced).foregroundStyle(.secondary)
-                    Spacer(minLength: 4)
-                    APButton(title: "지우기", tint: APColor.fail, axid: "conn-\(h.id)-remove") { m.remove(h.id) }
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 6) {
+                        APChip(text: m.secrets.contains(h.id) ? "주소 있음" : "주소 없음", color: m.secrets.contains(h.id) ? APColor.ok : APColor.fail)
+                        Text(h.name.isEmpty ? h.id : h.name).boardFont(11.5, weight: .semibold)
+                        Text(h.host).boardFont(10.5, design: .monospaced).foregroundStyle(.secondary)
+                        Spacer(minLength: 4)
+                        APButton(title: m.checking.contains(h.id) ? "보내는 중" : "시험 글 보내기", enabled: !m.checking.contains(h.id) && m.secrets.contains(h.id),
+                                 help: "첫 줄 '오토파일럿 작성'인 시험 글 하나를 이 대화방에 보냅니다", axid: "conn-\(h.id)-test") { m.testWebhook(h.id) }
+                        APButton(title: "지우기", tint: APColor.fail, axid: "conn-\(h.id)-remove") { m.remove(h.id) }
+                    }
+                    HStack(spacing: 4) {
+                        Text("글 꼴").boardFont(10.5).foregroundStyle(.secondary)
+                        ForEach(APNotifyFormat.allCases, id: \.self) { f in
+                            APButton(title: f.label, tint: h.format == f ? Palette.accent : nil, axid: "conn-\(h.id)-format-\(f.rawValue)") {
+                                var c = h; c.format = f
+                                problem = m.save(c, secret: "")
+                            }
+                        }
+                    }
+                    if let n = m.notes[h.id] { apNote(n.text, n.bad ? APColor.fail : APColor.ok).accessibilityIdentifier("conn-\(h.id)-note") }
                 }
             }
             HStack(spacing: 8) {
@@ -292,13 +327,19 @@ struct APWebhookCard: View {
                 SecureField(apDevBuild ? "https://… (시험 빌드는 http://127.0.0.1 도)" : "https://…", text: $url).textFieldStyle(.roundedBorder).font(.system(size: 11.5))
                     .accessibilityIdentifier("conn-webhook-url")
                 APButton(title: "더하기", primary: true, axid: "conn-webhook-add") {
-                    let c = APConnection(id: m.nextWebhookID(), service: .webhook, name: apDocText(name, 80), scopes: ["notify"])
+                    let c = APConnection(id: m.nextWebhookID(), service: .webhook, name: apDocText(name, 80), scopes: ["notify"], format: format)
                     problem = m.save(c, secret: url)
                     if problem == nil { name = ""; url = "" }
                 }
             }
+            HStack(spacing: 4) {
+                Text("더할 글 꼴").boardFont(10.5).foregroundStyle(.secondary)
+                ForEach(APNotifyFormat.allCases, id: \.self) { f in
+                    APButton(title: f.label, tint: format == f ? Palette.accent : nil, axid: "conn-webhook-format-\(f.rawValue)") { format = f }
+                }
+            }
             if let p = problem { apNote(p, APColor.fail) }
-            apNote("webhook 은 읽는 요청이 없어 연결 확인을 하지 않습니다(주소 꼴만 봅니다). 시험 글 보내기·상태 알림·3시간 요약은 다음 조각에서 만듭니다.")
+            apNote("webhook 은 읽는 요청이 없어 연결 확인 대신 '시험 글 보내기'로 대화방에 닿는지 봅니다. 자율주행의 상태 알림(출발·대기·끝)과 3시간 요약은 출발 확인의 '알림' 줄에서 켠 webhook 에만 갑니다. 글 꼴: 일반 JSON(text 칸 등), Slack 꼴, Google Chat 꼴. 바깥·모델이 쓴 글은 멘션(@channel 등)을 무력화하고 받는 쪽 꼴로 이스케이프합니다.")
         }
     }
 }
@@ -569,7 +610,7 @@ struct APOutboxSheet: View {
                 } label: {
                     VStack(alignment: .leading, spacing: 3) {
                         HStack(spacing: 5) {
-                            APChip(text: apServiceName(e.item.target.service), color: APColor.jira)
+                            APChip(text: e.item.kind == "ticket" ? "Jira 티켓" : apServiceName(e.item.target.service), color: APColor.jira)
                             Text(e.item.title).boardFont(11.5, weight: .semibold).lineLimit(2).multilineTextAlignment(.leading)
                             Spacer(minLength: 0)
                         }
@@ -595,7 +636,7 @@ struct APOutboxSheet: View {
         let c = conns.conn(it.connection)
         let d = m.decision(e)
         return VStack(alignment: .leading, spacing: 10) {
-            kv("받을 곳", apTargetLabel(it.target), axid: "ap-outbox-target")
+            kv("받을 곳", apItemLabel(it), axid: "ap-outbox-target")
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text("올릴 계정").boardFont(11, weight: .semibold).foregroundStyle(.secondary).frame(width: 70, alignment: .leading)
                 if let c, conns.secrets.contains(c.id) {
@@ -610,7 +651,7 @@ struct APOutboxSheet: View {
             }
             VStack(alignment: .leading, spacing: 6) {
                 Text("미리보기 · 올라갈 모습 그대로입니다(여기서 글을 고치지 않습니다)").boardFont(10.5).foregroundStyle(.secondary)
-                if it.target.service != .jira { Text(it.title).boardFont(13, weight: .bold).fixedSize(horizontal: false, vertical: true) }
+                if it.target.service != .jira || it.kind == "ticket" { Text(it.title).boardFont(13, weight: .bold).fixedSize(horizontal: false, vertical: true) }
                 APDocView(doc: it.doc)
             }
             .padding(10)
@@ -626,11 +667,13 @@ struct APOutboxSheet: View {
                     }
                     Spacer(minLength: 0)
                 }
+            } else if it.kind == "ticket" {
+                apNote("실행 중에 새로 필요해진 티켓입니다(출발 카드 답: 임시 번호로 진행). 올리기를 누르면 \(it.target.parent) 아래 하위 작업으로 만들고, 임시 번호 \(it.target.issue) 와 만든 번호를 여기 남깁니다. 자동으로 올림이어도 검수 뒤에만 만듭니다.")
             } else if it.kind == "report" {
                 apNote("Notion 에는 보고서 파일을 첨부하지 않습니다(요약만). 흐름 그림과 단위별 기록은 보드의 보고서에 있습니다.")
             }
             if let r = it.remote, !r.url.isEmpty {
-                kv(it.state == .posted ? "올린 주소" : "만든 곳", r.url, axid: "ap-outbox-url", mono: true)
+                kv(it.state == .posted ? (it.kind == "ticket" ? "만든 티켓" : "올린 주소") : "만든 곳", it.kind == "ticket" ? "\(r.id) · \(r.url)" : r.url, axid: "ap-outbox-url", mono: true)
             }
             if let l = it.last, !l.note.isEmpty {
                 apNote("마지막: \(apConnDay(l.at)) · \(l.note)" + (l.code > 0 ? " (\(l.code))" : ""), it.state == .failed || it.state == .uncertain ? APColor.fail : .secondary)

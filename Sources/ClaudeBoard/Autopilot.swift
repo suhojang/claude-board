@@ -387,11 +387,12 @@ struct APLogGroup: Identifiable {
     @Published private(set) var awaiting: [APRun] = []    // 끝났고 합치기·승격을 기다리는 실행(최근 것부터) — 보드 본체의 끝난 실행 줄
     @Published var screen: APScreen = .board { didSet { if screen != oldValue { tick() } } }
     private var cache: [String: (stamp: [Double], run: APRun?)] = [:]
-    // 합치기·승격의 "나중에" — 실행 id → 다시 보일 시각. 하루 동안 보드 본체의 끝난 실행 줄에서 숨긴다(다시 알리는 알림은 4단계)
+    // 합치기·승격의 "나중에" — 실행 id → 다시 보일 시각. 하루 동안 보드 본체의 끝난 실행 줄에서 숨기고, 하루 뒤 한 번 다시 알린다(4단계 ⑩-3, APNotices)
     private var later: [String: Double] = UserDefaults.standard.dictionary(forKey: "autopilotMergeLater") as? [String: Double] ?? [:]
     func snooze(_ id: String) {
         let now = Date().timeIntervalSince1970
-        later = later.filter { $0.value > now }
+        let reminded = APNotices.shared.remindedIDs
+        later = later.filter { $0.value > now || !reminded.contains($0.key) }   // 아직 다시 알리지 않은 것은 남긴다
         later[id] = now + 86_400
         UserDefaults.standard.set(later, forKey: "autopilotMergeLater")
         tick()
@@ -476,6 +477,11 @@ struct APLogGroup: Identifiable {
         }
         if let v = viewing { readEvents(base + "/" + v) } else if !evDir.isEmpty { evDir = ""; evOffset = 0; evRest = Data(); events = [] }
         if case .history(let sel) = screen { readHistory(sel) }
+        APNotices.shared.check(cache.values.compactMap(\.run), later: later)   // 끝 알림·나중에 뒤 다시 알림(4단계 ⑩-3)
+    }
+    // 실행 하나(끝난 것 포함) — 끝 알림을 누를 때
+    func anyRun(_ id: String) -> APRun? {
+        cache.values.compactMap(\.run).first { $0.id == id } ?? APRun.parse(id: id, dir: autopilotRoot + "/runs/" + id)
     }
 
     // events.jsonl 을 이어 읽는다 — 앞에서 읽은 자리부터 새 줄만. 파일이 줄었으면 처음부터
@@ -2563,7 +2569,7 @@ struct APOption: Equatable { let key: String; let label: String; var note = "" }
 
 // 출발 카드(설계 1장 "사람 몫은 출발 카드로만"). 5-2a 에서 생기는 카드는 판정 미리 통과(엔진 prerun), 지난 실행에서 미룬 사람 몫, 단위 크기로
 // 모두 실행마다의 답이다. policy 카드(정책 답)는 출발 때 projects/<프로젝트>.json policy_answers 에 남기고 다음 출발에 미리 고른다 —
-// 그런 카드(하네스 확인 지점 7단계, 새 티켓 4단계)는 아직 만들지 않는다
+// 4단계 ⑩-3 의 "실행 중에 새로 필요해진 티켓"(Jira 연결 실행)이 첫 정책 카드다. 하네스 확인 지점 카드는 7단계
 struct APCard: Equatable, Identifiable {
     let id: String
     var kind = "", label = "", title = "", why = ""
@@ -2733,6 +2739,11 @@ extension APRecords {
     private(set) var topicBundle = ""
     private var linkURLs: [String: String] = [:]     // 준비 줄 id(link-<n>) → 주소
     @Published var stories: [APStory] = []
+    // 4단계 ⑩-3 — 만들 티켓 나무: 엔진 tickets 명령이 쓴 상태(tickets.json, 보드는 읽기만), 사람이 "그래도 만들기"로 확인한 확인 필요 항목, 만들기 결과 한 줄
+    @Published private(set) var ticketBook = APTicketBook()
+    @Published var ticketConfirm: Set<String> = []
+    private var ticketFrom: String?   // 물려받은 티켓 기록 자리(새 준비 폴더를 처음 만들 때 그 폴더로 옮겨 적는다)
+    @Published private(set) var ticketNote: (text: String, bad: Bool)?
     @Published private(set) var estimates: [String: APEstimate] = [:]
     @Published private(set) var starting = false
     @Published private(set) var startError: String?
@@ -2866,11 +2877,22 @@ extension APRecords {
         sweptDrafts = true
         for n in (try? FileManager.default.contentsOfDirectory(atPath: apDraftsRoot)) ?? [] where !n.hasPrefix(".") {
             let d = apDraftsRoot + "/" + n
-            if (apRead(d + "/run.json") as? [String: Any])?["state"] == nil { try? FileManager.default.removeItem(atPath: d) }
+            if (apRead(d + "/run.json") as? [String: Any])?["state"] == nil, !Self.madeTickets(d) { try? FileManager.default.removeItem(atPath: d) }
         }
     }
+    // 이미 만든 티켓 기록(tickets.json 에 만든 항목)이 있는 준비 폴더는 지우지 않는다 — 같은 지난 실행을 다시 이어 갈 때 그 기록을 물려받아
+    // 같은 티켓을 또 만들지 않는다(4단계 ⑩-3, 사용자 결정 "만든 티켓은 남기고 다시 누르면 남은 것만")
+    static func madeTickets(_ d: String) -> Bool { apTicketBookParse(FileManager.default.contents(atPath: d + "/tickets.json")).entries.values.contains { $0.state == .made } }
     private func dropFolder() {
-        if !dir.isEmpty, (apRead(dir + "/run.json") as? [String: Any])?["state"] == nil { try? FileManager.default.removeItem(atPath: dir) }
+        if !dir.isEmpty, (apRead(dir + "/run.json") as? [String: Any])?["state"] == nil, !Self.madeTickets(dir) { try? FileManager.default.removeItem(atPath: dir) }
+    }
+    // 같은 지난 실행을 이어 가던 앞 준비가 만든 티켓 기록 — 가장 최근 것
+    private func inheritedTickets(_ runId: String) -> String? {
+        let fm = FileManager.default
+        return ((try? fm.contentsOfDirectory(atPath: apDraftsRoot)) ?? []).filter { !$0.hasPrefix(".") }.map { apDraftsRoot + "/" + $0 }
+            .filter { d in (apRead(d + "/run.json") as? [String: Any]).map { $0["state"] == nil && $0["continues"] as? String == runId } ?? false && Self.madeTickets(d) }
+            .max { apStamp($0 + "/tickets.json") < apStamp($1 + "/tickets.json") }
+            .map { $0 + "/tickets.json" }
     }
 
     private func present() {
@@ -2916,6 +2938,7 @@ extension APRecords {
         cards = []; answers = [:]; policyLoaded = []; bases = [:]; baseNote = ""; promotion = []; promotionSaved = false
         epic = ""; stories = []; estimates = [:]; starting = false; startError = nil; changedBy = nil; leftBranches = []
         epicInfo = nil; topicOtherDone = false; topicBundle = ""; linkURLs = [:]
+        ticketBook = APTicketBook(); ticketConfirm = []; ticketNote = nil; ticketFrom = nil
         id = ""; dir = ""; settings = [:]; tickets = [:]; needNewId = false; proposedOnce = false
         settingsFrom = "past"; settingsEdited = false; settingsProblems = []; promotionEdited = false; promotionBefore = []
         lastSet = nil; editingSet = false; setDraft = ""; setNote = nil; openParked = []; includeParked = []
@@ -2945,6 +2968,8 @@ extension APRecords {
         past = APRecords.list(db).runs.filter { $0.project != nil }
         pastId = runId
         source = "continue"
+        // 앞 준비가 이 실행을 이어 가며 이미 만든 티켓(출발하지 못한 채 보드를 껐거나 준비를 버림) — 물려받아 남은 것만 만든다
+        if let t = inheritedTickets(runId) { ticketBook = apTicketBookParse(FileManager.default.contents(atPath: t)); ticketFrom = t }
         project = proj
         let detail = APRecords.detail(db, run) ?? APPastDetail(run: run)
         let later = APRecords.later(db, project: proj, run: run)
@@ -3029,7 +3054,9 @@ extension APRecords {
         }
         // 게시 방식(4단계 ⑩-1) — 프로젝트 설정에 있으면 그것, 없으면 지난 실행의 것, 그것도 없으면 검수 뒤 올림
         let pubRaw = ps["publish"] ?? pr["publish"]
-        let pp = apPublishParse(pubRaw is NSNull ? nil : pubRaw).publish
+        var pp = apPublishParse(pubRaw is NSNull ? nil : pubRaw).publish
+        // 알림 webhook(4단계 ⑩-3) — 정한 적이 없으면(⑩-1 까지의 설정 포함) 지금 있는 알림 webhook 모두. 출발하면 프로젝트 설정에 남는다
+        if pp.notify == nil { APConnections.shared.loadOnce(); pp.notify = APConnections.shared.webhooks.filter { $0.scopes.contains("notify") }.map(\.id) }
         publish = pp; publishEdited = false; publishProblems = []
         pubService = pp.report?.service.rawValue ?? "none"; pubSpace = pp.report?.space ?? ""; pubParent = pp.report?.parent ?? ""
         settings["publish"] = apPublishJSON(pp)
@@ -3212,6 +3239,13 @@ extension APRecords {
     // 출발 전 실행 폴더를 쓴다 — 처음에는 drafts/<실행 id>/(runs/ 를 1초마다 읽는 보드 읽기와 섞이지 않게), 출발할 때 runs/ 로 옮긴다
     private func writeDraft(_ list: [APDraftUnit], extra: [String: Any] = [:]) {
         if id.isEmpty || needNewId {
+            let oldDir = dir
+            defer {   // 앞 폴더에서 이미 만든 티켓의 기록은 새 폴더로 옮긴다(다시 누르면 남은 것만 만들게, ⑩-3)
+                if !oldDir.isEmpty, oldDir != dir, FileManager.default.fileExists(atPath: oldDir + "/tickets.json") {
+                    try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+                    try? FileManager.default.copyItem(atPath: oldDir + "/tickets.json", toPath: dir + "/tickets.json")
+                }
+            }
             let stamp = formatter("yyyyMMdd-HHmm").string(from: Date())
             let base = "\(stamp)-" + String((project ?? "run").map { $0.isLetter || $0.isNumber || "._-".contains($0) ? $0 : "-" }).prefix(40)
             var cand = base, k = 2
@@ -3221,6 +3255,10 @@ extension APRecords {
             id = cand
             dir = apDraftsRoot + "/" + cand
             needNewId = false
+            if oldDir.isEmpty, let t = ticketFrom, FileManager.default.fileExists(atPath: t) {   // 앞 준비가 만든 티켓 기록을 물려받는다
+                try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+                try? FileManager.default.copyItem(atPath: t, toPath: dir + "/tickets.json")
+            }
         }
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
         var run = settings
@@ -3233,6 +3271,10 @@ extension APRecords {
         else if !chosenBases.isEmpty { run["base_branch"] = Dictionary(chosenBases, uniquingKeysWith: { a, _ in a }) }
         apWriteJSON(dir + "/run.json", run)
         apWriteJSON(dir + "/queue.json", queueJSON(list))
+        // 만들 티켓 계획(4단계 ⑩-3) — Jira 연결 실행이고 만들 것이 있을 때만. 상태(tickets.json)는 엔진이 쓴다
+        let plan = ticketPlan(list)
+        if jira, !plan.entries.isEmpty { apWriteJSON(dir + "/tickets-plan.json", apTicketPlanJSON(plan)) }
+        else { try? FileManager.default.removeItem(atPath: dir + "/tickets-plan.json") }
     }
 
     // queue.json — 고른 차례대로. 대기열에 없는 단위를 가리키는 depends 는 뺀다(엔진은 앞선 단위 id 만 받는다. 어긋남은 단위 제안에서 경고만 했다).
@@ -3243,7 +3285,7 @@ extension APRecords {
             guard var d = (try? JSONSerialization.jsonObject(with: u.def)) as? [String: Any] else { continue }
             let deps = u.depends.filter { ids.contains($0) }
             if deps.isEmpty { d.removeValue(forKey: "depends") } else { d["depends"] = deps }
-            if let s = u.story { d["story"] = stories.first { $0.id == s }?.key ?? s; d["tickets"] = u.task.map { [$0] } ?? [] }
+            if let s = u.story { d["story"] = storyKey(s); d["tickets"] = [taskKey(u)] }
             ids.insert(u.id)
             out.append(d)
         }
@@ -3367,6 +3409,15 @@ extension APRecords {
                               options: [APOption(key: "keep", label: "그대로"), APOption(key: "drop", label: "이번엔 빼기", note: "대기열에 남아 다음 출발에서 다시 보입니다")],
                               recommended: "keep", unit: u.id))
         }
+        // 실행 중에 새로 필요해진 티켓(4단계 ⑩-3, 설계 5장 6절) — Jira 연결 실행의 정책 카드. 답은 answers.json 으로 엔진·모델에 간다
+        if units.contains(where: { $0.story != nil && $0.excluded == nil }) {
+            out.append(APCard(id: apNewTicketCard, kind: "policy", label: "실행 중에 새로 필요해진 티켓",
+                              title: "단위가 일하다가 이 단위 티켓 밖의 새 Jira 티켓이 있어야 할 때",
+                              why: "실행 중에는 티켓을 만들지 않습니다(출발 때 만든 티켓만 씁니다). 그 부분을 어떻게 할지 정합니다.",
+                              options: [APOption(key: "temp", label: "임시 번호로 진행하고 검수 뒤에 만들어 잇기", note: "모델이 TMP-<단위>-<차례> 로 진행하고, 단위가 끝나면 그 스토리 아래 하위 작업으로 만들 글이 '올릴 글'에 쌓입니다. 사람이 검수하고 누를 때만 만듭니다"),
+                                        APOption(key: "defer", label: "그 부분은 보류하고 다음 출발로", note: "그 부분은 하지 않고 다음 출발 카드로 넘깁니다")],
+                              recommended: "temp", policy: true))
+        }
         let ps = project.flatMap { apRead(autopilotRoot + "/projects/\($0).json") as? [String: Any] } ?? [:]
         let pol = ps["policy_answers"] as? [String: Any] ?? [:]
         for c in out where c.policy && answers[c.id] == nil {
@@ -3448,8 +3499,12 @@ extension APRecords {
         guard let u = units.first(where: { $0.id == id }) else { return }
         var target = story
         if target == nil {
-            let k = (stories.filter(\.isNew).count) + 1
-            let s = APStory(id: "new-\(k)", key: nil, kind: u.kind, title: "")
+            // 새 스토리 id 는 그 스토리를 연 단위로 정한다(new-<단위 id>) — 같은 단위로 다시 열면 같은 id 라, 앞 준비가 이미 만든 스토리 티켓을
+            // 물려받아 다시 만들지 않는다(4단계 ⑩-3). 지금 목록에 같은 id 가 있으면 뒤에 차례를 붙인다
+            let base = "new-" + String(u.id.unicodeScalars.map { $0.isASCII && (CharacterSet.alphanumerics.contains($0) || "._-".unicodeScalars.contains($0)) ? Character($0) : "_" }).prefix(40)
+            var sid = base, k = 2
+            while stories.contains(where: { $0.id == sid }) { sid = "\(base)-\(k)"; k += 1 }
+            let s = APStory(id: sid, key: nil, kind: u.kind, title: "")
             stories.append(s)
             target = s.id
         }
@@ -3459,14 +3514,45 @@ extension APRecords {
         stories.removeAll { s in s.isNew && !units.contains { $0.story == s.id } }
     }
     func storyLabel(_ s: APStory) -> String {
-        s.key ?? "새 스토리 \(s.id.dropFirst(4))"
+        s.key ?? "새 스토리 \((stories.filter(\.isNew).firstIndex(of: s) ?? 0) + 1)"
     }
-    // 만들 티켓 — 새 스토리, 작업 키가 없는 단위, 다른 스토리로 옮긴 이미 있는 작업(부모를 바꿔야 함). 티켓 만들기는 4단계 연결과 함께
+    // 만들 티켓 — 새 스토리, 작업 키가 없는 단위, 다른 스토리로 옮긴 이미 있는 작업(부모를 바꿔야 함) 가운데 아직 만들지 않은 것(4단계 ⑩-3, 규칙 apTicketsLeft)
     var ticketsToMake: (stories: Int, tasks: Int, moved: Int) {
-        let picked = chosen + heldByCards
-        let newStories = Set(picked.compactMap { $0.story }.filter { s in stories.first { $0.id == s }?.isNew ?? false }).count
-        return (newStories, picked.filter { $0.story != nil && $0.task == nil }.count,
-                picked.filter { $0.task != nil && $0.story != $0.origStory }.count)
+        let left = apTicketsLeft(ticketPlan(chosen + heldByCards), ticketBook)
+        return (left.filter { $0.kind == .story }.count, left.filter { $0.kind == .task }.count, left.filter { $0.kind == .move }.count)
+    }
+    var epicProject: String { epic.split(separator: "-").first.map(String.init) ?? "" }
+    // 만들 티켓 계획(보드가 tickets-plan.json 으로 쓰고 엔진 tickets 명령이 만든다) — 항목 이름은 보드 스토리 id·단위 id·작업 키라 단위 차례가 바뀌어도 같다
+    func ticketPlan(_ list: [APDraftUnit]) -> APTicketPlan {
+        var p = APTicketPlan(run: id, epic: epic)
+        if let it = tickets["issue_types"] as? [String: Any] { p.storyType = it["story"] as? String ?? ""; p.taskType = it["task"] as? String ?? "" }
+        func parent(_ sid: String) -> String { stories.first { $0.id == sid }?.key ?? "story:" + sid }
+        for st in stories where st.isNew {
+            let mine = list.filter { $0.story == st.id }
+            guard !mine.isEmpty else { continue }
+            let title = st.title.isEmpty ? (mine.count == 1 ? mine[0].title : "\(mine[0].title) 외 \(mine.count - 1)") : st.title
+            p.entries.append(APTicketEntry(id: "story:" + st.id, kind: .story, title: title, parent: epic, units: mine.map(\.title)))
+        }
+        for u in list {
+            guard let sid = u.story else { continue }
+            if u.task == nil { p.entries.append(APTicketEntry(id: "task:" + u.id, kind: .task, title: u.title, parent: parent(sid), units: [u.title])) }
+            else if let k = u.task, u.story != u.origStory { p.entries.append(APTicketEntry(id: "move:" + k, kind: .move, title: u.title, parent: parent(sid), key: k, units: [u.title])) }
+        }
+        return p
+    }
+    // 대기열에 넣을 스토리·작업 키 — 이미 있는 키, 만든 키(tickets.json), 아직 없으면 자리표(엔진 status 가 가지 이름 꼴을 미리 보고, start 는 자리표로 출발하지 않음)
+    func storyKey(_ sid: String) -> String {
+        stories.first { $0.id == sid }?.key ?? ticketBook.entries["story:" + sid].flatMap { $0.state == .made && !$0.key.isEmpty ? $0.key : nil }
+            ?? apTicketPlaceholder(project: epicProject, entry: "story:" + sid)
+    }
+    func taskKey(_ u: APDraftUnit) -> String {
+        u.task ?? ticketBook.entries["task:" + u.id].flatMap { $0.state == .made && !$0.key.isEmpty ? $0.key : nil }
+            ?? apTicketPlaceholder(project: epicProject, entry: "task:" + u.id)
+    }
+    // 만들 티켓을 막는 까닭(연결로 만들 수 없음, 요청 0) — nil 이면 출발을 누를 때 만든다
+    var ticketBlocker: String? {
+        let cn = APConnections.shared, c = cn.conn("atlassian")
+        return apTicketBlocker(c, hasSecret: cn.secrets.contains("atlassian"), dev: apDevBuild, now: Date(), tz: .current)
     }
 
     func storyPattern(_ kind: String) -> String {
@@ -3503,11 +3589,12 @@ extension APRecords {
     }
 
     // MARK: 4단계 ⑩-1 게시 방식 그 자리에서 바꾸기 — 칸 글을 규칙(apPublishParse)으로 다시 읽고, 고칠 것이 없으면 이 준비의 run.json 에
-    func setPublish(mode: APPublishMode? = nil, service: String? = nil, comments: Bool? = nil) {
+    func setPublish(mode: APPublishMode? = nil, service: String? = nil, comments: Bool? = nil, notify: [String]? = nil) {
         guard !preparing, !starting, !rechecking else { return }
         var d = apPublishJSON(publish)
         if let mode { d["mode"] = mode.rawValue }
         if let comments { d["jira_comments"] = comments }
+        if let notify { d["notify"] = notify }
         if let service { pubService = service }
         switch pubService {
         case "confluence": d["report"] = ["service": "confluence", "space": pubSpace.trimmingCharacters(in: .whitespaces), "parent": pubParent.trimmingCharacters(in: .whitespaces)]
@@ -3799,15 +3886,20 @@ extension APRecords {
             if epic.isEmpty { l.append("에픽 번호를 넣어 주세요(출발 준비 1단계)") }
             else if epic.range(of: "^[A-Z][A-Z0-9_]*-[0-9]+$", options: .regularExpression) == nil { l.append("에픽 번호 꼴이 아닙니다(예: SHOP-10)") }
             else if let e = epicInfo, e.key == epic, e.read, !(e.found && e.isEpic) { l.append(e.found ? "에픽이 아닌 번호입니다: \(e.note)" : "없는 에픽 번호입니다(\(e.key))") }
-            let t = ticketsToMake
-            if t.stories + t.tasks + t.moved > 0 {
-                l.append("만들거나 고칠 티켓이 \(t.stories + t.tasks + t.moved)건 있습니다. 티켓 만들기는 Jira 연결(4단계)과 함께 만듭니다. 지금은 이미 있는 티켓의 단위만 출발합니다")
+            // 만들 티켓(4단계 ⑩-3): 출발을 누를 때 엔진이 만든다. 연결로 만들 수 없으면(요청 0) 잠그고, 확인 필요는 사람이 확인한 뒤에만
+            let left = apTicketsLeft(ticketPlan(chosen + heldByCards), ticketBook)
+            if !left.isEmpty, let why = ticketBlocker {
+                l.append("만들 티켓 \(left.count)건을 만들 수 없습니다: \(why). 설정 › 연결에서 Atlassian 을 연결하거나 이미 있는 티켓의 단위만 고릅니다")
             }
+            let held = left.filter { ticketBook.entries[$0.id]?.state == .uncertain && !ticketConfirm.contains($0.id) }
+            if !held.isEmpty { l.append("확인 필요 티켓 \(held.count)개: 앞 만들기가 끝났는지 모릅니다. Jira 에서 확인한 뒤 만들 티켓 나무의 '그래도 만들기'를 누릅니다") }
         }
         return l
     }
 
-    // 출발 — 실행 폴더를 마저 쓰고(고른 단위·출발 가지·카드와 답) runs/ 로 옮긴 뒤 엔진 start. 거부되면 그 문장을 그대로 보이고 준비는 남긴다
+    // 출발 — 실행 폴더를 마저 쓰고(고른 단위·출발 가지·카드와 답), 만들 티켓이 있으면 먼저 엔진 tickets 로 한꺼번에 만들고(4단계 ⑩-3, 게시 방식과 상관없이)
+    // 만든 키를 대기열에 넣은 뒤 runs/ 로 옮겨 엔진 start. 티켓을 다 만들지 못하면 출발하지 않고 실패한 티켓과 까닭을 나무에 보인다(다시 누르면 남은 것만).
+    // 거부되면 그 문장을 그대로 보이고 준비는 남긴다
     func start() {
         guard locks.isEmpty, !starting else { return }
         starting = true
@@ -3815,6 +3907,37 @@ extension APRecords {
         let list = chosen
         if (apRead(dir + "/run.json") as? [String: Any])?["state"] != nil { needNewId = true }
         writeDraft(list)
+        let plan = ticketPlan(list)
+        guard jira, !apTicketsLeft(plan, ticketBook).isEmpty else { launch(list); return }
+        let d = dir, dev = apDevBuild, confirm = ticketConfirm.sorted()
+        ticketNote = ("티켓 \(apTicketsLeft(plan, ticketBook).count)개를 만드는 중입니다…", false)
+        queue.async {
+            let r = apEngine(["tickets", d, "make", "--json"] + (confirm.isEmpty ? [] : ["--confirm", confirm.joined(separator: ",")]) + (dev ? ["--dev"] : []))
+            let o = (try? JSONSerialization.jsonObject(with: Data(r.out.utf8))) as? [String: Any]
+            let book = apTicketBookParse(FileManager.default.contents(atPath: d + "/tickets.json"))
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard self.dir == d else { self.starting = false; return }
+                    self.ticketBook = book
+                    self.ticketConfirm = self.ticketConfirm.filter { book.entries[$0]?.state == .uncertain }
+                    let left = apTicketsLeft(plan, book)
+                    let note = apDocText(o?["note"] as? String ?? (r.out.isEmpty ? "엔진이 답하지 않았습니다(\(r.code))" : r.out), 400)
+                    let req = (o?["requests"] as? NSNumber)?.intValue ?? 0
+                    let probs = (o?["problems"] as? [Any] ?? []).compactMap { $0 as? String }
+                    self.ticketNote = (note + " (요청 \(req)건)" + (probs.isEmpty ? "" : ": " + probs.prefix(3).joined(separator: " · ")), !left.isEmpty)
+                    guard left.isEmpty else {
+                        self.starting = false
+                        self.startError = "티켓을 다 만들지 못해 출발하지 않았습니다(남은 것 \(left.count)개). 만든 티켓은 그대로 두고, 출발을 다시 누르면 남은 것만 만듭니다."
+                        boardLog("자율주행 \(self.id): 티켓 만들기 남은 것 \(left.count)개 · \(note)")
+                        return
+                    }
+                    self.writeDraft(list)   // 만든 키로 대기열을 다시 쓴다(자리표가 남으면 엔진이 출발하지 않는다)
+                    self.launch(list)
+                }
+            }
+        }
+    }
+    private func launch(_ list: [APDraftUnit]) {
         apWriteJSON(dir + "/cards.json", cards.map(\.json))
         apWriteJSON(dir + "/answers.json", answers)
         let src = dir, dst = autopilotRoot + "/runs/" + id, dev = apDevBuild, runId = id
@@ -3861,7 +3984,8 @@ extension APRecords {
             for (k, v) in settings["stopline"] as? [String: Any] ?? [:] { sl[k] = v }
             o["stopline"] = sl
         }
-        if publishEdited || o["publish"] == nil { o["publish"] = apPublishJSON(publish) }   // 게시 방식(4단계 ⑩-1)
+        // 게시 방식(4단계 ⑩-1)과 알림 webhook(⑩-3) — 바꿨거나, 프로젝트 설정에 없거나, 알림을 정한 적이 없으면
+        if publishEdited || o["publish"] == nil || (o["publish"] as? [String: Any])?["notify"] == nil { o["publish"] = apPublishJSON(publish) }
         let pol = cards.filter(\.policy).compactMap { c in answers[c.id].map { (c.id, $0) } }
         if !pol.isEmpty {
             var pa = o["policy_answers"] as? [String: Any] ?? [:]
@@ -4672,7 +4796,8 @@ struct APConfirm: View {
                     Text("출발 가지 \(s.bases.values.first ?? "?") → 스토리 가지 \(st.count)개 → 작업 가지 \(picked.count)개 (단위마다 하나)").boardFont(11.5, weight: .semibold)
                     ForEach(s.stories.filter { st.contains($0.id) }) { story in
                         let real = story.isNew ? nil : picked.first { $0.story == story.id }.flatMap { s.storyBranch[$0.id] }   // 새 스토리는 키를 받기 전이라 꼴만
-                        Text("\(s.storyLabel(story)) · " + (real ?? s.storyPattern(story.kind).replacingOccurrences(of: "{story}", with: story.key ?? "‹키›")))
+                        let madeKey = s.ticketBook.entries["story:" + story.id].flatMap { $0.state == .made ? $0.key : nil }   // 출발을 누를 때 만든 스토리(4단계 ⑩-3)
+                        Text("\(s.storyLabel(story)) · " + (real ?? s.storyPattern(story.kind).replacingOccurrences(of: "{story}", with: story.key ?? madeKey ?? "‹키›")))
                             .boardFont(10.5, design: .monospaced).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                     }
                     apNote("스토리 가지는 그 스토리의 첫 작업 전에 출발 가지 머리에서, 작업 가지는 단위를 시작할 때 스토리 가지 머리에서 엔진이 만듭니다. autopilot 가지는 만들지 않습니다.")
@@ -4765,7 +4890,9 @@ struct APConfirm: View {
     }
 
     private func startErrorBox(_ e: String) -> some View {
-        APBox(title: "엔진이 출발하지 않았습니다", note: "엔진 문장 그대로입니다. 고친 뒤 출발을 다시 누르면 같은 준비로 다시 합니다", tint: APColor.fail, axid: "ap-start-error") {
+        APBox(title: s.ticketNote?.bad == true ? "출발하지 않았습니다" : "엔진이 출발하지 않았습니다",
+              note: s.ticketNote?.bad == true ? "만들 티켓 나무에 실패한 티켓과 까닭이 있습니다. 출발을 다시 누르면 남은 것만 만듭니다" : "엔진 문장 그대로입니다. 고친 뒤 출발을 다시 누르면 같은 준비로 다시 합니다",
+              tint: APColor.fail, axid: "ap-start-error") {
             Text(e).boardFont(11, design: .monospaced).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -4890,7 +5017,7 @@ struct APConfirm: View {
             ForEach(s.settingsProblems, id: \.self) { apNote("· " + $0, APColor.fail) }
             apNote("모델을 바꾸면 단위 예상(보정)도 그 모델의 지난 값으로 다시 셉니다.")
             publishRows
-            row("알림", "상태 알림·3시간 요약(webhook)은 다음 조각에서 엽니다. 보고서는 엔진이 실행 폴더에 늘 그립니다")
+            notifyRows
             if s.jira { row("만들 티켓", "\(t.stories + t.tasks + t.moved)건 · 출발 확인 위 '만들 티켓' 나무") }
         }
     }
@@ -4943,7 +5070,32 @@ struct APConfirm: View {
             Text(k).boardFont(11, weight: .semibold).foregroundStyle(.secondary).frame(width: 70, alignment: .leading)
             Text(v).boardFont(11).fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 4)
-            APButton(title: "바꾸기", enabled: false, help: "알림(webhook·3시간 요약)은 다음 조각에서 엽니다") {}
+        }
+    }
+    // 알림(4단계 ⑩-3, 와이어프레임 출발 확인 ⑧) — 이 프로젝트의 상태 알림·3시간 요약을 받을 webhook(켬·끔). 고르면 게시 설정 notify 로 고정된다
+    @ViewBuilder private var notifyRows: some View {
+        let hooks = APConnections.shared.webhooks.filter { $0.scopes.contains("notify") }
+        let on = Set(s.publish.notify ?? [])
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text("알림").boardFont(11, weight: .semibold).foregroundStyle(.secondary).frame(width: 70, alignment: .leading)
+            if hooks.isEmpty {
+                Text("알림 webhook 이 없습니다(설정 › 연결에서 더함). 상태 알림·3시간 요약을 보내지 않습니다").boardFont(11).fixedSize(horizontal: false, vertical: true)
+            } else {
+                WrapRow(spacing: 4) {
+                    ForEach(hooks, id: \.id) { h in
+                        APButton(title: (on.contains(h.id) ? "켬 · " : "끔 · ") + (h.name.isEmpty ? h.id : h.name) + " · " + h.format.label,
+                                 tint: on.contains(h.id) ? Palette.accent : nil, enabled: !s.starting && !s.preparing && !s.rechecking, axid: "ap-notify-\(h.id)") {
+                            var n = s.publish.notify ?? []
+                            if on.contains(h.id) { n.removeAll { $0 == h.id } } else { n.append(h.id) }
+                            s.setPublish(notify: n)
+                        }
+                    }
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        if !hooks.isEmpty {
+            apNote("켠 webhook 에 정한 때에만 보냅니다: 출발, 대기에 들어감(단위를 시작한 뒤 한 번), 끝(실행마다 한 번), 3시간 요약(기다리는 올릴 글 수·합치기 기다림 포함). 엔진이 보내 보드 창이 꺼져 있어도 갑니다.")
         }
     }
 
@@ -5003,15 +5155,19 @@ struct APConfirm: View {
         }
     }
 
-    // 만들 티켓 나무(Jira 연결 프로젝트, 와이어프레임 출발 확인 ⑬) — 에픽 아래 스토리, 스토리 아래 작업. 티켓 만들기는 4단계라 새로 만들 것이 있으면 출발이 잠긴다
+    // 만들 티켓 나무(Jira 연결 프로젝트, 와이어프레임 출발 확인 ⑬) — 에픽 아래 스토리, 스토리 아래 작업. 출발을 누르면 보드(앱 안 엔진 tickets)가
+    // 이 나무를 Jira 에 한꺼번에 만든다(4단계 ⑩-3, 게시 방식과 상관없이). 항목마다 엔진이 남긴 상태(만듦·실패·확인 필요)를 보이고, 다시 누르면 남은 것만
     private var ticketTree: some View {
         let picked = s.chosen + s.heldByCards
         let ids = Set(picked.compactMap(\.story))
         let st = s.stories.filter { ids.contains($0.id) }
         let t = s.ticketsToMake
         let make = t.stories + t.tasks + t.moved
+        let book = s.ticketBook
+        let plan = s.ticketPlan(picked)
+        let made = plan.entries.filter { book.entries[$0.id]?.state == .made }.count
         return APFold(title: "만들 티켓", summary: "에픽 \(s.epic.isEmpty ? "?" : s.epic) 아래 스토리 \(st.count) · 작업 \(picked.count)"
-                      + (make > 0 ? " · 새로 만들거나 고칠 것 \(make)" : " · 모두 이미 있는 티켓"),
+                      + (make > 0 ? " · 새로 만들거나 고칠 것 \(make)" : (made > 0 ? " · 만든 티켓 \(made)" : " · 모두 이미 있는 티켓")),
                       axid: "ap-fold-tickets", open: bind("tickets"), tint: make > 0 ? APColor.limit : nil) {
             HStack(spacing: 6) {
                 APTicket(key: s.epic.isEmpty ? "에픽 없음" : s.epic)
@@ -5027,14 +5183,15 @@ struct APConfirm: View {
             ForEach(st) { story in
                 VStack(alignment: .leading, spacing: 3) {
                     HStack(spacing: 6) {
-                        if let k = story.key { APTicket(key: k); APChip(text: "있음", color: APColor.ok) } else { APChip(text: s.storyLabel(story), color: APColor.jira, strong: true); APChip(text: "새로 만듦", color: APColor.limit) }
+                        if let k = story.key { APTicket(key: k); APChip(text: "있음", color: APColor.ok) }
+                        else { APChip(text: s.storyLabel(story), color: APColor.jira, strong: true); entryState("story:" + story.id, book) }
                         APChip(text: apKind(story.kind), color: APColor.board)
                         if !story.title.isEmpty { Text(story.title).boardFont(11.5).lineLimit(1) }
                     }
                     ForEach(picked.filter { $0.story == story.id }) { u in
                         HStack(spacing: 6) {
-                            if let k = u.task { APTicket(key: k) } else { APChip(text: "새 작업", color: APColor.limit) }
-                            if u.task != nil, u.story != u.origStory { APChip(text: "다른 스토리로 옮김", color: APColor.limit) }
+                            if let k = u.task { APTicket(key: k) } else { APChip(text: "새 작업", color: APColor.limit); entryState("task:" + u.id, book) }
+                            if let k = u.task, u.story != u.origStory { APChip(text: "다른 스토리로 옮김", color: APColor.limit); entryState("move:" + k, book) }
                             Text(u.title).boardFont(11).lineLimit(1)
                             if !u.depends.isEmpty { apNote("앞: " + u.depends.map { d in s.units.first { $0.id == d }.map { "\($0.n)" } ?? "?" }.joined(separator: "·")) }
                         }
@@ -5042,8 +5199,38 @@ struct APConfirm: View {
                     }
                 }
             }
-            apNote("작업 티켓은 스토리 아래 둘 수 있는 하위 작업 종류로 만듭니다. 번호는 대기열과 함께 고정되어 실행 중에는 티켓을 만들지 않습니다(실행 중 Jira 요청은 단위 시작 전 티켓 읽기와, 켰으면 댓글뿐).")
-            if make > 0 { apNote("티켓 만들기(새 스토리·새 작업, 옮긴 작업의 부모 바꾸기)는 Jira 연결(4단계)과 함께 만듭니다. 그때까지 출발이 잠깁니다. 이미 있는 티켓의 단위만 고르면 출발할 수 있습니다.", APColor.limit) }
+            // 실패·확인 필요 줄 — 까닭 그대로(엔진이 상태 번호로만 쓴 말), 확인 필요는 "그래도 만들기"
+            let bad = plan.entries.filter { [.failed, .uncertain, .waiting].contains(book.entries[$0.id]?.state) && book.entries[$0.id]?.last != nil }
+            ForEach(bad, id: \.id) { e in
+                let r = book.entries[e.id]
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    APChip(text: r?.state == .uncertain ? "확인 필요" : (r?.state == .failed ? "실패" : "기다림"), color: r?.state == .waiting ? APColor.wait : APColor.fail, strong: true)
+                    Text("\(e.title.isEmpty ? e.id : e.title): \(r?.last?.note ?? "")").boardFont(11).fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("ap-ticket-fail-\(e.id)")
+                    Spacer(minLength: 4)
+                    if r?.state == .uncertain {
+                        let on = s.ticketConfirm.contains(e.id)
+                        APButton(title: on ? "확인함" : "그래도 만들기", tint: APColor.limit, enabled: !s.starting, help: "Jira 에 같은 티켓이 이미 생겼는지 먼저 봅니다", axid: "ap-ticket-confirm-\(e.id)") {
+                            if on { s.ticketConfirm.remove(e.id) } else { s.ticketConfirm.insert(e.id) }
+                        }
+                    }
+                }
+            }
+            if let n = s.ticketNote { apNote(n.text, n.bad ? APColor.fail : APColor.ok).accessibilityIdentifier("ap-ticket-note") }
+            apNote("작업 티켓은 스토리 아래 둘 수 있는 하위 작업 종류로 만듭니다. 번호는 대기열과 함께 고정되어 실행 중에는 티켓을 만들지 않습니다(실행 중 Jira 요청은 단위 시작 전 티켓 읽기와, 켰으면 댓글뿐. 새로 필요해진 티켓은 출발 카드 답대로).")
+            if make > 0 {
+                if let why = s.ticketBlocker { apNote("티켓을 만들 수 없습니다: \(why). 그때까지 출발이 잠깁니다. 이미 있는 티켓의 단위만 고르면 출발할 수 있습니다.", APColor.limit) }
+                else { apNote("출발을 누르면 보드가 이 나무를 Jira 에 한꺼번에 만들고(첫 줄 '오토파일럿 작성'), 만든 번호를 대기열과 가지 이름에 넣은 뒤 출발합니다. 다 만들지 못하면 출발하지 않고 실패한 티켓과 까닭이 여기 보이며, 다시 누르면 남은 것만 만듭니다.", APColor.wait) }
+            }
+        }
+    }
+    @ViewBuilder private func entryState(_ id: String, _ book: APTicketBook) -> some View {
+        switch book.entries[id]?.state {
+        case .made: APChip(text: "만듦 " + (book.entries[id]?.key ?? ""), color: APColor.ok, strong: true).accessibilityIdentifier("ap-ticket-made-\(id)")
+        case .failed: APChip(text: "실패", color: APColor.fail, strong: true)
+        case .uncertain: APChip(text: "확인 필요", color: APColor.fail, strong: true)
+        case .creating: APChip(text: "만드는 중", color: APColor.work)
+        default: APChip(text: id.hasPrefix("move:") ? "부모 바꿈" : "새로 만듦", color: APColor.limit)
         }
     }
 }

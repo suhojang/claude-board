@@ -247,13 +247,14 @@ public func apPickIssueType(_ types: [APIssueType], for kind: APTicketKind, name
 // 티켓 본문 — 첫 줄 표지, 무엇을 위한 티켓인지, 단위 제목, 보드 티켓 번호(사람이 Jira 에서 찾게)
 public func apTicketDoc(_ e: APTicketEntry, run: String, temp: String = "", why: String = "", task: String = "") -> APDoc {
     var b: [APBlock] = [.paragraph([.text(apDocMarker, bold: true)])]
-    switch e.kind {
-    case .story: b.append(.paragraph([.text("자율주행 실행 \(run) 의 출발 확인에서 승인한 스토리입니다. 아래 작업 티켓의 단위를 묶습니다.", bold: false)]))
-    case .task, .move: b.append(.paragraph([.text("자율주행 실행 \(run) 의 단위 하나(작업 티켓)입니다. 엔진이 이 번호로 작업 가지를 만듭니다.", bold: false)]))
-    }
-    if !temp.isEmpty {
-        b.append(.paragraph([.text("실행 중에 새로 필요해진 티켓입니다. 임시 번호 \(temp) 로 진행했고" + (task.isEmpty ? "" : "(작업 \(task))") + ", 검수 뒤에 만들었습니다.", bold: false)]))
+    if !temp.isEmpty {   // 실행 중에 새로 필요해진 티켓 — 가지는 이 번호로 만들지 않았다(임시 번호로 진행)
+        b.append(.paragraph([.text("자율주행 실행 \(run) 의 단위" + (task.isEmpty ? "" : "(작업 \(task))") + "가 일하다가 새로 필요해진 티켓입니다. 실행 중에는 임시 번호 \(temp) 로 진행했고, 사람이 검수한 뒤 만든 티켓입니다.", bold: false)]))
         if !why.isEmpty { b.append(.paragraph([.text("까닭: " + why, bold: false)])) }
+    } else {
+        switch e.kind {
+        case .story: b.append(.paragraph([.text("자율주행 실행 \(run) 의 출발 확인에서 승인한 스토리입니다. 아래 작업 티켓의 단위를 묶습니다.", bold: false)]))
+        case .task, .move: b.append(.paragraph([.text("자율주행 실행 \(run) 의 단위 하나(작업 티켓)입니다. 엔진이 이 번호로 작업 가지를 만듭니다.", bold: false)]))
+        }
     }
     if !e.units.isEmpty { b.append(.bullets(e.units.prefix(50).map { [APSpan.text($0, bold: false)] })) }
     b.append(.paragraph([.text("보드 티켓 번호 \(run)/\(e.id)", bold: false)]))
