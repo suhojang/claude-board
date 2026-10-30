@@ -502,8 +502,7 @@ private func rowItem(_ o: [String: Any], folder: String, rel: String, line: Int,
     if let b = o["done"] as? Bool { it.state = b ? .done : it.state; if b { it.stateNote = "done: true" } }
     if let id = first(idKeys) {
         let safe = String(id.unicodeScalars.map { $0.isASCII && (CharacterSet.alphanumerics.contains($0) || "._-".unicodeScalars.contains($0)) ? Character($0) : "-" }).prefix(80)
-        it.key = "legacy:\(folder)/\(safe)"
-        if id.range(of: apIssueKeyPattern, options: .regularExpression) != nil { it.tickets = [id] }
+        it.key = "legacy:\(folder)/\(safe)"   // id 가 Jira 키 꼴(L-2)이어도 티켓으로 보지 않는다: 옛 자동화 자신의 번호일 수 있어 엉뚱한 이슈에 댓글·읽기가 가지 않게
     } else {
         it.key = "legacy:\(folder)/\(rel)#\(apSlug(title))" + (k > 1 ? "~\(k)" : "")
     }

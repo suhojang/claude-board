@@ -198,6 +198,7 @@ private func body(_ o: Any) -> Data { (try? JSONSerialization.data(withJSONObjec
                                      "legacy:zz-old/notes.md#배송-추적-고리", "legacy:zz-old/notes.md#로그-정리"])
         #expect(items.map(\.state) == [.done, .open, .progress, .open, .open, .done])
         #expect(items[1].body == "상세 칸 다섯" && items[1].place == "zz-old/ledger.jsonl:2")
+        #expect(items.allSatisfy { $0.tickets.isEmpty })   // 원장 id 가 Jira 키 꼴(T-1)이어도 티켓으로 넘기지 않는다
     }
 
     @Test("옛 자동화 파일 → 근거 묶음: 비밀을 가리고 믿지 않는 자료로 감싸며 MANIFEST 에 가린 수")
