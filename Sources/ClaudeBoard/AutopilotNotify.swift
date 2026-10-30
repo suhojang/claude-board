@@ -37,6 +37,7 @@ struct APNoticeItem: Equatable, Identifiable {
     private var reminded: Set<String>
     @Published private(set) var items: [APNoticeItem] = []
     private var panels: [String: NSPanel] = [:]
+    private var closeWatch: [String: NSObjectProtocol] = [:]   // 제목 막대의 닫기 단추로 닫아도 목록에서 빼게(남으면 다음 판이 보이지 않는 판 아래 자리를 잡음)
 
     private init() {
         let s = d.double(forKey: "autopilotEndSeeded")
@@ -114,6 +115,10 @@ struct APNoticeItem: Equatable, Identifiable {
         p.contentView = host
         p.setContentSize(NSSize(width: 340, height: max(host.fittingSize.height, 100)))
         panels[it.id] = p
+        let id = it.id
+        closeWatch[id] = NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: p, queue: .main) { _ in
+            MainActor.assumeIsolated { APNotices.shared.dismiss(id) }
+        }
         place()
         p.orderFrontRegardless()
     }
@@ -128,6 +133,7 @@ struct APNoticeItem: Equatable, Identifiable {
         }
     }
     func dismiss(_ id: String) {
+        if let w = closeWatch.removeValue(forKey: id) { NotificationCenter.default.removeObserver(w) }
         panels[id]?.orderOut(nil)
         panels[id] = nil
         items.removeAll { $0.id == id }
