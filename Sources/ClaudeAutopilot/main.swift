@@ -167,6 +167,33 @@ func scenarioSource(_ cwd: String, _ file: String) -> (data: Data?, why: String?
     return (d, nil)
 }
 
+// 출발 전 자율주행 가지(5단계 ⑪-2, run.json·고정 설정의 seed) — 주제로 시작에서 보드(앱 안 엔진 seed)가 출발 가지 머리에서 만들고 뼈대·판정 시나리오를
+// 커밋해 둔 autopilot/<실행 id>. 출발 때 엔진이 만들지 않고 그대로 이어받는다(규칙 apSeedProblem 으로 확인)
+func seedOf(_ f: [String: Any]) -> APSeed? { apSeedParse(f["seed"]) }
+func seededRepo(_ f: [String: Any], _ r: String) -> APSeed? { seedOf(f).flatMap { canonical($0.repo) == r ? $0 : nil } }
+// 표준 출력을 다듬지 않는 git(파일 글을 그대로 받을 때)
+func gitRaw(_ args: [String], cwd: String) -> (code: Int32, out: String) {
+    runTool("/usr/bin/env", gitHardenEnv + ["/usr/bin/git", "--no-optional-locks"] + gitHardenC + args, cwd: cwd, timeout: 60)
+}
+// 시나리오 글: 작업 폴더에 없고 출발 전 자율주행 가지가 있으면 그 가지 머리의 파일(git 객체)에서 읽는다(출발 전에는 사람의 작업 트리에 없으므로).
+// 보통 파일(100644·100755)만, 1 MB 까지, 경로는 시나리오 경로 꼴만(링크·폴더 밖 못 가리킴)
+func scenarioSourceSeeded(_ cwd: String, _ file: String, _ seed: APSeed?) -> (data: Data?, why: String?) {
+    let w = scenarioSource(cwd, file)
+    guard w.data == nil, w.why == "작업 폴더에 없습니다", let s = seed else { return w }
+    let repo = canonical(s.repo)
+    guard cwd == repo || cwd.hasPrefix(repo + "/") else { return w }
+    let rel = (cwd == repo ? "" : String(cwd.dropFirst(repo.count + 1)) + "/") + file
+    guard apScenarioPathOK(rel) else { return w }
+    let ls = gitRaw(["ls-tree", s.head, "--", rel], cwd: repo)
+    let head = ls.out.split(separator: "\t").first?.split(separator: " ").map(String.init) ?? []
+    guard ls.code == 0, head.count == 3, head[1] == "blob" else { return (nil, "작업 폴더와 출발 전 자율주행 가지(\(s.branch))에 없습니다") }
+    guard head[0] == "100644" || head[0] == "100755" else { return (nil, "출발 전 자율주행 가지의 그 자리가 보통 파일이 아닙니다(링크 등)") }
+    guard let size = Int(gitRaw(["cat-file", "-s", head[2]], cwd: repo).out.trimmingCharacters(in: .whitespacesAndNewlines)), size <= 1 << 20 else { return (nil, "1 MB 보다 큽니다") }
+    let c = gitRaw(["cat-file", "blob", head[2]], cwd: repo)
+    guard c.code == 0 else { return (nil, "출발 전 자율주행 가지에서 읽지 못했습니다") }
+    return (Data(c.out.utf8), nil)
+}
+
 // 판정 시나리오 칸 하나(대기열·고정 설정의 꼴)를 규칙의 값으로
 func scenarioOf(_ o: [String: Any]) -> APScenario {
     APScenario(file: o["file"] as? String ?? "", kind: APScenarioKind(rawValue: o["kind"] as? String ?? "") ?? .shell,
@@ -1128,6 +1155,7 @@ func repoRecord(_ f: [String: Any], _ r: String, work: String, original: String?
         "includes": configIncludes(common, gitDir: canonical(gitDir), scope: scope).snapshot,
         "config_worktree": worktreeConfigPrints(common, gitDir: canonical(gitDir)), "extra": extraRefs(r, common)]
     if let wt = workTree { one["work_tree"] = wt; one["work_git_dir"] = canonical(gitDir); one["work_git_ino"] = gitStat(canonical(gitDir)) ?? NSNull() }
+    if let sd = seededRepo(f, r) { one["seed"] = ["head": sd.head, "base_head": sd.baseHead] }   // 출발 전에 보드가 만든 가지를 이어받음(⑪-2): 되돌릴 때 지우지 않는다
     return one
 }
 
@@ -1139,8 +1167,11 @@ func startBranches(_ f: [String: Any], id: String, scope: [String]) -> (branches
         let original = currentBranch(r)
         let base = baseBranch(f, r) ?? ""
         let one = repoRecord(f, r, work: work, original: original, workTree: nil, scope: scope)
-        start[r] = branchHeads(r)
-        let sw = gitRun(["switch", "-c", work, base], cwd: r)
+        var heads = branchHeads(r)
+        let seeded = seededRepo(f, r) != nil
+        if seeded { heads.removeValue(forKey: work) }   // 이어받는 가지는 출발 때 있던 가지가 아니라 이 실행이 만든 가지로 잡는다
+        start[r] = heads
+        let sw = seeded ? gitRun(["switch", work], cwd: r) : gitRun(["switch", "-c", work, base], cwd: r)
         guard sw.code == 0 else {
             rollbackBranches(["repos": info])
             return (["repos": info], "\(r) 를 출발 가지 \(base) 에서 만든 \(work) 로 바꾸지 못했습니다: \(firstLine(sw.out))")
@@ -1161,8 +1192,10 @@ func startWorktree(_ f: [String: Any], id: String, scope: [String]) -> (branches
     if fm.fileExists(atPath: wtPath) { return ([:], [:], "", r, "작업 트리 자리가 이미 있습니다: \(wtPath)") }
     mkdirPrivate(home + "/.claude-board"); mkdirPrivate(home + "/.claude-board/worktrees"); mkdirPrivate(wtBase)
     _ = gitRun(["worktree", "prune"], cwd: r)
-    let startHeads = branchHeads(r)   // 작업 가지를 만들기 전 머리(autopilot/<id> 가 "움직임" 아니라 "새로 생김"으로 잡히게)
-    let add = gitRun(["worktree", "add", "-b", work, wtPath, base], cwd: r)
+    var startHeads = branchHeads(r)   // 작업 가지를 만들기 전 머리(autopilot/<id> 가 "움직임" 아니라 "새로 생김"으로 잡히게)
+    let seeded = seededRepo(f, r) != nil
+    if seeded { startHeads.removeValue(forKey: work) }
+    let add = seeded ? gitRun(["worktree", "add", wtPath, work], cwd: r) : gitRun(["worktree", "add", "-b", work, wtPath, base], cwd: r)
     guard add.code == 0 else {
         try? fm.removeItem(atPath: wtBase)
         return ([:], [:], "", r, "\(repoName(r)) 에 출발 가지 \(base) 에서 작업 트리를 만들지 못했습니다: \(firstLine(add.out))")
@@ -1197,16 +1230,17 @@ func startWorktree(_ f: [String: Any], id: String, scope: [String]) -> (branches
 func rollbackBranches(_ b: [String: Any]) {
     for (r, v) in b["repos"] as? [String: Any] ?? [:] {
         guard let i = v as? [String: Any], let work = i["work"] as? String else { continue }
+        let adopted = i["seed"] != nil   // 출발 전에 보드가 만든 가지(⑪-2)는 지우지 않는다(다시 출발할 때 그대로 이어받게)
         if let wt = i["work_tree"] as? String {   // 따로 작업 트리: 작업 트리를 지우고 prune 한 뒤 가지 삭제
             _ = gitRun(["worktree", "remove", "--force", wt], cwd: r)
             _ = gitRun(["worktree", "prune"], cwd: r)
-            _ = gitRun(["branch", "-D", work], cwd: r)
+            if !adopted { _ = gitRun(["branch", "-D", work], cwd: r) }
             let base = (wt as NSString).deletingLastPathComponent
             if (try? fm.contentsOfDirectory(atPath: base))?.isEmpty == true { try? fm.removeItem(atPath: base) }
         } else {
             if let o = i["original"] as? String { _ = gitRun(["switch", o], cwd: r) }
             else if let h = i["original_head"] as? String, !h.isEmpty { _ = gitRun(["switch", "--detach", h], cwd: r) }
-            _ = gitRun(["branch", "-D", work], cwd: r)
+            if !adopted { _ = gitRun(["branch", "-D", work], cwd: r) }
         }
     }
 }
@@ -3848,6 +3882,12 @@ func usage() -> Never {
            claude-autopilot read servers [--cwd <작업 경로>] [--dev]
              바깥 읽기(4단계): Jira·Confluence·Notion·Figma 는 내장 REST(GET 만, 연결의 읽기 범위가 있을 때만), 그 밖은 --mcp 서버 하나만 켠 읽기 세션.
              결과는 메타 형식 파일과 MANIFEST.json(출처·읽은 시각·해시·가린 비밀 수). 시험 빌드만 --mcp-from <장난감 설정>·--claude <가짜 claude>
+           claude-autopilot seed <출발 준비 폴더> base|scenarios|drop [--dev]
+             주제로 시작(5단계): base 는 출발 가지에서 autopilot/<실행 id> 를 만들고 새 폴더면 뼈대(공식 생성기·보드 틀)를 커밋, scenarios 는 기계 검사를
+             지난 판정 시나리오를 .autopilot/scenarios/<단위 id>/ 로 커밋, drop 은 준비가 만든 가지를 지움. 출발 때 엔진이 이 가지를 그대로 이어받는다
+           claude-autopilot draft <출발 준비 폴더> [--dev] [--max-sec <초>]
+             주제로 시작의 초안 세션: 명세·단위·판정 시나리오·출발 카드·지시 초안을 draft/ 에 쓰고(읽기 도구만, Bash·웹·MCP 없음) 기계 검사 결과를
+             draft-check.json 에. 시험 빌드만 --claude <가짜 claude>
     """)
 }
 
@@ -3956,6 +3996,15 @@ func prepare(_ dir: String, dev: Bool) -> (problems: [String], frozen: [String: 
         if !dev { problems.append("browser_path 는 시험용 칸이라 --dev 출발에서만 씁니다") }
         else if let b = v as? String, b.hasPrefix("/") { f["browser_path"] = b } else { problems.append("run.json 의 browser_path 는 절대 경로입니다") }
     }
+    // 주제로 시작(⑪-2): 출발 전 자율주행 가지 기록과 원천. tool_path 는 시험 빌드만(생성기 도구 없음 길을 보려고 도구 찾기 PATH 를 바꿈)
+    if let v = run["seed"] {
+        if apSeedParse(v) != nil { f["seed"] = v } else { problems.append("run.json 의 seed(출발 전 자율주행 가지 기록) 꼴이 틀렸습니다") }
+    }
+    if let v = run["source"] as? String { f["source"] = v }
+    if let v = run["tool_path"] {
+        if !dev { problems.append("tool_path 는 시험용 칸이라 --dev 출발에서만 씁니다") }
+        else if let t = v as? String { f["tool_path"] = t } else { problems.append("run.json 의 tool_path 는 글자입니다") }
+    }
     let answers = readJSON(dir + "/answers.json") as? [String: Any] ?? [:]
     prepareEnvRows = []; prepareGaps = []
     var units: [[String: Any]] = []
@@ -4027,7 +4076,7 @@ func prepare(_ dir: String, dev: Bool) -> (problems: [String], frozen: [String: 
             let probe = EngineToolProbe(path: loginPath(), browserPath: f["browser_path"] as? String)
             var out: [[String: Any]] = []
             for sc in scs {
-                let (data, why) = scenarioSource(c, sc.file)
+                let (data, why) = scenarioSourceSeeded(c, sc.file, seedOf(f))
                 if let why { problems.append("단위 \(n) 의 시나리오 \(sc.file) 를 쓸 수 없습니다: \(why)"); continue }
                 let plan = apScenarioRun(sc, head: scenarioHead(data ?? Data()))
                 let row = apEnvCheck(unit: n, scenario: sc, run: plan, cwd: c, probe: probe)
@@ -4077,12 +4126,17 @@ func prepare(_ dir: String, dev: Bool) -> (problems: [String], frozen: [String: 
         } else { problems.append("run.json 의 base_branch 는 가지 이름 하나 또는 {저장소 경로: 가지 이름} 입니다") }
     }
     let work = "autopilot/" + id
+    if let sd = seedOf(f), !repos.contains(canonical(sd.repo)) { problems.append("출발 전 자율주행 가지의 저장소(\(sd.repo))가 이 실행의 저장소가 아닙니다") }
     for r in repos {
         guard let base = baseBranch(f, r) else {
             problems.append("\(r) 가 가지에 걸려 있지 않습니다(detached HEAD). run.json 의 base_branch 로 출발 가지를 고르세요"); continue
         }
         if !branchExists(r, base) { problems.append("\(r) 에 출발 가지 \(base) 가 없습니다") }
-        if branchExists(r, work) { problems.append("\(r) 에 이미 \(work) 가지가 있습니다(같은 실행 id 를 다시 썼습니다)") }
+        if let sd = seededRepo(f, r) {   // 출발 전 자율주행 가지를 이어받는다(⑪-2): 기록과 같은 머리·출발 가지가 그대로일 때만
+            let bh = headOf(r, "refs/heads/" + work), now = headOf(r, "refs/heads/" + base)
+            if sd.base != base { problems.append("출발 전 자율주행 가지는 출발 가지 \(sd.base) 에서 만들었는데 지금 출발 가지는 \(base) 입니다. 준비를 다시 하세요") }
+            else if let why = apSeedProblem(sd, runId: id, branchHead: bh, baseHeadNow: now, isAncestor: isAncestor(r, sd.baseHead, sd.head)) { problems.append(why) }
+        } else if branchExists(r, work) { problems.append("\(r) 에 이미 \(work) 가지가 있습니다(같은 실행 id 를 다시 썼습니다)") }
         // 하위 모듈(색인 gitlink·.gitmodules)이 있으면 출발하지 않는다(⑦ 보안 검토 2·3, 설계 4장). 자율주행은 아직 하위 모듈을 다루지 않는다 —
         // status·diff 는 플래그로 막아도 switch·claude 세션 열기 git status 가 그 저장소의 filter 를 돌린다. 지금 색인·작업 트리뿐 아니라 출발 가지도 본다
         // (보안 검토 2: 엔진이 출발 가지로 바꿔 돌므로, 지금 깨끗한 가지에 걸려 있어도 출발 가지에 하위 모듈이 있으면 들어온다)
@@ -4436,7 +4490,7 @@ func statusBeforeStart(_ dir: String, _ run: [String: Any], dev devFlag: Bool, j
         // 시험 실행기(⑪-1): 시나리오마다 환경 확인 줄(없으면 실패 줄과 까닭), 실행 파일이 없는 수용 기준(출발 카드 감), 판정 샌드박스(단위마다 한 줄, 맨 위는 켠 단위가 있는지)
         let anyOn = units.contains { $0["check_sandbox"] as? Bool ?? true }
         print(jsonText(["problems": problems, "worktree_mode": f["worktree_mode"] ?? NSNull(), "worktree_reason": f["worktree_reason"] ?? NSNull(),
-                        "repos": f["repos"] ?? [] as [Any], "units": units, "set": setSummary(f),
+                        "repos": f["repos"] ?? [] as [Any], "units": units, "set": setSummary(f), "seed": f["seed"] ?? NSNull(),
                         "env": prepareEnvRows, "criteria_gaps": prepareGaps, "judge_sandbox": anyOn], pretty: true))
         exit(problems.isEmpty ? 0 : 1)
     }
@@ -4455,11 +4509,15 @@ func statusBeforeStart(_ dir: String, _ run: [String: Any], dev devFlag: Bool, j
     for r in f["repos"] as? [String] ?? [] {
         let cur = currentBranch(r), base = baseBranch(f, r) ?? "?"
         let dirty = porcelain(r)
+        if let sd = seededRepo(f, r) {   // 주제로 시작(⑪-2): 보드가 출발 전에 만든 자율주행 가지를 이어받는다
+            let n = gitOut(["rev-list", "--count", "\(sd.baseHead)..\(sd.head)"], cwd: r) ?? "?"
+            out += "출발 전 자율주행 가지: \(sd.branch)(\(sd.head.prefix(7)), 출발 가지 \(sd.base) 위 뼈대·판정 시나리오 커밋 \(n)개)를 만들지 않고 그대로 이어받습니다\n"
+        }
         if wtMode {
-            out += "가지: \(repoName(r)) · 출발 가지 \(base)\(headOf(r, "refs/heads/" + base).map { "(\($0.prefix(7)))" } ?? "") 에서 autopilot/\(id) 를 만들어 따로 작업 트리에서 돕니다. 원래 작업 트리(지금 \(cur ?? "가지 없음"))는 그대로 둡니다\n"
+            out += "가지: \(repoName(r)) · 출발 가지 \(base)\(headOf(r, "refs/heads/" + base).map { "(\($0.prefix(7)))" } ?? "") \(seededRepo(f, r) != nil ? "위의 출발 전 autopilot/\(id) 로" : "에서 autopilot/\(id) 를 만들어") 따로 작업 트리에서 돕니다. 원래 작업 트리(지금 \(cur ?? "가지 없음"))는 그대로 둡니다\n"
             if !dirty.isEmpty { out += "  원래 작업 트리의 커밋 안 한 변경 \(dirty.count)개: 이 변경은 자율주행에 들어가지 않습니다(작업 트리는 출발 가지의 마지막 커밋에서 시작)\n" }
         } else {
-            out += "가지: \(repoName(r)) · 출발 가지 \(base)\(headOf(r, "refs/heads/" + base).map { "(\($0.prefix(7)))" } ?? "") 에서 autopilot/\(id) 를 만들어 원래 작업 트리를 바꿈 · 지금 \(cur ?? "가지 없음"), 끝나면 깨끗할 때 되돌림\n"
+            out += "가지: \(repoName(r)) · 출발 가지 \(base)\(headOf(r, "refs/heads/" + base).map { "(\($0.prefix(7)))" } ?? "") \(seededRepo(f, r) != nil ? "위의 출발 전 autopilot/\(id) 로" : "에서 autopilot/\(id) 를 만들어") 원래 작업 트리를 바꿈 · 지금 \(cur ?? "가지 없음"), 끝나면 깨끗할 때 되돌림\n"
             if !dirty.isEmpty { out += "  커밋 안 한 변경 \(dirty.count)개: 가지가 바뀌어도 이 변경은 작업 트리에 남고, 모델이 함께 커밋할 수 있습니다\n" }
             if let b = baseBranch(f, r), let c = cur, b != c { out += "  지금 걸린 가지(\(c))가 출발 가지(\(b))와 다릅니다. 판정 미리 돌리기는 지금 자리에서 돌므로 결과가 다를 수 있습니다\n" }
         }
@@ -4717,7 +4775,10 @@ func cmdPrerun(_ args: [String]) -> Never {
     var whereNotes: [[String: Any]] = []
     // 따로 작업 트리 모드면 출발 기준(고른 출발 가지)의 임시 분리 작업 트리에서 돌린다(설계 4장 prerun). 끝에 지운다. 명령 글은 바꾸지 않는다(cwd 만)
     var tempWt: (repo: String, path: String)?
-    if f["worktree_mode"] as? String == "worktree", let r = (f["repos"] as? [String])?.first, let base = baseBranch(f, r) {
+    // 출발 전 자율주행 가지(⑪-2)가 있으면 어느 모드든 그 가지 머리의 임시 작업 트리에서 돌린다(뼈대·시나리오가 사람의 작업 트리에는 없다)
+    let seedRepo = seedOf(f).map { canonical($0.repo) }
+    if f["worktree_mode"] as? String == "worktree" || seedRepo != nil, let r = seedRepo ?? (f["repos"] as? [String])?.first, let base0 = baseBranch(f, r) {
+        let base = seededRepo(f, r)?.head ?? base0
         let wtp = home + "/.claude-board/worktrees/.prerun-" + id
         mkdirPrivate(home + "/.claude-board"); mkdirPrivate(home + "/.claude-board/worktrees")
         try? fm.removeItem(atPath: wtp); _ = gitRun(["worktree", "prune"], cwd: r)
@@ -4730,9 +4791,11 @@ func cmdPrerun(_ args: [String]) -> Never {
                 try? fm.copyItem(atPath: r + "/" + path, toPath: wtp + "/" + path)
             }
             e.defs = e.defs.map { var d = $0; if let c = d["cwd"] as? String { d["cwd"] = c == r ? wtp : (c.hasPrefix(r + "/") ? wtp + String(c.dropFirst(r.count)) : c) }; return d }
-            whereNotes.append(["repo": r, "base": base, "same": true, "note": "따로 작업 트리(출발 가지 \(base) 기준)의 임시 작업 트리에서 돌렸습니다"])
+            whereNotes.append(["repo": r, "base": base0, "same": true, "note": seededRepo(f, r) != nil
+                ? "출발 전 자율주행 가지(\(seededRepo(f, r)!.branch), 뼈대·판정 시나리오 커밋 \(base.prefix(7)))의 임시 작업 트리에서 돌렸습니다"
+                : "따로 작업 트리(출발 가지 \(base) 기준)의 임시 작업 트리에서 돌렸습니다"])
         } else {
-            whereNotes.append(["repo": r, "base": base, "same": false, "note": "임시 작업 트리를 만들지 못해 지금 자리에서 돌렸습니다"])
+            whereNotes.append(["repo": r, "base": base0, "same": false, "note": "임시 작업 트리를 만들지 못해 지금 자리에서 돌렸습니다"])
         }
     } else {
         for r in f["repos"] as? [String] ?? [] {
@@ -5887,6 +5950,372 @@ func cmdRead(_ args: [String]) {
     }
 }
 
+// MARK: - 주제로 시작의 뼈대·초안 세션(5단계 ⑪-2)
+// 출발 전 준비 폴더(drafts/<실행 id>/)에서 보드가 부른다. 보드가 쓴 topic.json(주제 글·작업 경로·새 폴더인지·고른 스택·출발 가지)을 읽는다.
+//   seed <준비> base       출발 가지 머리에서 autopilot/<실행 id> 와 그 임시 작업 트리를 만들고, 새 폴더면 뼈대(공식 생성기·보드 틀)를 커밋. 하네스 확인 지점을 찾음
+//   draft <준비>           초안 세션(claude, 읽기 도구만·결과 폴더 draft/ 에만 씀) → 기계 검사 → draft-check.json
+//   seed <준비> scenarios  기계 검사를 지난 판정 시나리오를 .autopilot/scenarios/<단위 id>/ 로 커밋하고 임시 작업 트리를 지움(가지는 남아 출발 때 엔진이 이어받음)
+//   seed <준비> drop       준비가 만든 가지·임시 작업 트리를 지움(가지 머리가 준비가 커밋한 그대로일 때만)
+// 규칙(생성기 계획·도구 확인·세션 글과 인자·기계 검사·이어받기 확인)은 AutopilotRules. 결과는 표준 출력 JSON 하나
+
+func seedTree(_ id: String, _ repo: String) -> String { home + "/.claude-board/worktrees/.seed-" + id + "/" + repoName(repo) }
+
+// 생성기 명령을 고른 환경으로(로그인 셸 환경 + 시험 빌드의 tool_path), 시간 상한 15분
+func runWithEnv(_ argv: [String], cwd: String, env: [String: String], timeout: Double = 900) -> (code: Int32, out: String) {
+    guard let first = argv.first, let exe = findExecutable(first, env) else { return (-1, "\(argv.first ?? "") 를 찾지 못했습니다") }
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: exe)
+    p.arguments = Array(argv.dropFirst())
+    p.currentDirectoryURL = URL(fileURLWithPath: cwd)
+    p.environment = env
+    let pipe = Pipe()
+    p.standardOutput = pipe; p.standardError = pipe; p.standardInput = FileHandle.nullDevice
+    guard (try? p.run()) != nil else { return (-1, "\(exe) 를 띄우지 못했습니다") }
+    var data = Data()
+    let done = DispatchSemaphore(value: 0)
+    DispatchQueue.global().async { data = pipe.fileHandleForReading.readDataToEndOfFile(); done.signal() }
+    if done.wait(timeout: .now() + timeout) == .timedOut { p.terminate(); _ = done.wait(timeout: .now() + 2) }
+    p.waitUntilExit()
+    return (p.terminationStatus, String(decoding: data.suffix(8000), as: UTF8.self))
+}
+
+// root 안의 폴더 rel 을 링크 없이 연다(⑪-2 자동 보안 검토 MEDIUM 4): 만들기 전에 이미 있는 구성 요소마다 lstat 해 링크·폴더 아님이면 거절하고,
+// 없는 것만 하나씩 mkdir(부모를 따라가지 않음) 한 뒤 다시 lstat 하고, 끝 폴더의 진짜 경로가 root 의 진짜 경로 아래인지 본다. 되면 그 경로
+func safeDirIn(_ root: String, _ rel: String) -> String? {
+    guard rel.isEmpty || apScenarioPathOK(rel) else { return nil }
+    let rootReal = realPathLoose(root)
+    var st = stat()
+    guard lstat(root, &st) == 0, st.st_mode & S_IFMT == S_IFDIR else { return nil }
+    var cur = root
+    for comp in rel.split(separator: "/").map(String.init) {
+        cur += "/" + comp
+        if lstat(cur, &st) != 0 {
+            guard mkdir(cur, 0o755) == 0, lstat(cur, &st) == 0 else { return nil }
+        }
+        guard st.st_mode & S_IFMT == S_IFDIR else { return nil }   // 링크(S_IFLNK)·파일이면 거절
+    }
+    let real = realPathLoose(cur)
+    return real == rootReal || real.hasPrefix(rootReal + "/") ? cur : nil
+}
+
+// 뼈대를 쓰는 자리(임시 작업 트리) — 쓰기는 그 안의 상대 경로만, 링크를 따라 밖으로 나가지 않게(폴더는 safeDirIn, 파일은 O_NOFOLLOW)
+struct EngineSkeletonWork: APSkeletonWork {
+    let root: String
+    let env: [String: String]
+    private func inside(_ rel: String) -> String? { safeDirIn(root, rel) }
+    func write(_ relative: String, _ text: String) -> Bool {
+        guard apScenarioPathOK(relative) else { return false }
+        let parentRel = (relative as NSString).deletingLastPathComponent
+        guard let parent = safeDirIn(root, parentRel) else { return false }
+        let p = parent + "/" + (relative as NSString).lastPathComponent
+        let fd = open(p, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0o644)   // 그 자리가 링크면 열지 않는다
+        guard fd >= 0 else { return false }
+        defer { close(fd) }
+        var st = stat()
+        guard fstat(fd, &st) == 0, st.st_mode & S_IFMT == S_IFREG else { return false }
+        let d = Data(text.utf8)
+        return d.withUnsafeBytes { Darwin.write(fd, $0.baseAddress, $0.count) } == d.count
+    }
+    func run(_ argv: [String], in relative: String) -> (code: Int32, out: String) {
+        guard let d = inside(relative) else { return (-1, "폴더 꼴이 틀렸거나 링크가 있습니다") }
+        return runWithEnv(argv, cwd: d, env: env)
+    }
+    func download(_ url: String, into relative: String) -> String? {
+        guard url.hasPrefix("https://start.spring.io/starter.zip?"), let d = inside(relative) else { return "허용한 생성기 주소가 아니거나 풀 자리에 링크가 있습니다" }
+        let zip = NSTemporaryDirectory() + "claude-board-starter-\(getpid()).zip"
+        defer { unlink(zip) }
+        let c = runTool("/usr/bin/curl", ["-fsS", "--max-time", "120", "--proto", "=https", "-o", zip, url], timeout: 150, withErr: true)
+        guard c.code == 0 else { return "받지 못했습니다(curl \(c.code)): \(firstLine(c.out))" }
+        let u = runTool("/usr/bin/unzip", ["-q", "-o", zip, "-d", d], timeout: 120, withErr: true)
+        return u.code == 0 ? nil : "풀지 못했습니다(unzip \(u.code)): \(firstLine(u.out))"
+    }
+    func commit(_ message: String) -> (sha: String?, error: String?) {
+        let a = gitRun(["add", "-A", "--", "."], cwd: root)
+        guard a.code == 0 else { return (nil, firstLine(a.out)) }
+        if gitRun(["diff", "--cached", "--quiet"], cwd: root).code == 0 { return (nil, nil) }
+        let c = gitRun(["commit", "-q", "--no-verify", "-m", message], cwd: root, commit: true)
+        guard c.code == 0 else { return (nil, firstLine(c.out)) }
+        return (headOf(root, "HEAD"), nil)
+    }
+}
+
+// 초안 세션 결과 폴더 — 보통 파일만(링크·폴더 아님), 1 MB 까지. 이름에 .. 이 든 경로는 읽지 않는다
+struct EngineDraftFiles: APDraftFiles {
+    let root: String
+    func read(_ relative: String) -> Data? {
+        guard apScenarioPathOK(relative) else { return nil }
+        var st = stat()
+        guard lstat(root + "/" + relative, &st) == 0, st.st_mode & S_IFMT == S_IFREG, st.st_size <= 1 << 20 else { return nil }
+        return fm.contents(atPath: root + "/" + relative)
+    }
+    func list(_ relative: String) -> [String] {
+        guard apScenarioPathOK(relative), isDir(root + "/" + relative), !isLink(root + "/" + relative) else { return [] }
+        return (try? fm.contentsOfDirectory(atPath: root + "/" + relative)) ?? []
+    }
+}
+
+// 하네스 파일 글(출발 가지의 커밋된 판 = 임시 작업 트리) — 규칙 apHarnessFileWanted 가 고른 것만, 300개·파일마다 256 KB 까지
+func harnessTexts(_ root: String) -> [(path: String, text: String)] {
+    var out: [(path: String, text: String)] = []
+    guard let e = fm.enumerator(atPath: root) else { return out }
+    while let rel = e.nextObject() as? String {
+        let name = (rel as NSString).lastPathComponent
+        if [".git", "node_modules", "build", "dist", ".gradle", "target", ".venv", ".build"].contains(name) { e.skipDescendants(); continue }
+        guard apHarnessFileWanted(rel) else { continue }
+        var st = stat()
+        guard lstat(root + "/" + rel, &st) == 0, st.st_mode & S_IFMT == S_IFREG, st.st_size <= 256 << 10,
+              let d = fm.contents(atPath: root + "/" + rel) else { continue }
+        out.append((rel, String(decoding: d, as: UTF8.self)))
+        if out.count >= 300 { break }
+    }
+    return out
+}
+func harnessPointJSON(_ p: APHarnessPoint) -> [String: Any] { ["file": p.file, "line": p.line, "kind": p.kind, "text": p.text] }
+func harnessPointOf(_ o: [String: Any]) -> APHarnessPoint? {
+    guard let f = o["file"] as? String, let l = inum(o["line"]) else { return nil }
+    return APHarnessPoint(file: f, line: l, kind: o["kind"] as? String ?? "", text: o["text"] as? String ?? "")
+}
+
+func stackSetOf(_ v: Any?) -> APStackSet {
+    guard let v, let d = try? JSONSerialization.data(withJSONObject: v), let s = try? JSONDecoder().decode(APStackSet.self, from: d) else { return APStackSet() }
+    return s
+}
+
+// 준비 폴더 읽기 — 출발하지 않은 것만, topic.json 의 작업 경로(git 저장소 뿌리)·출발 가지
+struct TopicPrep {
+    let dir: String, id: String, run: [String: Any], topic: [String: Any], repo: String, base: String, newFolder: Bool, stack: APStackSet, dev: Bool
+}
+func topicPrep(_ args: [String]) -> TopicPrep {
+    let dev = args.contains("--dev")
+    guard let raw = args.first(where: { !$0.hasPrefix("--") }) else { usage() }
+    let dir = runDir(raw), id = (dir as NSString).lastPathComponent
+    guard validName(id) else { fail("준비 폴더 이름은 영문·숫자·.-_ 로만 씁니다: \(id)") }
+    guard let run = readJSON(dir + "/run.json") as? [String: Any] else { fail("run.json 을 읽지 못했습니다") }
+    guard run["state"] == nil else { fail("이미 출발한 실행입니다. 뼈대·초안 세션은 출발 전에만 합니다") }
+    guard let topic = readJSON(dir + "/topic.json") as? [String: Any] else { fail("topic.json(주제로 시작 입력)을 읽지 못했습니다") }
+    guard let r0 = topic["repo"] as? String, r0.hasPrefix("/"), isDir(r0) else { fail("topic.json 의 repo 는 있는 폴더의 절대 경로여야 합니다") }
+    let repo = canonical(gitOut(["rev-parse", "--show-toplevel"], cwd: r0) ?? r0)
+    guard repo == canonical(r0) else { fail("topic.json 의 repo 는 git 저장소 뿌리여야 합니다(\(r0))") }
+    let base = (run["base_branch"] as? String) ?? (topic["base"] as? String) ?? ""
+    guard !base.isEmpty, branchExists(repo, base) else { fail("출발 가지(\(base.isEmpty ? "정하지 않음" : base))가 저장소에 없습니다") }
+    if !dev, run["tool_path"] != nil || run["external_generators"] != nil { fail("tool_path·external_generators 는 시험 빌드(--dev)에서만 받습니다") }
+    return TopicPrep(dir: dir, id: id, run: run, topic: topic, repo: repo, base: base, newFolder: topic["new"] as? Bool ?? false, stack: stackSetOf(topic["stack"]), dev: dev)
+}
+
+// 준비가 만든 가지가 지금 어느 작업 트리(준비 임시 작업 트리 밖)에 걸려 있나
+func branchUsedElsewhere(_ repo: String, _ branch: String, except: String) -> Bool {
+    let out = gitRun(["worktree", "list", "--porcelain"], cwd: repo).out
+    var path = ""
+    for l in out.split(separator: "\n") {
+        if l.hasPrefix("worktree ") { path = String(l.dropFirst(9)) }
+        if l == "branch refs/heads/" + branch, canonical(path) != canonical(except) { return true }
+    }
+    return false
+}
+
+// 준비가 만든 가지·임시 작업 트리 지우기 — 가지 머리가 seed.head 그대로이고 다른 작업 트리에 걸려 있지 않을 때만(규칙 apDraftSweepDecide 와 같은 기준)
+func dropSeed(_ x: TopicPrep) -> String {
+    let work = "autopilot/" + x.id, wt = seedTree(x.id, x.repo)
+    let sd = apSeedParse(x.run["seed"])
+    if isDir(wt) { _ = gitRun(["worktree", "remove", "--force", wt], cwd: x.repo); try? fm.removeItem(atPath: wt) }
+    _ = gitRun(["worktree", "prune"], cwd: x.repo)
+    let parent = (wt as NSString).deletingLastPathComponent
+    if (try? fm.contentsOfDirectory(atPath: parent))?.isEmpty == true { try? fm.removeItem(atPath: parent) }
+    guard let h = headOf(x.repo, "refs/heads/" + work) else { return "가지가 없습니다" }
+    guard sd?.head == h || (x.run["seed_pending"] as? String) == h else { return "가지 \(work) 가 준비 기록과 달라 남깁니다" }   // 만들다 끊긴 가지는 seed_pending(출발 가지 머리)과 같을 때
+    guard !branchUsedElsewhere(x.repo, work, except: wt) else { return "가지 \(work) 가 작업 트리에 걸려 있어 남깁니다" }
+    let d = gitRun(["branch", "-D", work], cwd: x.repo)
+    return d.code == 0 ? "가지 \(work) 를 지웠습니다" : "가지를 지우지 못했습니다: \(firstLine(d.out))"
+}
+
+func writeSeed(_ x: TopicPrep, _ seed: [String: Any]?) {
+    var run = readJSON(x.dir + "/run.json") as? [String: Any] ?? x.run
+    if let seed { run["seed"] = seed } else { run.removeValue(forKey: "seed") }
+    run.removeValue(forKey: "seed_pending")
+    writeJSON(x.dir + "/run.json", run)
+}
+
+func cmdSeed(_ args: [String]) {
+    let x = topicPrep(args)
+    let action = args.filter { !$0.hasPrefix("--") }.dropFirst().first ?? ""
+    let work = "autopilot/" + x.id, wt = seedTree(x.id, x.repo)
+    func reply(_ o: [String: Any], _ ok: Bool) -> Never { print(jsonText(o)); exit(ok ? 0 : 1) }
+    switch action {
+    case "base":
+        // 다시 하면 앞 것을 지운다(같은 준비가 만든 가지만)
+        if headOf(x.repo, "refs/heads/" + work) != nil || isDir(wt) {
+            let note = dropSeed(x)
+            if headOf(x.repo, "refs/heads/" + work) != nil { reply(["ok": false, "problems": ["앞 준비의 \(work) 를 지우지 못했습니다: \(note)"]], false) }
+            writeSeed(x, nil)
+        }
+        let name = x.topic["name"] as? String ?? repoName(x.repo)
+        let plan = x.newFolder ? apSkeletonPlan(x.stack, name: name) : APSkeletonPlan()
+        let login = captureLoginEnv(loginShell()) ?? ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": home]
+        var env = passEnv(login, extra: [])
+        if let tp = x.run["tool_path"] as? String { env["PATH"] = tp }
+        let probe = EngineToolProbe(path: env["PATH"] ?? loginPath(), browserPath: nil)
+        let steps = plan.steps.map { ["slot": $0.slot, "label": $0.label, "folder": $0.folder, "kind": $0.kind.rawValue, "external": $0.external,
+                                      "command": apGenCommandText($0), "tools": $0.tools.map(\.label)] as [String: Any] }
+        guard plan.problems.isEmpty else { reply(["ok": false, "step": "plan", "problems": plan.problems, "plan": steps, "first_unit": plan.firstUnit, "notes": plan.notes], false) }
+        let tools = apSkeletonToolProblems(plan, probe: probe)
+        guard tools.isEmpty else { reply(["ok": false, "step": "tools", "problems": tools, "plan": steps, "first_unit": plan.firstUnit, "notes": plan.notes], false) }
+        guard let baseHead = headOf(x.repo, "refs/heads/" + x.base) else { reply(["ok": false, "problems": ["출발 가지 \(x.base) 머리를 읽지 못했습니다"]], false) }
+        mkdirPrivate(home + "/.claude-board"); mkdirPrivate(home + "/.claude-board/worktrees")
+        mkdirPrivate((wt as NSString).deletingLastPathComponent)
+        _ = gitRun(["worktree", "prune"], cwd: x.repo)
+        let add = gitRun(["worktree", "add", "-q", "-b", work, wt, x.base], cwd: x.repo)
+        guard add.code == 0 else { reply(["ok": false, "problems": ["출발 가지 \(x.base) 에서 \(work) 와 임시 작업 트리를 만들지 못했습니다: \(firstLine(add.out))"]], false) }
+        var r0 = readJSON(x.dir + "/run.json") as? [String: Any] ?? x.run
+        r0["seed_pending"] = baseHead; writeJSON(x.dir + "/run.json", r0)   // 하다 끊겨도 drop 이 이 가지를 지울 수 있게
+        let allowExternal = !x.dev || x.run["external_generators"] as? Bool == true
+        let res = apMakeSkeleton(plan, probe: probe, work: EngineSkeletonWork(root: wt, env: env), allowExternal: allowExternal)
+        guard res.ok else {
+            _ = dropSeed(TopicPrep(dir: x.dir, id: x.id, run: r0, topic: x.topic, repo: x.repo, base: x.base, newFolder: x.newFolder, stack: x.stack, dev: x.dev))
+            writeSeed(x, nil)
+            reply(["ok": false, "step": "skeleton", "problems": res.problems, "plan": steps, "done": res.done], false)
+        }
+        let head = headOf(wt, "HEAD") ?? baseHead
+        let points = apHarnessPoints(harnessTexts(wt))
+        writeJSON(x.dir + "/harness-points.json", points.map(harnessPointJSON))
+        let seed: [String: Any] = ["repo": x.repo, "branch": work, "base": x.base, "base_head": baseHead, "head": head, "worktree": wt,
+                                   "skeleton": res.done, "skeleton_commit": res.commit ?? NSNull(), "first_unit": plan.firstUnit, "at": r3(now())]
+        writeSeed(x, seed)
+        reply(["ok": true, "head": head, "base_head": baseHead, "plan": steps, "done": res.done, "commit": res.commit ?? NSNull(), "external": res.external,
+               "first_unit": plan.firstUnit, "notes": plan.notes, "harness_points": points.count, "worktree": wt], true)
+    case "scenarios":
+        guard var seed = x.run["seed"] as? [String: Any], let sd = apSeedParse(seed), isDir(wt) else { reply(["ok": false, "problems": ["출발 전 자율주행 가지(seed base)가 없습니다"]], false) }
+        let points = (readJSON(x.dir + "/harness-points.json") as? [[String: Any]] ?? []).compactMap(harnessPointOf)
+        let c = apDraftCheck(files: EngineDraftFiles(root: x.dir + "/draft"), harness: points, firstUnit: seed["first_unit"] as? Bool ?? false)
+        guard c.ok else { reply(["ok": false, "problems": ["초안 결과가 기계 검사를 지나지 않았습니다"] + c.problems.prefix(5)], false) }
+        // 시나리오는 파일 시스템을 거치지 않고 git 색인에만 넣는다(⑪-2 자동 보안 검토 MEDIUM 3: 출발 가지에 .autopilot 이 저장소 밖을 가리키는 링크로
+        // 커밋돼 있으면 작업 트리에 지우고 쓰는 길이 링크를 따라 밖을 지우고 썼다). 검사한 글자를 엔진 전용 임시 파일에 쓰고 hash-object(필터 없음),
+        // update-index --cacheinfo 로 넣는다(경로가 링크 너머면 git 이 거절한다). git 자리는 임시 작업 트리 것으로 박는다(GIT_DIR·GIT_WORK_TREE)
+        let files = EngineDraftFiles(root: x.dir + "/draft")
+        guard let gd = gitOut(["rev-parse", "--absolute-git-dir"], cwd: wt) else { reply(["ok": false, "problems": ["임시 작업 트리의 git 자리를 읽지 못했습니다"]], false) }
+        let pin = ["GIT_DIR=" + gd, "GIT_WORK_TREE=" + wt]
+        let tmpDir = privateRoot(dev: x.dev) + "/draft/" + x.id
+        mkdirPrivate(privateRoot(dev: x.dev)); mkdirPrivate(privateRoot(dev: x.dev) + "/draft"); mkdirPrivate(tmpDir)
+        var n = 0
+        for u in c.units where !u.scenarios.isEmpty {
+            let rm = gitRun(["rm", "-r", "-q", "--cached", "--ignore-unmatch", "--", apScenarioRoot + "/" + u.id], cwd: wt, env: pin)
+            guard rm.code == 0 else { reply(["ok": false, "problems": ["앞 시나리오(\(apScenarioRoot)/\(u.id))를 색인에서 빼지 못했습니다: \(firstLine(rm.out))"]], false) }
+            for sc in u.scenarios {
+                guard let data = files.read("scenarios/\(u.id)/\(sc.file)") else { reply(["ok": false, "problems": ["시나리오 scenarios/\(u.id)/\(sc.file) 를 읽지 못했습니다"]], false) }
+                let tmp = tmpDir + "/blob"
+                unlink(tmp)
+                guard writePrivate(tmp, data) else { reply(["ok": false, "problems": ["시나리오 임시 파일을 쓰지 못했습니다"]], false) }
+                let h = gitRun(["hash-object", "-w", "--no-filters", "--", tmp], cwd: wt, env: pin)
+                unlink(tmp)
+                guard h.code == 0, h.out.range(of: "^[0-9a-f]{40,64}$", options: .regularExpression) != nil else { reply(["ok": false, "problems": ["시나리오를 git 객체로 넣지 못했습니다: \(firstLine(h.out))"]], false) }
+                let rel = apScenarioPath(unit: u.id, file: sc.file)
+                let ui = gitRun(["update-index", "--add", "--cacheinfo", "100755,\(h.out),\(rel)"], cwd: wt, env: pin)
+                guard ui.code == 0 else { reply(["ok": false, "problems": ["\(rel) 를 색인에 넣지 못했습니다(출발 가지의 그 자리가 링크·파일이면 넣지 않습니다): \(firstLine(ui.out))"]], false) }
+                n += 1
+            }
+        }
+        var head = sd.head
+        if n > 0 {
+            let cm = gitRun(["commit", "-q", "--no-verify", "-m", apScenarioCommitMessage(units: c.units.filter { !$0.scenarios.isEmpty }.count, scenarios: n)], cwd: wt, commit: true, env: pin)
+            guard cm.code == 0, let h = headOf(wt, "HEAD", env: pin) else { reply(["ok": false, "problems": ["판정 시나리오를 커밋하지 못했습니다: \(firstLine(cm.out))"]], false) }
+            head = h
+        }
+        _ = gitRun(["worktree", "remove", "--force", wt], cwd: x.repo); try? fm.removeItem(atPath: wt)
+        _ = gitRun(["worktree", "prune"], cwd: x.repo)
+        let parent = (wt as NSString).deletingLastPathComponent
+        if (try? fm.contentsOfDirectory(atPath: parent))?.isEmpty == true { try? fm.removeItem(atPath: parent) }
+        seed["head"] = head; seed["worktree"] = NSNull(); seed["scenario_commit"] = n > 0 ? head : NSNull(); seed["scenarios"] = n
+        writeSeed(x, seed)
+        reply(["ok": true, "head": head, "scenarios": n, "commits": gitOut(["rev-list", "--count", "\(sd.baseHead)..\(head)"], cwd: x.repo) ?? "?"], true)
+    case "drop":
+        let note = dropSeed(x)
+        if headOf(x.repo, "refs/heads/" + work) == nil { writeSeed(x, nil) }
+        reply(["ok": true, "note": note], true)
+    default: usage()
+    }
+}
+
+// 초안 세션 — 고정한 세션 설정(0600, 엔진 전용 폴더)으로 claude -p 를 띄우고 글은 표준 입력으로. 결과는 파일(draft/)이고 표준 출력의 결과 줄은 비용·오류만 본다.
+// 시간 상한에 닿으면 group 을 통째로 끝낸다. 끝나면 기계 검사(apDraftCheck)를 돌려 draft-check.json 에 남긴다
+func cmdDraft(_ args: [String]) {
+    let x = topicPrep(args)
+    var claudePath: String?, maxSec = apDraftMaxSec
+    var i = 0
+    while i < args.count {
+        if args[i] == "--claude", i + 1 < args.count { claudePath = args[i + 1]; i += 1 }
+        else if args[i] == "--max-sec", i + 1 < args.count { maxSec = min(max(Double(args[i + 1]) ?? apDraftMaxSec, 10), 3600); i += 1 }
+        i += 1
+    }
+    if !x.dev, claudePath != nil { fail("--claude 는 시험 빌드(--dev)에서만 받습니다") }
+    if x.dev, claudePath == nil { claudePath = x.run["claude_path"] as? String }
+    func reply(_ o: [String: Any], _ ok: Bool) -> Never {
+        writeJSON(x.dir + "/draft-check.json", o)
+        print(jsonText(o)); exit(ok ? 0 : 1)
+    }
+    guard let seed = x.run["seed"] as? [String: Any], let wt = seed["worktree"] as? String, isDir(wt) else {
+        reply(["ok": false, "problems": ["뼈대·저장소 보기(seed base)가 아직 없습니다"]], false)
+    }
+    let out = x.dir + "/draft"
+    try? fm.removeItem(atPath: out)
+    guard (try? fm.createDirectory(atPath: out, withIntermediateDirectories: true)) != nil else { reply(["ok": false, "problems": ["결과 폴더를 만들지 못했습니다"]], false) }
+    let outC = canonical(out)
+    let bundle = x.dir + "/context/links"
+    let bundleFiles = isDir(bundle) ? ((try? fm.contentsOfDirectory(atPath: bundle)) ?? []).filter { !$0.hasPrefix(".") }.sorted() : []
+    let points = (readJSON(x.dir + "/harness-points.json") as? [[String: Any]] ?? []).compactMap(harnessPointOf)
+    let firstUnit = seed["first_unit"] as? Bool ?? false
+    let input = APDraftInput(topic: x.topic["text"] as? String ?? "", stack: x.stack, newFolder: x.newFolder, repo: canonical(wt),
+                             bundle: bundleFiles.isEmpty ? nil : canonical(bundle), bundleFiles: bundleFiles, out: outC,
+                             skeleton: seed["skeleton"] as? [String] ?? [], firstUnit: firstUnit, harness: points)
+    let deny = [home + "/Library/Keychains", privateRoot(dev: false), privateRoot(dev: true), home + "/.ssh", home + "/.aws", home + "/.gnupg",
+                home + "/.claude", home + "/.config", home + "/.claude/notifier/autopilot"]
+        + [false, true].map { autopilotRoot(dev: $0) + "/runs" }
+    let paths = APDraftPaths(out: outC, reads: [canonical(wt)] + (bundleFiles.isEmpty ? [] : [canonical(bundle)]), denyRead: deny)
+    let work = privateRoot(dev: x.dev) + "/draft/" + x.id
+    mkdirPrivate(privateRoot(dev: x.dev)); mkdirPrivate(privateRoot(dev: x.dev) + "/draft"); try? fm.removeItem(atPath: work); mkdirPrivate(work)
+    let setPath = work + "/settings.json"
+    guard writePrivate(setPath, Data(jsonText(apDraftSettingsJSON(paths), pretty: true).utf8)) else { reply(["ok": false, "problems": ["세션 설정 파일을 쓰지 못했습니다"]], false) }
+    let login = captureLoginEnv(loginShell()) ?? ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": home]
+    guard let claude = claudePath.flatMap({ access($0, X_OK) == 0 ? $0 : nil }) ?? findExecutable("claude", login) else {
+        reply(["ok": false, "problems": ["claude 를 찾지 못했습니다"]], false)
+    }
+    var env = passEnv(login, extra: [])
+    env["CLAUDE_BOARD_DRAFT"] = x.id
+    let model = (x.run["model"] as? String).flatMap { $0.range(of: "^[A-Za-z0-9._-]{1,60}$", options: .regularExpression) != nil ? $0 : nil } ?? apDraftModel
+    let argv = apDraftArgs(paths, settings: setPath, model: model)
+    writeJSON(work + "/args.json", argv)
+    let t0 = now()
+    guard let c = Child(claude, argv, env: env, cwd: outC, stdinPipe: true, stdoutPipe: true, rawOut: true, errFile: work + "/stderr.log", newGroup: true) else {
+        reply(["ok": false, "problems": ["claude 를 띄우지 못했습니다(\(claude))"]], false)
+    }
+    c.send(apDraftPrompt(input))
+    c.closeInput()
+    var note = ""
+    if !c.wait(maxSec) { killGroup(c.pid); _ = c.wait(3); note = "시간 상한(\(Int(maxSec))초)에 닿아 세션을 끝냈습니다" }
+    for _ in 0..<20 where !c.atEOF { usleep(50_000) }
+    _ = writePrivate(work + "/out.json", c.rawData)
+    let o = apMCPOutput(c.rawData)
+    if note.isEmpty, let e = o.error { note = e }
+    let chk = apDraftCheck(files: EngineDraftFiles(root: outC), harness: points, firstUnit: firstUnit)
+    let ctx = bundleFiles.isEmpty ? nil : canonical(bundle)
+    let queue = chk.units.map { apDraftQueueUnit($0, repo: x.repo, context: ctx, prep: x.id, stack: x.stack) }
+    let cards = chk.cards.map { c -> [String: Any] in
+        var d: [String: Any] = ["id": c.id, "title": c.title, "why": c.why, "recommended": c.recommended, "units": c.units,
+                                "options": c.options.map { ["key": $0.key, "label": $0.label, "note": $0.note] }]
+        if let cr = c.criterion { d["criterion"] = cr }
+        return d
+    }
+    let missing = chk.harnessMissing.map { p -> [String: Any] in
+        let t = apHarnessCard(p)
+        return harnessPointJSON(p).merging(["card": apHarnessCardId(p), "title": t.title, "why": t.why, "recommended": t.recommended,
+                                            "options": t.options.map { ["key": $0.key, "label": $0.label, "note": $0.note] }]) { a, _ in a }
+    }
+    let ok = note.isEmpty && chk.ok
+    reply(["ok": ok, "session": note.isEmpty, "note": note.isEmpty ? (chk.ok ? "기계 검사를 지났습니다" : "기계 검사에 걸렸습니다") : note,
+           "problems": (note.isEmpty ? [] : [note]) + chk.problems, "warnings": chk.warnings, "cost_usd": o.cost ?? NSNull(), "sec": r3(now() - t0),
+           "units": queue, "cards": cards, "harness_points": points.count, "harness_missing": missing,
+           "spec": ["requirements": chk.spec.requirements, "criteria": chk.spec.criteria.map(apCriterionJSON), "chars": chk.specText.count],
+           "instruction_chars": chk.instruction.count, "scenarios": chk.scenarioCount, "model": model, "at": r3(now())], ok)
+}
+
 let argv = Array(CommandLine.arguments.dropFirst())
 switch argv.first {
 case "report": cmdReport(Array(argv.dropFirst()))
@@ -5902,5 +6331,7 @@ case "connection": cmdConnection(Array(argv.dropFirst()))
 case "read": cmdRead(Array(argv.dropFirst()))
 case "tickets": cmdTickets(Array(argv.dropFirst()))
 case "notify": cmdNotify(Array(argv.dropFirst()))
+case "seed": cmdSeed(Array(argv.dropFirst()))
+case "draft": cmdDraft(Array(argv.dropFirst()))
 default: usage()
 }
