@@ -19,6 +19,7 @@
 #                                        · result(init 뒤 is_error result, 입력이 닫히면 끝) · preinit:<코드>(init 도 내지 않고 끝남)
 #       FAKE IGNORE_INT / FAKE IGNORE_TERM   그 신호를 무시한다(엔진의 SIGTERM·SIGKILL 단계를 보려고)
 #       FAKE NEXT <제목>|<까닭> · FAKE NEW <제목>|<까닭>   결과 기록의 next_start·new_work
+#       FAKE RESULT <JSON 파일 절대 경로>    결과 기록을 그 파일의 객체로(견본 기록, 보고서 시험. NEXT·NEW 는 쓰지 않음)
 #     SIGINT(엔진의 멈춤)를 받으면 진짜 claude 처럼(2026-10-20 실측) result subtype error_during_execution·is_error true·
 #     terminal_reason aborted_tools 를 내고 종료 코드 0 으로 끝난다.
 #
@@ -165,6 +166,7 @@ if error and runs <= int(error[0]):
 
 out({"type": "system", "subtype": "init", "session_id": sid, "cwd": os.getcwd(), "model": "fake"})
 written, nexts, news, cost = [], [], [], 0.0
+custom = None   # FAKE RESULT 로 받은 결과 기록(견본)
 
 def interrupted():
     # 진짜 claude 의 SIGINT 뒤 모양(진행 상황.md 1단계 실측): 도구 명령을 끝내고 error_during_execution result, 종료 코드 0
@@ -210,6 +212,11 @@ for k, l in todo:
         children.append(p)
         log("fake-child.pid", "%d\n" % p.pid)
         out({"type": "system", "subtype": "background_tasks_changed", "tasks": [], "session_id": sid})
+    elif verb == "RESULT":
+        try:
+            custom = json.load(open(rest))
+        except Exception as e:
+            log("fake-errors.log", "RESULT %s: %s\n" % (rest, e))
     elif verb == "NEXT":
         t, _, w = rest.partition("|"); nexts.append({"title": t.strip(), "why": w.strip()})
     elif verb == "NEW":
@@ -217,6 +224,8 @@ for k, l in todo:
 if stop.is_set(): interrupted()
 res = {"unit": {"title": "가짜 단위"}, "outcome": "done", "headline": "가짜 claude 가 줄대로 했습니다.", "summary": ["줄 %d개" % len(todo)],
        "next_start": nexts, "new_work": news}
+if isinstance(custom, dict):
+    res = custom   # 견본 결과 기록을 그대로(보고서 틀 시험, 3단계)
 try:
     open(os.path.join(UNIT, "result.json"), "w").write(json.dumps(res, ensure_ascii=False))
 except Exception:
