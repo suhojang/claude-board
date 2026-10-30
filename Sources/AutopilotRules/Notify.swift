@@ -191,7 +191,7 @@ public func apSummaryNotice(_ runs: [APNoticeRun], waiting: Int, merge: [APMerge
 }
 
 public func apTestNotice(name: String, at: Double, tz: TimeZone) -> APNotice {
-    APNotice(kind: .test, id: "test", headline: "[자율주행] 시험 글", lines: ["\(apNotifyClean(name, 80)) 대화방으로 보드의 알림이 닿는지 보는 시험 글입니다", "보낸 때 \(clock(at, tz))"])
+    APNotice(kind: .test, id: "test", headline: "[자율주행] 시험 글", lines: ["\(apNotifyClean(name, 80)) 에 보드의 알림이 닿는지 보는 시험 글입니다(설정 › 연결에서 보냄)", "보낸 때 \(clock(at, tz))"])
 }
 
 // 토큰 만료 임박 줄(요약) — 쓰기·읽기 연결의 만료일이 14일 안이거나 지났을 때

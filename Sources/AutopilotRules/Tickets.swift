@@ -78,10 +78,11 @@ public func apTicketPlanParse(_ data: Data?) -> (plan: APTicketPlan, problems: [
               let k = APTicketKind(rawValue: e["kind"] as? String ?? "") else { probs.append("꼴이 틀린 항목이 있습니다"); continue }
         guard seen.insert(id).inserted else { probs.append("같은 항목이 둘입니다: \(id)"); continue }
         var t = APTicketEntry(id: id, kind: k)
-        t.title = apDocText(e["title"] as? String ?? "", apTicketTitleMax)
+        // 제목·단위 제목은 모델·바깥이 쓴 글일 수 있다 — 알림과 같은 원칙(비밀 가리기·다듬기·멘션 무력화·상한, Notify.swift apNotifyClean)
+        t.title = apNotifyClean(e["title"] as? String ?? "", apTicketTitleMax)
         t.parent = (e["parent"] as? String ?? "").trimmingCharacters(in: .whitespaces)
         t.key = (e["key"] as? String ?? "").trimmingCharacters(in: .whitespaces)
-        t.units = (e["units"] as? [Any] ?? []).prefix(50).compactMap { $0 as? String }.map { apDocText($0, 200) }.filter { !$0.isEmpty }
+        t.units = (e["units"] as? [Any] ?? []).prefix(50).compactMap { $0 as? String }.map { apNotifyClean($0, 200) }.filter { !$0.isEmpty }
         let prefix = id.split(separator: ":").first.map(String.init) ?? ""
         if prefix != k.rawValue { probs.append("항목 \(id) 의 종류가 이름과 다릅니다") }
         if k != .move, t.title.isEmpty { probs.append("항목 \(id) 의 제목이 비었습니다") }
@@ -174,6 +175,28 @@ public func apTicketKeys(_ p: APTicketPlan, _ b: APTicketBook) -> (stories: [Str
     return (s, t)
 }
 
+// 출발 준비 동안 대기열에 넣는 자리표 — 아직 만들지 않은 스토리·작업의 키 자리(엔진 status 가 가지 이름 꼴을 미리 보게).
+// 이슈 키 꼴(숫자)이 아니라 단위 시작 전 티켓 읽기·Jira 댓글이 요청하지 않고, 엔진 start 는 자리표가 남은 대기열로 출발하지 않는다.
+// story:new-3 → SHOP-NEW3, 그 밖의 항목 → SHOP-NEW-<항목 꼬리>
+public let apTicketPlaceholderPattern = "^[A-Z][A-Z0-9_]*-NEW([0-9]{1,4}|-[A-Za-z0-9._]{1,64})$"
+public func apTicketPlaceholder(project: String, entry: String) -> String {
+    let tail = String(entry.drop { $0 != ":" }.dropFirst())
+    if entry.hasPrefix("story:"), tail.hasPrefix("new-"), let k = Int(tail.dropFirst(4)), (0...9999).contains(k) { return "\(project)-NEW\(k)" }
+    let safe = String(tail.unicodeScalars.map { CharacterSet.alphanumerics.contains($0) && $0.isASCII || $0 == "." || $0 == "_" ? Character($0) : "_" }).prefix(64)
+    return "\(project)-NEW-\(safe)"
+}
+public func apIsTicketPlaceholder(_ s: String) -> Bool { apMatch(s, apTicketPlaceholderPattern) }
+
+// 출발하면 안 되는 키 — 대기열 단위의 story·tickets 에 자리표나 임시 번호(TMP-…)가 남았으면 그 값들
+public func apUnmadeKeys(_ units: [[String: Any]]) -> [String] {
+    var out: [String] = []
+    for u in units {
+        let vals = [u["story"] as? String].compactMap { $0 } + (u["tickets"] as? [Any] ?? []).compactMap { $0 as? String }
+        for v in vals where (apIsTicketPlaceholder(v) || apMatch(v, apTempTicketPattern)) && !out.contains(v) { out.append(v) }
+    }
+    return out
+}
+
 // 남은 항목(만들지 않았거나 실패·확인 필요) — 출발은 이것이 0 일 때만
 public func apTicketsLeft(_ p: APTicketPlan, _ b: APTicketBook) -> [APTicketEntry] {
     p.entries.filter { b.entries[$0.id]?.state != .made }
@@ -255,6 +278,17 @@ public func apCreatedIssueKey(_ r: APHTTPResponse, project: String) -> String? {
           let o = try? JSONSerialization.jsonObject(with: r.body) as? [String: Any], let k = o["key"] as? String,
           apMatch(k, apIssueKeyPattern), k.hasPrefix(project + "-") else { return nil }
     return k
+}
+
+// 만들기 실패 까닭 — 받는 쪽 본문은 믿지 않아 상태 번호로만(Jira 티켓에 맞춘 말, 그 밖은 apFailNote)
+public func apTicketFailNote(_ r: APHTTPResponse) -> String {
+    if r.error != nil { return apFailNote(r) }
+    switch r.status {
+    case 400: return "Jira 가 요청 꼴을 받지 않았습니다(400): 이슈 종류·부모·필수 칸을 확인합니다(프로젝트 설정 tickets.issue_types)"
+    case 401, 403: return "거부됨(\(r.status)): 토큰이 만료·취소됐거나 그 프로젝트에 티켓을 만들 권한이 없습니다"
+    case 404: return "프로젝트나 부모 이슈를 찾지 못했습니다(404)"
+    default: return apFailNote(r)
+    }
 }
 
 // MARK: - 만들어도 되는가
@@ -353,7 +387,7 @@ public func apMakeTickets(_ p: APTicketPlan, store: APTicketStore, connections: 
             let resp = send(apJiraProjectRequest(p.project, base: base, auth: auth))
             let types = apJiraIssueTypes(resp)
             if types.isEmpty {
-                let why = resp.status == 200 ? "프로젝트의 이슈 종류를 읽지 못했습니다" : "프로젝트 \(p.project) 를 읽지 못했습니다: \(apFailNote(resp))"
+                let why = resp.status == 200 ? "프로젝트의 이슈 종류를 읽지 못했습니다" : "프로젝트 \(p.project) 를 읽지 못했습니다: \(apTicketFailNote(resp))"
                 for e in todo where e.kind != .move { mark(e.id, .failed, code: resp.status, note: why); out.failed.append(e.id) }
                 return finish(why)
             }
@@ -390,7 +424,7 @@ public func apMakeTickets(_ p: APTicketPlan, store: APTicketStore, connections: 
                     if (200...299).contains(resp.status), resp.error == nil {
                         mark(e.id, .made, key: e.key, code: resp.status, note: "부모를 \(parent) 로 바꿨습니다"); out.made.append(e.id)
                     } else {
-                        mark(e.id, .failed, code: resp.status, note: "부모 바꾸기: " + apFailNote(resp) + (lastWait != nil ? " 다시 누르면 남은 것만 만듭니다" : ""))
+                        mark(e.id, .failed, code: resp.status, note: "부모 바꾸기: " + apTicketFailNote(resp) + (lastWait != nil ? " 다시 누르면 남은 것만 만듭니다" : ""))
                         out.failed.append(e.id)
                     }
                     continue
@@ -400,7 +434,7 @@ public func apMakeTickets(_ p: APTicketPlan, store: APTicketStore, connections: 
                 if let key = apCreatedIssueKey(resp, project: p.project) {
                     mark(e.id, .made, key: key, code: resp.status, note: "만들었습니다"); out.made.append(e.id)
                 } else {
-                    let why = (200...299).contains(resp.status) ? "응답에 만든 키가 없습니다(\(resp.status)). Jira 에 생겼는지 확인합니다" : apFailNote(resp)
+                    let why = (200...299).contains(resp.status) ? "응답에 만든 키가 없습니다(\(resp.status)). Jira 에 생겼는지 확인합니다" : apTicketFailNote(resp)
                     mark(e.id, (200...299).contains(resp.status) ? .uncertain : .failed, code: resp.status, note: why)
                     out.failed.append(e.id)
                 }
@@ -429,7 +463,7 @@ public func apNewTicketOutbox(_ r: APReportRun, unit n: Int, story: String?, tas
     var out: [APOutboxItem] = [], seen = Set<String>()
     for t in res.newTickets.prefix(20) {
         guard apMatch(t.temp, apTempTicketPattern), t.temp.hasPrefix("TMP-\(n)-"), seen.insert(t.temp).inserted else { continue }
-        let title = apDocText(t.title, apTicketTitleMax)
+        let title = apNotifyClean(t.title, apTicketTitleMax)
         guard !title.isEmpty else { continue }
         var it = APOutboxItem()
         it.id = "u\(n)-ticket-\(t.temp)"
@@ -437,8 +471,8 @@ public func apNewTicketOutbox(_ r: APReportRun, unit n: Int, story: String?, tas
         it.target = APOutboxTarget(service: .jira, issue: t.temp, space: project, parent: st)
         it.connection = "atlassian"
         it.title = title
-        let e = APTicketEntry(id: "task:" + t.temp, kind: .task, title: title, parent: st, units: [u.title.isEmpty ? "단위 \(n)" : u.title])
-        it.doc = apTicketDoc(e, run: r.id, temp: t.temp, why: apDocText(t.why, 500), task: task ?? "")
+        let e = APTicketEntry(id: "task:" + t.temp, kind: .task, title: title, parent: st, units: [apNotifyClean(u.title.isEmpty ? "단위 \(n)" : u.title, 200)])
+        it.doc = apTicketDoc(e, run: r.id, temp: t.temp, why: apNotifyClean(t.why, 500), task: task ?? "")
         it.mode = .review   // 늘 검수 뒤
         it.created = now; it.updated = now
         out.append(it)

@@ -258,6 +258,34 @@ private func plan() -> APTicketPlan {
         #expect(a.method == "POST" && m.method == "PUT" && m.url == site + "/rest/api/3/issue/SHOP-13")
     }
 
+    @Test("계획의 제목은 알림과 같은 원칙으로 다듬는다(멘션·비밀·긴 줄표·상한), 실패 까닭은 티켓 말로")
+    func planClean() throws {
+        var o = apTicketPlanJSON(plan())
+        var e = o["entries"] as! [[String: Any]]
+        e[0]["title"] = "쿠폰 — @here <!channel> https://hooks.example.com/services/T0/B0/" + String(repeating: "z", count: 24)
+        e[0]["units"] = ["@everyone 단위"]
+        o["entries"] = e
+        let p = apTicketPlanParse(try JSONSerialization.data(withJSONObject: o)).plan
+        #expect(!p.entries[0].title.contains("@") && !p.entries[0].title.contains("—") && !p.entries[0].title.contains("hooks.example.com/services"))
+        #expect(p.entries[0].units == ["＠everyone 단위"])
+        #expect(apTicketFailNote(APHTTPResponse(status: 400)).contains("이슈 종류·부모·필수 칸"))
+        #expect(apTicketFailNote(APHTTPResponse(status: 404)).contains("부모 이슈를 찾지 못했습니다"))
+        #expect(apTicketFailNote(APHTTPResponse(status: 302)).contains("따라가지 않았습니다"))
+    }
+
+    @Test("자리표와 출발하면 안 되는 키")
+    func placeholders() {
+        #expect(apTicketPlaceholder(project: "SHOP", entry: "story:new-3") == "SHOP-NEW3")
+        #expect(apTicketPlaceholder(project: "SHOP", entry: "task:u2") == "SHOP-NEW-u2")
+        #expect(apTicketPlaceholder(project: "SHOP", entry: "task:a/b c") == "SHOP-NEW-a_b_c")
+        for k in ["SHOP-NEW3", "SHOP-NEW-u2"] { #expect(apIsTicketPlaceholder(k) && !apMatch(k, apIssueKeyPattern)) }
+        #expect(!apIsTicketPlaceholder("SHOP-12") && !apIsTicketPlaceholder("NEW-1"))
+        let units: [[String: Any]] = [["story": "SHOP-NEW1", "tickets": ["SHOP-NEW-u2"]], ["story": "SHOP-12", "tickets": ["SHOP-13"]],
+                                      ["story": "SHOP-12", "tickets": ["TMP-3-1"]], ["title": "티켓 없는 단위"]]
+        #expect(apUnmadeKeys(units) == ["SHOP-NEW1", "SHOP-NEW-u2", "TMP-3-1"])
+        #expect(apUnmadeKeys([units[1], units[3]]).isEmpty)
+    }
+
     @Test("상태 파일 읽기: 꼴이 틀린 항목은 버리고, 키 없이 만들었다는 항목은 확인 필요로")
     func bookParse() {
         let o: [String: Any] = ["format": apTicketBookFormat, "version": 1, "site": site, "entries": [
