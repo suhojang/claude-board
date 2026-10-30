@@ -7,6 +7,7 @@ import Combine
 import CryptoKit
 import GhosttyTerminal
 import GhosttyTheme
+import SQLite3
 import SwiftUI
 import WebKit
 

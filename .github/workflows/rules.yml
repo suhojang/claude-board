@@ -2,7 +2,8 @@
 # - hook-rules: macOS hook(state.py·notify.py·hooks.py)을 끝까지 돌려 hook-table/ 의 표를 다시 만들고 커밋된 것과 같은지 본다.
 #   hooks.py 사본(packaging/hooks.py)을 견주고, Windows 판 Rust 코어 시험을 돌린다(hook_table 시험이 같은 표로 state·notify·HOOKS 를 견준다.
 #   진짜 pid 생사를 쓰므로 unix 에서만 돌고, windows.yml 의 Windows 러너에서는 빈 시험이다)
-# - board-rules: BoardRules 의 Swift Testing 시험. SwiftPM 이 시험 0개로 성공하는 함정이 있어 "Test run with N tests" 의 N 이 0 보다 큰지 본다
+# - board-rules: 규칙 라이브러리 BoardRules·AutopilotRules(자율주행)의 Swift Testing 시험 — swift test 가 모든 시험 타깃을 돌리고, 보드·자율주행 엔진도
+#   debug 로 함께 빌드한다. SwiftPM 이 시험 0개로 성공하는 함정이 있어 "Test run with N tests" 의 N 이 0 보다 큰지 본다
 # 표·유지 규칙은 hook-table/README.md
 name: rules
 
@@ -140,7 +141,7 @@ jobs:
           key: spm-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Package.resolved') }}
 
       # Xcode 가 있으므로 --toolset clt-testing.json 은 붙이지 않는다(Command Line Tools 만 있는 Mac 용)
-      - name: swift test (BoardRules)
+      - name: swift test (BoardRules·AutopilotRules)
         run: |
           set -o pipefail
           log="$RUNNER_TEMP/swift-test.log"

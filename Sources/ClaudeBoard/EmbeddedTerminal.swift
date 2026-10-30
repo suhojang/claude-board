@@ -7,6 +7,7 @@ import Combine
 import CryptoKit
 import GhosttyTerminal
 import GhosttyTheme
+import SQLite3
 import SwiftUI
 import WebKit
 
@@ -975,7 +976,13 @@ final class SplitNode {
     }
 
     // 새 세션 — claude 면 보드가 세션 id 를 붙여 미리 안다. 답변 꾸미기는 새 세션 창의 체크(경로 카드 "+" 는 늘 켬) — 끄면 그 세션 id 를 기억한다
-    func startSession(_ command: String, in dir: String, mdRender: Bool = UserDefaults.standard.bool(forKey: "newSessionMdRender")) {
+    func startSession(_ command: String, in dir: String, mdRender: Bool = UserDefaults.standard.bool(forKey: "newSessionMdRender"),
+                      warned: Bool = false) {
+        // 원래 작업 트리로 자율주행이 도는 경로면 먼저 경고한다(막지는 않는다) — 경로 카드 "+"·새 세션 창 모두 여기로 온다
+        if !warned, let r = AutopilotStore.shared.inPlaceRun(covering: dir) {
+            warnAutopilotPath(r, dir: dir) { self.startSession(command, in: dir, mdRender: mdRender, warned: true) }
+            return
+        }
         let (cmd, id) = freshSessionCommand(mdRenderCommand(command, off: !mdRender))
         launch(cmd, in: dir, sessionId: id, mdRenderOff: !mdRender)
     }

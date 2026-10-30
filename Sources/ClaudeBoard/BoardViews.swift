@@ -7,6 +7,7 @@ import Combine
 import CryptoKit
 import GhosttyTerminal
 import GhosttyTheme
+import SQLite3
 import SwiftUI
 import WebKit
 
@@ -190,9 +191,11 @@ struct UsagePanel: View {
     @ObservedObject var usage: UsageStore
     @ObservedObject var accounts: AccountStore
     var forceCompact = false    // 창이 낮아 중간 화면일 때 — 저장한 간략·상세 설정은 두고 한 줄로만 보인다
+    var stoplines: [String: Double]? = nil   // 자율주행 보기: 한도 id(5h·7d) → 멈출 선(%) 눈금
     let busy: () -> [Session]
     @AppStorage("usageCompact") private var compactSetting = false
-    private var compact: Bool { compactSetting || forceCompact }
+    // 자율주행 보기는 멈출 선 눈금이 보이게 상세로(간략 한 줄은 좁으면 막대를 뺀다). 중간 화면은 그래도 한 줄
+    private var compact: Bool { (compactSetting && stoplines == nil) || forceCompact }
 
     static func color(_ p: Double) -> Color {
         p < 50 ? Color(red: 0.42, green: 0.85, blue: 0.60) : p < 80 ? Color(red: 1.00, green: 0.70, blue: 0.36)
@@ -211,7 +214,7 @@ struct UsagePanel: View {
         HStack(spacing: 8) {
             ForEach(Array(usage.limits.enumerated()), id: \.element.id) { i, l in
                 if i > 0 { Rectangle().fill(Color.white.opacity(0.14)).frame(width: 0.5, height: 12) }
-                CompactLimit(limit: l, level: level)
+                CompactLimit(limit: l, level: level, stopline: stoplines?[l.id])
             }
         }
         .fixedSize()
@@ -263,6 +266,9 @@ struct UsagePanel: View {
                 HStack(spacing: 6) {
                     Text(l.label).boardFont(12, weight: .semibold).lineLimit(1).layoutPriority(1)
                     Spacer(minLength: 4)
+                    if let line = stoplines?[l.id] {
+                        Text("멈출 선 \(Int(line.rounded()))%").boardFont(10.5).foregroundStyle(.secondary).lineLimit(1).fixedSize()
+                    }
                     EverySecond { now in
                         Text(resetText(l.resets, now)).boardFont(10.5).foregroundStyle(.secondary)
                             .monospacedDigit()
@@ -282,6 +288,10 @@ struct UsagePanel: View {
                             .fill(LinearGradient(colors: [c.opacity(0.65), c], startPoint: .leading, endPoint: .trailing))
                             .frame(width: max(4, geo.size.width * CGFloat(min(l.pct, 100)) / 100))
                             .shadow(color: c.opacity(0.45), radius: 4)
+                        if let line = stoplines?[l.id] {   // 자율주행 멈출 선 — 닿으면 지금 단위는 마치고 새 단위는 초기화 뒤에
+                            Rectangle().fill(Color.white.opacity(0.85)).frame(width: 1.5, height: 11)
+                                .offset(x: geo.size.width * CGFloat(min(line, 100)) / 100 - 0.75)
+                        }
                     }
                 }
                 .frame(height: 6)
@@ -296,6 +306,7 @@ struct CompactLimit: View {
     let limit: Limit
     let level: Int          // 0 이름·막대·비율, 1 이름·비율, 2 짧은 이름·비율
     @ObservedObject private var ticker = SecondTicker.shared   // 힌트의 남은 시간
+    var stopline: Double? = nil   // 자율주행 보기의 멈출 선(%) — 작은 막대에 눈금
     var body: some View {
         let c = UsagePanel.color(limit.pct)
         HStack(spacing: 4) {
@@ -306,6 +317,9 @@ struct CompactLimit: View {
                 ZStack(alignment: .leading) {
                     Capsule().fill(Color.white.opacity(0.10))
                     Capsule().fill(c).frame(width: max(2, 26 * CGFloat(min(limit.pct, 100)) / 100))
+                    if let s = stopline {
+                        Rectangle().fill(Color.white.opacity(0.85)).frame(width: 1, height: 7).offset(x: 26 * CGFloat(min(s, 100)) / 100 - 0.5)
+                    }
                 }
                 .frame(width: 26, height: 4)
             }
@@ -314,7 +328,7 @@ struct CompactLimit: View {
                 .foregroundStyle(c)
                 .contentTransition(.numericText())
         }
-        .hint("\(limit.label) \(Int(limit.pct.rounded()))% · \(resetText(limit.resets, ticker.now))")
+        .hint("\(limit.label) \(Int(limit.pct.rounded()))% · \(resetText(limit.resets, ticker.now))" + (stopline.map { " · 자율주행 멈출 선 \(Int($0.rounded()))%" } ?? ""))
     }
 }
 
@@ -1302,6 +1316,9 @@ struct GroupCard: View {
     let remove: () -> Void
     let clearEnded: () -> Void
     @ObservedObject private var hub = TerminalHub.shared
+    // 이 경로를 쓰는 자율주행 실행 — 실행 줄(기본 보기에서는 숨김)과 원래 작업 트리 표지(늘)
+    @ObservedObject private var autopilot = AutopilotStore.shared
+    @AppStorage("autopilotView") private var autopilotView = "all"
     @State private var hover = false
     @State private var endedHover = false
     // 접어 둔 구역 "<작업경로>|term" / "<작업경로>|bg" (줄바꿈으로 이음) — 앱을 다시 켜도 유지한다
@@ -1321,6 +1338,7 @@ struct GroupCard: View {
     var body: some View {
         let c = Palette.color(g.urgent)
         let here = hub.expanded && hub.workspace == workspaceKey(g.id)   // 펼친 터미널이 이 경로를 보이는 중
+        let apRuns = autopilot.runs(at: g.id)
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 10) {
                 Image(systemName: "chevron.right")
@@ -1396,7 +1414,21 @@ struct GroupCard: View {
             }
             .contextMenu {
                 Button(pinned ? "상단 고정 풀기" : "상단에 고정", action: togglePin)
+                // 이 경로를 작업 경로로 채운 자율주행 출발 준비(와이어프레임 보드 본체 ②, 2단계 5-2b)
+                Button("이 경로에서 자율주행…") { APStart.shared.open(at: g.id) }
                 Button("목록에서 지우기", role: .destructive, action: remove)
+            }
+            .accessibilityIdentifier("group-head-\(g.name)")
+
+            // 원래 작업 트리로 자율주행이 도는 경로의 표지 — 기본 보기에서도 남긴다. 좁은 카드에서 이름이 밀리지 않게 머리 아래 줄에 둔다
+            if let r = apRuns.first(where: \.inPlace) { APInPlaceRow(run: r) }
+            // 자율주행 실행 줄 — 그 경로의 세션 카드 무리 안(와이어프레임 보드 본체 ③). 접힌 카드에서는 한 줄로.
+            // 단위 시계(분)는 1초 시계(EverySecond)로 셈한다 — 카드는 매초 다시 그리지 않고 이 줄만 분이 바뀔 때 다시 그린다
+            if autopilotView != "basic" {
+                ForEach(apRuns) { r in
+                    EverySecond { now in APRunLine(run: r, minutes: r.unitMinutes(now), compact: collapsed).equatable() }
+                        .transition(.opacity)
+                }
             }
 
             if !collapsed {

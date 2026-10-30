@@ -7,6 +7,7 @@ import Combine
 import CryptoKit
 import GhosttyTerminal
 import GhosttyTheme
+import SQLite3
 import SwiftUI
 import WebKit
 
@@ -864,6 +865,9 @@ struct BoardView: View {
     @ObservedObject private var fit = BoardFit.shared
     @State private var mediumOpen: Set<String> = []
     @ObservedObject private var updater = Updater.shared
+    // 자율주행 — 실행 줄과 자율주행 중·지난 실행 화면(보드 쪽 전체를 바꿈). 보기: 모두·기본(실행 줄 숨김)·자율주행(실행 줄만)
+    @ObservedObject private var autopilot = AutopilotStore.shared
+    @AppStorage("autopilotView") private var autopilotView = "all"
 
     private func updateHidden() {
         guard tops.viewport > 0 else { return }
@@ -1020,12 +1024,19 @@ struct BoardView: View {
     // 창 크기 단계에 따라 미니 화면 또는 전체·중간 화면
     var body: some View {
         ZStack(alignment: .bottom) {
-            if fit.tier == .mini {
-                MiniBoard(store: store, usage: usage)
-                    .background(Backdrop())
-                    .preferredColorScheme(.dark)
-            } else {
-                board
+            switch autopilot.screen {
+            case .running(let id):
+                APRunningScreen(ap: autopilot, id: id)
+            case .history(let selected):
+                APHistoryScreen(ap: autopilot, selected: selected)
+            case .board:
+                if fit.tier == .mini {
+                    MiniBoard(store: store, usage: usage)
+                        .background(Backdrop())
+                        .preferredColorScheme(.dark)
+                } else {
+                    board
+                }
             }
             TerminalNotice(hub: TerminalHub.shared)
         }
@@ -1035,6 +1046,10 @@ struct BoardView: View {
     private var board: some View {
         let tier = fit.tier
         let medium = tier == .medium
+        let runs = autopilot.runs
+        let autoOnly = autopilotView == "auto" && !runs.isEmpty   // 도는 실행이 없으면 모두 보기로 그린다
+        // 경로 카드가 없는 실행 — 자율주행 세션은 세션 파일을 남기지 않아 사람 세션이 없던 경로에는 카드가 없다
+        let orphans = autopilotView == "basic" || filter != nil ? [] : runs.filter { r in !store.groups.contains { r.covers($0.id) } }
         return VStack(alignment: .leading, spacing: 14) {
             // 윗줄은 늘 두 줄 — 제목 아래 줄에 상태 칩(왼쪽)과 단추(오른쪽).
             // 한 줄·두 줄을 폭에 따라 바꾸면 "알림 꺼짐" 글자가 생길 때마다 단추 줄이 위아래로 오간다
@@ -1045,6 +1060,7 @@ struct BoardView: View {
                     Foreman(groups: store.groups, limits: usage.limits)
                 }
                 headerControls
+                APBar(ap: autopilot, view: $autopilotView)
             }
             .padding(.top, 6)
 
@@ -1052,11 +1068,12 @@ struct BoardView: View {
                 UpdateBanner(updater: updater).transition(.move(edge: .top).combined(with: .opacity))
             }
 
-            UsagePanel(usage: usage, accounts: accounts, forceCompact: medium) {
+            UsagePanel(usage: usage, accounts: accounts, forceCompact: medium,
+                       stoplines: autoOnly ? autopilot.stoplines : nil) {
                 store.groups.flatMap(\.sessions).filter { $0.state == "working" || $0.state == "waiting" }
             }
 
-            if store.groups.isEmpty {
+            if store.groups.isEmpty && runs.isEmpty && autopilot.awaiting.isEmpty {
                 VStack(spacing: 10) {
                     Image(systemName: "moon.zzz.fill").font(.system(size: 30)).foregroundStyle(.secondary)
                     Text("아직 기록된 세션이 없습니다").boardFont(14, weight: .medium)
@@ -1084,7 +1101,16 @@ struct BoardView: View {
                 ScrollViewReader { proxy in
                 ScrollView(showsIndicators: true) {
                     VStack(spacing: 12) {
-                        ForEach(shownGroups) { g in
+                        // 끝났고 합치기·승격을 기다리는 실행 — 기본 보기(실행 줄 숨김)에서는 빼되, 도는 실행이 없어 보기 단추가 없을 때는 보인다
+                        if autopilotView != "basic" || runs.isEmpty {
+                            ForEach(autopilot.awaiting) { r in APEndedLine(run: r).equatable().transition(.opacity) }
+                        }
+                        // 자율주행 보기는 실행 카드만, 다른 보기는 카드 없는 실행을 맨 위에. 단위 시계(분)는 1초 시계(EverySecond)로 셈한다
+                        ForEach(autoOnly ? runs : orphans) { r in
+                            EverySecond { now in APRunCard(run: r, minutes: r.unitMinutes(now), meters: !autoOnly).equatable() }
+                                .transition(.opacity)
+                        }
+                        ForEach(autoOnly ? [] : shownGroups) { g in
                             GroupCard(g: g,
                                       collapsed: medium ? !mediumOpen.contains(g.id) : store.collapsed.contains(g.id),
                                       toggle: { if medium { mediumOpen.formSymmetricDifference([g.id]) } else { store.toggle(g.id) } },

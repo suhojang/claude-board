@@ -7,6 +7,7 @@ import Combine
 import CryptoKit
 import GhosttyTerminal
 import GhosttyTheme
+import SQLite3
 import SwiftUI
 import WebKit
 
@@ -383,7 +384,7 @@ func backgroundShells() -> [Int32: Int] {
     return counts
 }
 
-private func formatter(_ format: String) -> DateFormatter {
+func formatter(_ format: String) -> DateFormatter {
     let f = DateFormatter()
     f.locale = Locale(identifier: "ko_KR")
     f.dateFormat = format

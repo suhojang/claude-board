@@ -27,7 +27,7 @@ build() {  # $1 소스, $2 결과 — 두 아키텍처로 빌드해 하나로 �
   lipo -create "$WORK/arm64" "$WORK/x86_64" -output "$2"
   rm -f "$WORK/arm64" "$WORK/x86_64"
 }
-# 보드는 터미널 엔진(libghostty-spm) 때문에 SwiftPM 으로 빌드한다 — $1 아키텍처. --arch 두 개(한 번에 universal)는 Xcode 가 필요해서
+# 보드는 터미널 엔진(libghostty-spm) 때문에, 자율주행 엔진은 규칙 라이브러리 때문에 SwiftPM 으로 빌드한다 — $1 아키텍처. --arch 두 개(한 번에 universal)는 Xcode 가 필요해서
 # 아키텍처마다 따로 빌드해 합친다. --disable-keychain 이 없으면 엔진 내려받기에서 키체인 조회로 멈춘다
 spm() { a="$1"; shift; swift build -c release --disable-keychain --package-path "$N" --triple "$a-apple-macosx14.0" "$@"; }
 
@@ -40,6 +40,10 @@ lipo -create "$(spm arm64 --show-bin-path)/ClaudeBoard" "$(spm x86_64 --show-bin
 # 엔진 리소스(terminfo·셸 통합)는 아키텍처와 무관해 한 벌 — .app 맨 위는 서명이 거부하므로 Contents/Resources 에 둔다
 cp -R "$(spm arm64 --show-bin-path)/GhosttyKit_GhosttyTerminal.bundle" "$APP/Contents/Resources/"
 build "$N/ClaudeNotifier.swift" "$APP/Contents/Resources/notifier/claude-notifier"
+# 자율주행 엔진 — build-board.sh 와 같은 자리. 출발할 때 실행 폴더에 자기 사본을 두고 launchd 가 그 사본을 띄운다(docs/자율주행/설계.md).
+# SwiftPM 실행 타깃 ClaudeAutopilot(규칙 라이브러리 AutopilotRules 를 import) — 위 spm 이 아키텍처마다 보드와 함께 빌드했다
+lipo -create "$(spm arm64 --show-bin-path)/ClaudeAutopilot" "$(spm x86_64 --show-bin-path)/ClaudeAutopilot" \
+  -output "$APP/Contents/MacOS/claude-autopilot"
 cp "$N/notify.py" "$N/state.py" "$N/board-tui.py" "$P/hooks.py" "$APP/Contents/Resources/notifier/"
 cp "$N/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 cp "$N/LICENSE" "$APP/Contents/Resources/LICENSE"
@@ -76,6 +80,7 @@ PLIST
 echo "2) 서명: $SIGN_ID"
 # 안쪽 실행 파일 → 앱 순서. hardened runtime 은 공증할 때만 필요하다(Ghostty 제어용 entitlement 가 함께 필요)
 codesign --force --timestamp=none --sign "$SIGN_ID" "$APP/Contents/Resources/notifier/claude-notifier"
+codesign --force --timestamp=none --sign "$SIGN_ID" "$APP/Contents/MacOS/claude-autopilot"
 codesign --force --timestamp=none --sign "$SIGN_ID" "$APP"
 codesign --verify --strict "$APP"
 # curl 설치·업데이트용 — 서명한 앱만 담는다

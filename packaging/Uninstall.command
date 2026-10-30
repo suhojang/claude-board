@@ -12,12 +12,36 @@ echo "2) 앱·자동 실행 제거: /Applications 의 앱을 지우려면 관리
 pkill -x ClaudeBoard 2>/dev/null || true
 launchctl bootout "gui/$(id -u)/com.claude.board" 2>/dev/null || true
 rm -f "$HOME/Library/LaunchAgents/com.claude.board.plist"
+# 자율주행 엔진: 실행마다 com.claude.board.autopilot.<실행 id> 로 등록한다(끝나면 스스로 지움). 남은 것은 도는 실행까지 끄고 지운다
+# (시험 빌드의 com.claude.board.dev.autopilot.* 는 건드리지 않는다). 다음 3) 이 작업 트리를 지우기 전에 끈다
+for p in "$HOME"/Library/LaunchAgents/com.claude.board.autopilot.*.plist; do
+  [ -f "$p" ] || continue
+  launchctl bootout "gui/$(id -u)/$(basename "$p" .plist)" 2>/dev/null || true
+  rm -f "$p"
+done
 osascript -e 'tell application "System Events" to delete (every login item whose name is "Claude Board")' >/dev/null 2>&1 || true
 rm -rf "$HOME/Applications/Claude Board.app"
 sudo /bin/sh -c 'rm -rf "/Applications/Claude Board.app"; pkgutil --forget com.claude.board >/dev/null 2>&1; true' \
   || echo "   (/Applications/Claude Board.app 을 지우지 못했습니다. Finder 에서 휴지통으로 옮기세요)"
 
-echo "3) 알림 패널·hook 스크립트·저장한 계정 제거"
+echo "3) 자율주행 따로 작업 트리 정리(~/.claude-board/worktrees)"
+# 자율주행이 단일 저장소를 돌릴 때 만든 작업 트리. 커밋한 일은 원래 저장소의 autopilot/<실행 id> 가지에 그대로 남는다(여기서는 작업 트리만 지운다).
+WT="$HOME/.claude-board/worktrees"
+if [ -d "$WT" ]; then
+  for d in "$WT"/*/*/; do
+    [ -f "$d/.git" ] || continue
+    # .git 파일의 gitdir 은 <원래 .git>/worktrees/<이름> — 그 두 단계 위가 원래 저장소의 .git 이다(그 안에서는 --show-toplevel 이 안 된다)
+    gd=$(sed -n 's/^gitdir: //p' "$d/.git" 2>/dev/null)
+    common=$(cd "$gd/../.." 2>/dev/null && pwd)
+    rm -rf "$d"
+    [ -n "$common" ] && git --git-dir="$common" worktree prune 2>/dev/null
+  done
+  rm -rf "$WT"
+  rmdir "$HOME/.claude-board" 2>/dev/null || true
+  echo "   정리했습니다(원래 저장소의 autopilot 가지는 그대로 둡니다)."
+fi
+
+echo "4) 알림 패널·hook 스크립트·저장한 계정 제거"
 for f in claude-notifier notify.py state.py board-tui.py hooks.py notify-position login-launch-off; do rm -f "$N/$f"; done
 rm -rf "$N/sessions" "$N/__pycache__" "$N/plugins"
 # 계정 전환용으로 저장해 둔 로그인 토큰(키체인)과 계정 목록 — 지금 Claude Code 로그인("Claude Code-credentials")은 그대로 둔다
@@ -28,7 +52,7 @@ rmdir "$N" 2>/dev/null || true
 rm -f "$HOME/.local/bin/claude-board" "$HOME/.local/bin/claude-board-tui"
 
 if grep -q ">>> claude-board >>>" "$HOME/.zshrc" 2>/dev/null; then
-  echo "4) ~/.zshrc 에서 Claude Board 줄 제거"
+  echo "5) ~/.zshrc 에서 Claude Board 줄 제거"
   cp "$HOME/.zshrc" "$HOME/.zshrc.bak-claude-board"
   python3 - <<'PY'
 import os, re

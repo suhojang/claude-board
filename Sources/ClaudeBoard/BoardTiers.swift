@@ -7,6 +7,7 @@ import Combine
 import CryptoKit
 import GhosttyTerminal
 import GhosttyTheme
+import SQLite3
 import SwiftUI
 import WebKit
 
@@ -153,6 +154,7 @@ struct MiniTitleBar: View {
 struct MiniBoard: View {
     @ObservedObject var store: Store
     @ObservedObject var usage: UsageStore
+    @ObservedObject private var autopilot = AutopilotStore.shared
 
     // 사용 한도 한 줄 — 앞에서 n 개만
     private func limits(_ n: Int) -> some View {
@@ -172,12 +174,17 @@ struct MiniBoard: View {
                 Spacer(minLength: 0)
                 Foreman(groups: store.groups, limits: usage.limits, compact: true)
             }
-            if store.groups.isEmpty {
+            if store.groups.isEmpty && autopilot.runs.isEmpty && autopilot.awaiting.isEmpty {
                 Text("아직 기록된 세션이 없습니다").boardFont(11).foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
             } else {
                 ScrollView(showsIndicators: false) {
                     VStack(spacing: 2) {
+                        // 작은 크기의 실행 줄 — 상태 꼬리표와 "2/4 제목" 한 줄, 막대는 뺌(와이어프레임 보드 본체 ⑧)
+                        ForEach(autopilot.runs) { r in
+                            EverySecond { now in APRunLine(run: r, minutes: r.unitMinutes(now), compact: true).equatable() }
+                        }
+                        ForEach(autopilot.awaiting) { r in APEndedLine(run: r, compact: true).equatable() }
                         ForEach(store.groups) { g in MiniRow(g: g) }
                     }
                 }
@@ -186,6 +193,12 @@ struct MiniBoard: View {
                 // 자리가 모자라면 한도를 앞의 둘만 — 투명도 슬라이더는 늘 보인다
                 ViewThatFits(in: .horizontal) { limits(usage.limits.count); limits(2); Color.clear.frame(width: 0, height: 0) }
                 Spacer(minLength: 4)
+                HeaderButton(icon: "clock.arrow.circlepath", tint: nil, help: "자율주행 지난 실행") { autopilot.screen = .history(nil) }
+                    .scaleEffect(0.8)
+                    .accessibilityIdentifier("ap-history-mini")
+                HeaderButton(icon: "steeringwheel", tint: nil, help: "자율주행 출발 준비(닫아 둔 준비가 있으면 그것을 엽니다)") { APStart.shared.open() }
+                    .scaleEffect(0.8)
+                    .accessibilityIdentifier("ap-new-mini")
                 OpacitySlider(compact: true)
             }
         }
