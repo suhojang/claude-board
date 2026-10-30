@@ -251,7 +251,7 @@ public func apReportDoc(_ r: APReportRun, notion: Bool, attachment: Bool, reques
         let who = apDocText(requester, 80)
         b.append(.paragraph([.text(who.isEmpty ? "요청자: 연결에 이름이 없습니다(Notion 작성자 칸은 통합 이름입니다)" : "요청자: \(who)", bold: false)]))
     }
-    b.append(.heading(2, title))
+    // 제목은 받는 쪽 페이지 제목 칸으로 간다(본문에 다시 쓰지 않음 — 첫 줄은 늘 표지)
     let n = r.units.count
     let k = { (s: String) in r.units.filter { $0.status == s }.count }
     var line = "대기열 \(n)개 가운데 \(k("done"))개 통과"

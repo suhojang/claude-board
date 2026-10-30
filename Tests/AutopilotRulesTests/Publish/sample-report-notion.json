@@ -31,20 +31,6 @@
     "type" : "paragraph"
   },
   {
-    "heading_2" : {
-      "rich_text" : [
-        {
-          "text" : {
-            "content" : "자율주행 보고: todo-api 10월 30일 09:00"
-          },
-          "type" : "text"
-        }
-      ]
-    },
-    "object" : "block",
-    "type" : "heading_2"
-  },
-  {
     "object" : "block",
     "paragraph" : {
       "rich_text" : [
