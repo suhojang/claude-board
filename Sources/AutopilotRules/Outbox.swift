@@ -27,8 +27,10 @@ public struct APPublish: Equatable, Sendable {
     public var mode = APPublishMode.review     // 새 프로젝트 기본은 검수 뒤 올림(사용자 결정)
     public var report: APOutboxTarget?          // 보고서 받을 곳(confluence·notion), 없으면 보고서 글을 만들지 않음
     public var jiraComments = false             // 단위 티켓에 결과 댓글
-    public init(mode: APPublishMode = .review, report: APOutboxTarget? = nil, jiraComments: Bool = false) {
-        self.mode = mode; self.report = report; self.jiraComments = jiraComments
+    // 알림 webhook(4단계 ⑩-3) — 이 프로젝트의 상태 알림·3시간 요약을 받을 webhook 연결 id. nil 은 정한 적 없음(보드가 출발 확인에서 모든 webhook 으로 채움), 빈 배열은 끔
+    public var notify: [String]?
+    public init(mode: APPublishMode = .review, report: APOutboxTarget? = nil, jiraComments: Bool = false, notify: [String]? = nil) {
+        self.mode = mode; self.report = report; self.jiraComments = jiraComments; self.notify = notify
     }
     public var makesAny: Bool { report != nil || jiraComments }
 }
@@ -51,6 +53,12 @@ public func apPublishParse(_ v: Any?) -> (publish: APPublish, problems: [String]
     if let j = o["jira_comments"] {
         if let b = j as? Bool { p.jiraComments = b } else { probs.append("publish.jira_comments 는 true/false 입니다") }
     }
+    if let n = o["notify"], !(n is NSNull) {
+        if let a = n as? [Any], a.count <= 50, a.allSatisfy({ ($0 as? String).map { apConnectionIDOK($0) && $0.hasPrefix("webhook-") } ?? false }) {
+            var seen = Set<String>()
+            p.notify = a.compactMap { $0 as? String }.filter { seen.insert($0).inserted }
+        } else { probs.append("publish.notify 는 알림 webhook 연결 id(webhook-n)의 배열입니다") }
+    }
     if let r = o["report"], !(r is NSNull) {
         let d = r as? [String: Any] ?? [:]
         let space = (d["space"] as? String ?? "").trimmingCharacters(in: .whitespaces)
@@ -71,6 +79,7 @@ public func apPublishParse(_ v: Any?) -> (publish: APPublish, problems: [String]
 
 public func apPublishJSON(_ p: APPublish) -> [String: Any] {
     var d: [String: Any] = ["mode": p.mode.rawValue, "jira_comments": p.jiraComments]
+    if let n = p.notify { d["notify"] = n }
     if let r = p.report {
         var t: [String: Any] = ["service": r.service.rawValue]
         if !r.space.isEmpty { t["space"] = r.space }
@@ -87,6 +96,12 @@ public func apTargetConnection(_ s: APTargetService) -> (id: String, scope: Stri
     case .confluence: ("atlassian", "confluence")
     case .notion: ("notion", "write")
     }
+}
+
+// 글 하나의 받을 곳 줄 — 티켓 만들기(실행 중에 새로 필요해진 티켓, ⑩-3)는 그 꼴로, 나머지는 apTargetLabel
+public func apItemLabel(_ it: APOutboxItem) -> String {
+    if it.kind == "ticket" { return "Jira 티켓 만들기 · 임시 번호 \(it.target.issue) → \(it.target.parent) 아래 하위 작업" }
+    return apTargetLabel(it.target)
 }
 
 public func apTargetLabel(_ t: APOutboxTarget) -> String {
@@ -169,7 +184,8 @@ public let apOutboxFormat = "claude-board-outbox"
 public let apOutboxMaxBytes = 2 << 20
 
 // 글 id — 파일 이름이 되므로 좁게(엔진이 만든 id 만 이 꼴)
-public func apOutboxIDOK(_ id: String) -> Bool { apMatch(id, "^(run|u[0-9]{1,4})-[a-z]{1,12}(-[A-Z][A-Z0-9_]*-[0-9]{1,9})?$") }
+// 꼬리는 이슈 키(u3-jira-SHOP-13) 또는 실행 중에 새로 필요해진 티켓의 임시 번호(u3-ticket-TMP-3-1, ⑩-3)
+public func apOutboxIDOK(_ id: String) -> Bool { apMatch(id, "^(run|u[0-9]{1,4})-[a-z]{1,12}(-[A-Z][A-Z0-9_]*-[0-9]{1,9}(-[0-9]{1,2})?)?$") }
 
 public func apOutboxJSON(_ it: APOutboxItem) -> [String: Any] {
     var t: [String: Any] = ["service": it.target.service.rawValue]
@@ -208,7 +224,8 @@ public func apOutboxParse(_ data: Data) -> APOutboxItem? {
     it.id = id
     it.run = o["run"] as? String ?? ""
     it.unit = (o["unit"] as? NSNumber)?.intValue
-    it.kind = o["kind"] as? String == "comment" ? "comment" : "report"
+    it.kind = ["comment", "ticket"].contains(o["kind"] as? String ?? "") ? o["kind"] as! String : "report"
+    if it.kind == "ticket", !(svc == .jira && apMatch(tg["issue"] as? String ?? "", apTempTicketPattern) && apMatch(tg["parent"] as? String ?? "", apIssueKeyPattern)) { return nil }
     it.target = APOutboxTarget(service: svc, issue: tg["issue"] as? String ?? "", space: tg["space"] as? String ?? "", parent: tg["parent"] as? String ?? "")
     it.connection = o["connection"] as? String ?? ""
     it.title = apDocText(o["title"] as? String ?? "", 300)
@@ -555,6 +572,18 @@ public func apPostItem(_ id: String, store: APOutboxStore, trigger: APPostTrigge
             store.write(it)
         }
         switch it.target.service {
+        case .jira where it.kind == "ticket":
+            // 실행 중에 새로 필요해진 티켓(⑩-3) — 그 프로젝트의 하위 작업 종류를 읽고, 스토리 아래 하위 작업으로 만든다
+            if it.remote == nil {
+                let project = it.target.space
+                let tr = send(apJiraProjectRequest(project, base: base, auth: auth))
+                guard let type = apPickIssueType(apJiraIssueTypes(tr), for: .task, name: "") else {
+                    return fail(tr.status == 200 ? APHTTPResponse(error: "프로젝트 \(project) 에 하위 작업 종류가 없습니다") : tr, "이슈 종류")
+                }
+                let resp = send(apJiraCreateIssueRequest(project: project, typeID: type.id, parent: it.target.parent, summary: it.title, doc: it.doc, base: base, auth: auth))
+                guard let key = apCreatedIssueKey(resp, project: project) else { return fail(resp, "티켓") }
+                done("issue", remote: APRemote(id: key, url: base + "/browse/" + key))
+            }
         case .jira:
             if it.remote == nil {
                 let resp = send(apJiraCommentRequest(it, base: base, auth: auth))
@@ -641,8 +670,9 @@ public func apOutboxStateLabel(_ it: APOutboxItem) -> String {
 // "모두 올리기" 확인 글의 수 — 받을 곳 종류마다
 public func apOutboxCounts(_ items: [APOutboxItem]) -> String {
     let order: [(APTargetService, String)] = [(.jira, "Jira 댓글"), (.confluence, "Confluence"), (.notion, "Notion")]
-    return order.compactMap { s, name in
-        let n = items.filter { $0.target.service == s }.count
+    let tickets = items.filter { $0.kind == "ticket" }.count
+    return ((tickets > 0 ? ["Jira 티켓 \(tickets)"] : []) + order.compactMap { s, name in
+        let n = items.filter { $0.target.service == s && $0.kind != "ticket" }.count
         return n > 0 ? "\(name) \(n)" : nil
-    }.joined(separator: " · ")
+    }).joined(separator: " · ")
 }

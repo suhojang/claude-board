@@ -28,6 +28,11 @@ public struct APResultCarry: Equatable, Sendable {
     public var title = "", why = ""
     public init(title: String = "", why: String = "") { self.title = title; self.why = why }
 }
+// 실행 중에 새로 필요해진 티켓(4단계 ⑩-3) — 모델이 임시 번호(TMP-<단위>-<차례>)로 쓰고 결과 기록 new_tickets 에 남긴 것. 보드가 검수 뒤에 만든다
+public struct APResultTicket: Equatable, Sendable {
+    public var temp = "", title = "", why = ""
+    public init(temp: String = "", title: String = "", why: String = "") { self.temp = temp; self.title = title; self.why = why }
+}
 public struct APResultRef: Equatable, Sendable {
     public var key = "", value = ""
     public init(key: String = "", value: String = "") { self.key = key; self.value = value }
@@ -42,6 +47,7 @@ public struct APResultRecord: Equatable, Sendable {
     public var decisions: [APResultDecision] = []
     public var flows: [APResultFlow] = []
     public var nextStart: [APResultCarry] = [], newWork: [APResultCarry] = []
+    public var newTickets: [APResultTicket] = []
     public var refs: [APResultRef] = []                 // 키 차례
     public init() {}
 }
@@ -78,6 +84,7 @@ public func apParseResult(_ text: String?) -> APResultRecord? {
     r.flows = list("sequence").map { APResultFlow(title: apReportText($0["title"], 300), source: apReportText($0["mermaid"], apReportFlowMax)) }
     r.nextStart = list("next_start").map { APResultCarry(title: apReportText($0["title"]), why: apReportText($0["why"])) }
     r.newWork = list("new_work").map { APResultCarry(title: apReportText($0["title"]), why: apReportText($0["why"])) }
+    r.newTickets = list("new_tickets").prefix(20).map { APResultTicket(temp: apReportText($0["temp"], 20), title: apReportText($0["title"], 300), why: apReportText($0["why"], 1000)) }
     r.refs = (j["refs"] as? [String: Any] ?? [:]).keys.sorted().prefix(50).compactMap { k in
         let v = apReportText((j["refs"] as? [String: Any])?[k], 1000)
         return v.isEmpty ? nil : APResultRef(key: apCut(k, 60), value: v)

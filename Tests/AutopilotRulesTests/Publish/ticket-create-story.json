@@ -1,0 +1,85 @@
+{
+  "fields" : {
+    "description" : {
+      "content" : [
+        {
+          "content" : [
+            {
+              "marks" : [
+                {
+                  "type" : "strong"
+                }
+              ],
+              "text" : "오토파일럿 작성",
+              "type" : "text"
+            }
+          ],
+          "type" : "paragraph"
+        },
+        {
+          "content" : [
+            {
+              "text" : "자율주행 실행 20261030-1500-zz 의 출발 확인에서 승인한 스토리입니다. 아래 작업 티켓의 단위를 묶습니다.",
+              "type" : "text"
+            }
+          ],
+          "type" : "paragraph"
+        },
+        {
+          "content" : [
+            {
+              "content" : [
+                {
+                  "content" : [
+                    {
+                      "text" : "쿠폰 만료일 검사",
+                      "type" : "text"
+                    }
+                  ],
+                  "type" : "paragraph"
+                }
+              ],
+              "type" : "listItem"
+            },
+            {
+              "content" : [
+                {
+                  "content" : [
+                    {
+                      "text" : "만료 쿠폰 안내",
+                      "type" : "text"
+                    }
+                  ],
+                  "type" : "paragraph"
+                }
+              ],
+              "type" : "listItem"
+            }
+          ],
+          "type" : "bulletList"
+        },
+        {
+          "content" : [
+            {
+              "text" : "보드 티켓 번호 20261030-1500-zz/story:new-1",
+              "type" : "text"
+            }
+          ],
+          "type" : "paragraph"
+        }
+      ],
+      "type" : "doc",
+      "version" : 1
+    },
+    "issuetype" : {
+      "id" : "10001"
+    },
+    "parent" : {
+      "key" : "SHOP-10"
+    },
+    "project" : {
+      "key" : "SHOP"
+    },
+    "summary" : "쿠폰, 만료묶음 가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가…"
+  }
+}
