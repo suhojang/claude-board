@@ -93,3 +93,36 @@ public enum APReportFile: Equatable, Hashable, Sendable {
 public protocol APReportSink {
     func write(_ file: APReportFile, _ html: String) -> String?
 }
+
+// MARK: - 바깥 연결과 올릴 글 (Connections.swift·Outbox.swift, 4단계 ⑩-1)
+
+// HTTP 요청 하나 — 어댑터는 리다이렉트를 따르지 않고(3xx 는 그대로 돌려줌), 쿠키·캐시를 쓰지 않고, 응답 본문에 크기 상한을 둔다.
+// auth 는 보내기 직전에 만든 인증 머리(이름·값)이고 어댑터는 이것을 남기지 않는다(기록·파일·환경 변수 어디에도)
+public protocol APHTTP {
+    func send(_ request: APHTTPRequest, auth: (name: String, value: String)?) -> APHTTPResponse
+}
+
+// 키체인의 연결 비밀(API 토큰·webhook 주소) — 항목 이름은 apSecretService(dev:), 계정 이름은 연결 id. 읽기만(쓰기·지우기는 보드 설정 화면)
+public protocol APSecrets {
+    func read(_ id: String) -> String?
+    func exists(_ id: String) -> Bool
+}
+
+// 429 뒤 기다리기(가짜는 기다린 초만 적는다)
+public protocol APWaiter {
+    func wait(_ seconds: Double)
+}
+
+// 실행 폴더의 올릴 글(outbox/<글 id>.json) — 글마다 파일 하나, 쓰기는 임시 파일 + rename, 올리기는 글마다 잠금(flock) 안에서.
+// 잠금을 잡은 쪽이 올리는 동안 다른 쪽(엔진·보드가 부른 엔진 명령)은 기다리거나 비켜 간다. 프로세스가 죽으면 잠금은 저절로 풀린다
+public protocol APOutboxStore {
+    func ids() -> [String]
+    func read(_ id: String) -> APOutboxItem?
+    @discardableResult func write(_ item: APOutboxItem) -> Bool
+    /// 같은 id 의 글이 없을 때만 만든다(있으면 false — 다시 떠서 같은 글을 또 만들지 않게)
+    func create(_ item: APOutboxItem) -> Bool
+    /// 그 글의 잠금을 잡고 body 를 돌린다. 정한 시간 안에 못 잡으면 nil(다른 곳에서 올리는 중)
+    func withLock<T>(_ id: String, _ body: () -> T) -> T?
+    /// 첨부할 실행 폴더 파일(report.html) — 링크가 아닌 보통 파일이고 상한 아래일 때만
+    func attachment(_ name: String) -> Data?
+}

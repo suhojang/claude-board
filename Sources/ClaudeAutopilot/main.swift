@@ -11,6 +11,8 @@
 //        claude-autopilot prerun <실행 폴더> [--dev]                  출발 전 판정 미리 돌리기(prerun.json)
 //        claude-autopilot report <실행 폴더> [--out <파일>|-]         보고서 다시 그리기(report.html·units/<n>/report.html, 모델을 부르지 않음).
 //                                                                   도는 엔진은 단위 판정 뒤·건너뛴 뒤·끝 정리 때 같은 틀(AutopilotRules)로 스스로 그린다
+//        claude-autopilot outbox <실행 폴더> list|post|skip|later|unskip [<글 id>…|--all]   올릴 글(4단계 ⑩-1, 보드 검수 화면이 부름)
+//        claude-autopilot connection check <연결 id> [--dev]          설정 › 연결의 연결 확인(읽기 요청 하나)
 //        claude-autopilot finish <실행 폴더> merge --into <가지> [--story <키>] | promote <가지> --into <가지> | discard [--story <키>]
 //                                            | cleanup --story <키> [--unmerged]
 //                                                                   끝난 실행의 가지 승격과 합친 가지 지우기(사람이 부른다. 엔진이 스스로 부르지 않는다).
@@ -512,6 +514,8 @@ let fileWriteTools: Set<String> = ["Write", "Edit", "MultiEdit", "NotebookEdit"]
 let alwaysDenied = ["Edit(**/CLAUDE.md)", "Edit(~/.claude/CLAUDE.md)", "Edit(.claude/**)", "Edit(**/.claude/rules/**)",
                     "Edit(~/.claude/settings.json)", "Edit(~/.claude/settings.local.json)", "Edit(~/Library/LaunchAgents/**)",
                     "Bash(git push)", "Bash(git push *)", "Bash(git -C * push *)",
+                    // 키체인 읽기(연결 토큰·로그인 정보) — 받침. 막는 것은 샌드박스의 ~/Library/Keychains 읽기 금지(modelReadDeny, 4단계 ⑩-1 보안 검토)
+                    "Bash(security *)", "Bash(/usr/bin/security *)",
                     "mcp__atlassian", "mcp__plugin_atlassian_atlassian", "mcp__claude_ai_Atlassian"]
 // 네트워크 허용 목록 기본값(run.json network_allow 로 바꿈): Maven·Gradle 저장소와 localhost. git 원격 호스트는 넣지 않아 push 가 나갈 길이 없다
 // localhost 는 넣지 않는다 — 넣고 allowLocalBinding 을 켜면 로컬 DB(5432)·Redis 에도 붙는다. 단위가 정말 필요하면 network_allow 에
@@ -1641,7 +1645,7 @@ final class Engine {
     // run.json·queue.json 의 설정 칸을 고정 값으로 되돌려 쓴다 — 누가 바꿔 놓았어도 보드가 그리는 값이 엔진이 쓰는 값과 같게
     static let settingKeys = ["title", "model", "effort", "stopline", "caps", "check_timeout_min", "check_retries", "precheck_retry_min", "background_quiet_sec",
                               "allowed_tools", "disallowed_tools", "write_roots", "network_allow", "local_binding", "env_pass", "unix_sockets",
-                              "read_deny", "sandbox_exclude", "claude_args", "claude_path", "project", "project_root", "base_branch"]
+                              "read_deny", "sandbox_exclude", "claude_args", "claude_path", "project", "project_root", "base_branch", "publish"]
     static let unitKeys = ["id", "title", "prompt", "check", "precheck", "action", "context", "cwd", "caps", "check_timeout_min", "action_timeout_min",
                            "tickets", "review", "source_key", "kind", "est_min", "est_basis", "story", "branch", "depends", "prerun"]
     func syncFromFrozen() {
@@ -1693,6 +1697,11 @@ final class Engine {
         a.append(dir.hasPrefix(old + "/") ? old + "/runs/*/engine" : old)   // 옛 뿌리에서 도는 실행이면 자기 폴더는 읽어야 한다
         return a
     }
+    // 모델이 읽지 못하게 하는 그 밖의 자리(4단계 ⑩-1): 이 실행의 올릴 글, 사용자 키체인 파일.
+    // 키체인: /usr/bin/security 로 만든 항목(연결 토큰·Claude Code 로그인·저장 계정)은 security 를 믿는 앱으로 두어 아무 프로세스나 security 를 거쳐
+    // 창 없이 읽는다. Bash 의 security 거부(alwaysDenied)는 env·sh -c 로 비켜 가므로, 샌드박스가 키체인 파일 읽기를 막는다(sandbox-exec 로 잼:
+    // 막기 전에는 가짜 항목이 읽히고, 막은 뒤에는 SecKeychainSearchCopyNext 가 찾지 못함. 진짜 Claude Code 샌드박스에서 같은지는 사람 몫)
+    var modelReadDeny: [String] { [dir + "/outbox", home + "/Library/Keychains"] }
     // 엔진 전용 폴더: 실행 폴더 밖, 0700, 샌드박스·파일 도구 모두 읽기 금지. 복원 전 백업처럼 비밀이 든 것을 둔다
     var enginePrivate: String { privateRoot(dev: isDev) + "/" + id }
     var envPass: [String] { cfg["env_pass"] as? [String] ?? [] }
@@ -1982,6 +1991,7 @@ final class Engine {
         } else {
             event("engine", "실행 보고서를 그리지 못했습니다: \(rep.errors.first ?? "까닭 모름")")
         }
+        outboxRun()   // 보고서 글(받을 곳이 있을 때)과 자동으로 올림의 남은 글. wrapped 뒤로는 엔진이 outbox 를 건드리지 않는다
         run["wrapped"] = r3(now())
         saveRun()
     }
@@ -2531,6 +2541,7 @@ final class Engine {
         event("board", "단위 \(n)/\(total) 건너뜀: \(why)")
         record("단위 \(n) 건너뜀")
         drawReports([n])
+        outboxUnit(n)
     }
 
     // 판정을 통과한 Jira 작업 가지를 스토리 가지로 합친다(사용자 결정: 판정 통과 때 엔진이 바로). 체크아웃 없이 한다 — 순차 실행이라 스토리 머리가
@@ -2809,6 +2820,7 @@ final class Engine {
         if !ok, status != "stopped" { event("board", "모델이 결과 기록(result.json)을 남기지 않았습니다.") }
         record("단위 \(n) 판정 뒤")
         drawReports([n])
+        outboxUnit(n)
     }
 
     func runUnit(_ n: Int) {
@@ -2954,7 +2966,7 @@ final class Engine {
         denied += ["engine.json", "stream.jsonl", "stderr.log", "evidence/**", "context/**", "report.html"].map { "Edit(/\(unitDir(n))/\($0))" }
         denied += (1...total).filter { $0 != n }.map { "Edit(/\(unitDir($0))/**)" }
         // 엔진 전용 폴더(복원 전 백업 등)와 read_deny 는 파일 도구로도 읽지 못하게(샌드박스 denyRead 는 Read 도구를 막지 않는다)
-        for p in engineDeny + readDenyPaths { denied += ["Read(/\(p)/**)", "Read(/\(p))", "Edit(/\(p)/**)"] }
+        for p in engineDeny + readDenyPaths + modelReadDeny { denied += ["Read(/\(p)/**)", "Read(/\(p))", "Edit(/\(p)/**)"] }
         // 가지 보호는 파일 도구에도(Write 로 ref 파일을 고쳐 쓰는 길). 폴더 자리(스토리 가지 꼴)는 안까지
         for p in protectDeny() { denied += ["Edit(/\(p))"] + (isDir(p) && !isLink(p) ? ["Edit(/\(p)/**)"] : []) }
         // 사용자 settings 는 읽지 않는다(--setting-sources project,local): 사용자 hook(알림 패널)·플러그인 hook 은 샌드박스 밖에서 돌고,
@@ -2977,7 +2989,8 @@ final class Engine {
         var deny = harnessDeny([cwd(n)] + writeRoots)
         deny += ["engine.json", "stream.jsonl", "stderr.log", "evidence", "context", "report.html"].map { unitDir(n) + "/" + $0 }   // report.html: 단위 보고서(엔진이 그림, 3단계)
         deny += protectDeny()   // 지금 작업 가지 밖의 가지·HEAD·packed-refs(단위마다, 엔진이 가지를 바꾼 뒤 다시 계산)
-        let readDeny = engineDeny + readDenyPaths
+        deny.append(dir + "/outbox")   // 올릴 글(4단계): 모델 쓰기·읽기 범위 밖(엔진·보드만)
+        let readDeny = engineDeny + readDenyPaths + modelReadDeny
         let s: [String: Any] = ["sandbox": [
             "enabled": true, "failIfUnavailable": true, "allowUnsandboxedCommands": false, "autoAllowBashIfSandboxed": true,
             "excludedCommands": cfg["sandbox_exclude"] as? [String] ?? [],
@@ -3513,6 +3526,10 @@ func usage() -> Never {
              --story 는 그 스토리가 가지를 만든 모든 저장소를 먼저 보고, 하나라도 안 되면 아무것도 바꾸지 않는다.
              finish 는 어디에든 --dev 를 붙여도 된다: 뿌리(기록 저장소·승격 차례)는 그 실행이 출발한 뿌리(run.json dev)이고,
              설치판 뿌리에서 출발한 실행에 --dev 를 붙이면 거부한다
+           claude-autopilot outbox <실행 폴더> list|post|skip|later|unskip [<글 id>…|--all] [--json] [--dev]
+             올릴 글(4단계): 보드 검수 화면이 사람이 누른 대로 부른다. post 는 연결이 없거나 만료면 요청 0
+           claude-autopilot connection check <연결 id> [--dev]
+             설정 › 연결의 연결 확인: 읽기 요청 하나(토큰은 키체인에서 읽어 보내기만 함)
     """)
 }
 
@@ -3541,6 +3558,12 @@ func prepare(_ dir: String, dev: Bool) -> (problems: [String], frozen: [String: 
     if let m = run["model"] as? String, !m.isEmpty { f["model"] = m } else { problems.append("run.json 에 model 이 없습니다") }
     // title 도 고정한다 — 엔진이 다시 뜰 때 run.json 설정 칸을 고정 값으로 되돌려 쓰므로, 빠지면 실행 제목이 지워졌다(엔진 고침 1차에서 찾음)
     for k in ["title", "effort", "stopline", "caps", "check_timeout_min", "check_retries", "precheck_retry_min", "background_quiet_sec"] where run[k] != nil { f[k] = run[k] }
+    // 게시 방식·받을 곳(4단계 ⑩-1) — 토큰은 넣지 않는다(올릴 때마다 키체인에서). 꼴이 틀리면 출발하지 않는다
+    if run["publish"] != nil {
+        let (pub, probs) = apPublishParse(run["publish"])
+        problems += probs
+        f["publish"] = apPublishJSON(pub)
+    }
     // 실행 판정 상한도 단위 칸과 같은 확인(0 보다 큰 수, ⑦: 0·음수면 판정마다 바로 상한에 닿고 수가 아니면 말없이 10분이 됐다)
     if let t = run["check_timeout_min"], (num(t) ?? 0) <= 0 { problems.append("run.json 의 check_timeout_min 은 0 보다 큰 수여야 합니다") }
     func strings(_ k: String) -> [String]? {
@@ -4686,6 +4709,252 @@ func mergeRefs(_ label: String, _ refs: [(repo: String, branch: String)], _ into
     return (out, failed)
 }
 
+// MARK: - 올릴 글과 바깥 연결(4단계 ⑩-1, 설계 5장 6절)
+
+// 자동으로 올림에서 보드 창이 꺼져 있어도 올리는 쪽은 엔진이다(설계 판단, 설계.md 5장 6절 "누가 올리나"). 보드의 "올리기"도 앱 안 엔진의
+// outbox 명령을 불러, HTTP·키체인 읽기·outbox 쓰기 어댑터는 이 파일 한 곳에만 있다. 규칙(형식 변환·판정·다시 보내기·만료)은 AutopilotRules.
+// 토큰은 올릴 때마다 키체인에서 읽어 인증 머리로만 쓰고, 기록·파일·모델 세션 환경 변수에 넣지 않는다
+
+// 리다이렉트를 따르지 않는다 — 3xx 를 그대로 받아 실패로 남긴다(다른 호스트로 토큰을 보내지 않게)
+final class NoRedirect: NSObject, URLSessionTaskDelegate {
+    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) { completionHandler(nil) }
+}
+
+struct EngineHTTP: APHTTP {
+    static let session: URLSession = {
+        let c = URLSessionConfiguration.ephemeral
+        c.httpCookieStorage = nil; c.httpShouldSetCookies = false; c.urlCache = nil; c.urlCredentialStorage = nil
+        c.requestCachePolicy = .reloadIgnoringLocalCacheData
+        c.timeoutIntervalForRequest = 20; c.timeoutIntervalForResource = 60
+        return URLSession(configuration: c, delegate: NoRedirect(), delegateQueue: nil)
+    }()
+    static let maxBody = 4 << 20
+    func send(_ r: APHTTPRequest, auth: (name: String, value: String)?) -> APHTTPResponse {
+        // 규칙이 이미 본 주소지만 어댑터도 한 번 더: https, 아니면 http://127.0.0.1(시험 빌드의 가짜 서버)만
+        guard let url = URL(string: r.url), let s = url.scheme?.lowercased(), url.user == nil,
+              s == "https" || (s == "http" && url.host == "127.0.0.1") else { return APHTTPResponse(error: "보낼 수 없는 주소입니다") }
+        var q = URLRequest(url: url)
+        q.httpMethod = r.method
+        for (k, v) in r.headers { q.setValue(v, forHTTPHeaderField: k) }
+        if let a = auth { q.setValue(a.value, forHTTPHeaderField: a.name) }
+        q.setValue("Claude Board autopilot", forHTTPHeaderField: "User-Agent")
+        q.httpBody = r.body
+        let sem = DispatchSemaphore(value: 0)
+        var out = APHTTPResponse()
+        let task = Self.session.dataTask(with: q) { d, resp, err in
+            if let h = resp as? HTTPURLResponse {
+                out.status = h.statusCode
+                for (k, v) in h.allHeaderFields { if let k = k as? String, let v = v as? String { out.headers[k.lowercased()] = v } }
+                let body = d ?? Data()
+                if body.count > Self.maxBody { out.error = "응답이 너무 큽니다" } else { out.body = body }
+            } else {
+                out.error = "응답이 없습니다(\((err as NSError?)?.code ?? 0))"   // 주소·본문은 남기지 않는다
+            }
+            sem.signal()
+        }
+        task.resume()
+        if sem.wait(timeout: .now() + 70) == .timedOut { task.cancel(); return APHTTPResponse(error: "시간이 넘었습니다") }
+        return out
+    }
+}
+
+// 키체인의 연결 비밀 — 보드 설정 › 연결이 /usr/bin/security 로 쓴 항목(서비스 apSecretService(dev:), 계정 연결 id). 값은 메모리에만
+struct EngineSecrets: APSecrets {
+    let dev: Bool
+    func read(_ id: String) -> String? {
+        guard apConnectionIDOK(id) else { return nil }
+        let r = runTool("/usr/bin/security", ["find-generic-password", "-a", id, "-s", apSecretService(dev: dev), "-w"], timeout: 10)
+        guard r.code == 0 else { return nil }
+        let t = r.out.trimmingCharacters(in: .newlines)
+        return t.isEmpty ? nil : t
+    }
+    func exists(_ id: String) -> Bool {
+        apConnectionIDOK(id) && runTool("/usr/bin/security", ["find-generic-password", "-a", id, "-s", apSecretService(dev: dev)], timeout: 10).code == 0
+    }
+}
+
+struct EngineWaiter: APWaiter { func wait(_ s: Double) { Thread.sleep(forTimeInterval: s) } }
+
+// 보드가 쓴 연결 목록(비밀 없음) — 뿌리의 connections.json
+func loadConnections(dev: Bool) -> [APConnection] {
+    let p = autopilotRoot(dev: dev) + "/connections.json"
+    var st = stat()
+    guard lstat(p, &st) == 0, st.st_mode & S_IFMT == S_IFREG, st.st_size <= 256 << 10 else { return [] }
+    return apParseConnections(fm.contents(atPath: p))
+}
+
+// 실행 폴더의 outbox/ — 글마다 <id>.json(임시 파일 + rename), 잠금은 글마다 .<id>.lock(flock, 프로세스가 죽으면 풀림).
+// 모델 세션의 쓰기·읽기 범위 밖이다(샌드박스 denyWrite·denyRead 와 파일 도구 거부 목록에 넣음)
+struct EngineOutbox: APOutboxStore {
+    let dir: String
+    var lockWait = 2.0
+    var box: String { dir + "/outbox" }
+    private func plain(_ p: String, max: Int) -> Data? {
+        var st = stat()
+        guard lstat(p, &st) == 0, st.st_mode & S_IFMT == S_IFREG, st.st_size <= off_t(max) else { return nil }
+        return fm.contents(atPath: p)
+    }
+    private func ensureBox() -> Bool {
+        if !fm.fileExists(atPath: box) { mkdir(box, 0o755) }
+        return isDir(box) && !isLink(box)
+    }
+    private func temp(_ it: APOutboxItem) -> String? {
+        guard ensureBox() else { return nil }
+        let tmp = box + "/.tmp-\(it.id)-\(getpid())-\(UUID().uuidString.prefix(8))"
+        let fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o644)
+        guard fd >= 0 else { return nil }
+        let d = apOutboxData(it)
+        let ok = d.withUnsafeBytes { Darwin.write(fd, $0.baseAddress, $0.count) } == d.count
+        close(fd)
+        if !ok { unlink(tmp); return nil }
+        return tmp
+    }
+    func ids() -> [String] {
+        ((try? fm.contentsOfDirectory(atPath: box)) ?? []).compactMap { $0.hasSuffix(".json") ? String($0.dropLast(5)) : nil }.filter(apOutboxIDOK).sorted()
+    }
+    func read(_ id: String) -> APOutboxItem? {
+        guard apOutboxIDOK(id), let d = plain(box + "/\(id).json", max: apOutboxMaxBytes) else { return nil }
+        return apOutboxParse(d)
+    }
+    @discardableResult func write(_ it: APOutboxItem) -> Bool {
+        guard apOutboxIDOK(it.id), let tmp = temp(it) else { return false }
+        if rename(tmp, box + "/\(it.id).json") != 0 { unlink(tmp); return false }
+        return true
+    }
+    func create(_ it: APOutboxItem) -> Bool {
+        guard apOutboxIDOK(it.id), let tmp = temp(it) else { return false }
+        defer { unlink(tmp) }
+        return link(tmp, box + "/\(it.id).json") == 0   // 같은 이름이 있으면 실패 — 다시 떠서 같은 글을 또 만들지 않는다
+    }
+    func withLock<T>(_ id: String, _ body: () -> T) -> T? {
+        guard apOutboxIDOK(id), ensureBox() else { return nil }
+        let fd = open(box + "/.\(id).lock", O_RDWR | O_CREAT | O_NOFOLLOW, 0o600)
+        guard fd >= 0 else { return nil }
+        defer { close(fd) }
+        let until = now() + lockWait
+        while flock(fd, LOCK_EX | LOCK_NB) != 0 {
+            if now() >= until { return nil }
+            usleep(100_000)
+        }
+        defer { flock(fd, LOCK_UN) }
+        return body()
+    }
+    func attachment(_ name: String) -> Data? { name == "report.html" ? plain(dir + "/report.html", max: 16 << 20) : nil }
+}
+
+extension Engine {
+    var publish: APPublish { apPublishParse(cfg["publish"]).publish }
+    var outboxStore: EngineOutbox { EngineOutbox(dir: dir) }
+    func reportValue() -> APReportRun? {
+        apReportRun(id: id, source: EngineReportSource(dir: dir, runValue: run, queueValue: queue, unitState: { [unowned self] n in self.loadUnit(n) }))
+    }
+    // 단위 판정 뒤·건너뛴 뒤 — 단위 티켓 댓글 글을 만들고(게시 설정이 켰을 때), 자동으로 올림이면 남은 글과 함께 올린다
+    func outboxUnit(_ n: Int) {
+        let p = publish
+        if p.jiraComments, let r = reportValue() {
+            let ticket = (def(n)["tickets"] as? [Any])?.first as? String
+            noteMade(apCreateItems(apUnitOutbox(r, unit: n, ticket: ticket, publish: p, now: now()), store: outboxStore), p)
+        }
+        postAuto(budget: 30)
+    }
+    // 끝 정리 때(보고서를 그린 뒤) — 보고서 글을 만들고 자동으로 올림이면 올린다
+    func outboxRun() {
+        let p = publish
+        if p.report != nil, let r = reportValue() {
+            let requester = loadConnections(dev: isDev).first { $0.id == "notion" }?.account ?? ""
+            let items = apRunOutbox(r, publish: p, requester: requester, hasReport: fm.fileExists(atPath: dir + "/report.html"), now: now(), tz: .current)
+            noteMade(apCreateItems(items, store: outboxStore), p)
+        }
+        postAuto(budget: 90)
+    }
+    func noteMade(_ ids: [String], _ p: APPublish) {
+        guard !ids.isEmpty else { return }
+        let labels = ids.compactMap { outboxStore.read($0) }.map { apTargetLabel($0.target) }.joined(separator: ", ")
+        event("board", "올릴 글 \(ids.count)개를 남겼습니다(\(labels)). "
+              + (p.mode == .review ? "검수 뒤 올림이라 보드의 '올릴 글'에서 사람이 올리기를 눌러야 올라갑니다." : "자동으로 올림이라 연결이 있으면 바로 올립니다."))
+    }
+    // 자동으로 올림 — 이 실행의 글 가운데 올릴 것을 차례로(전체 시간 상한 budget 초, 429 기다림 포함). 연결 없음·만료·실패는 글에 남기고 일은 계속한다
+    func postAuto(budget: Double) {
+        guard publish.mode == .auto else { return }
+        let store = outboxStore, conns = loadConnections(dev: isDev), secrets = EngineSecrets(dev: isDev)
+        let deadline = now() + budget
+        for id in store.ids() {
+            guard now() < deadline else { elog("올릴 글: 시간 상한(\(Int(budget))초)이 지나 남은 글은 다음에 올립니다"); break }
+            guard let before = store.read(id), before.state != .posted, before.state != .skipped else { continue }
+            let r = apPostItem(id, store: store, trigger: .auto, connections: conns, dev: isDev, secrets: secrets, http: EngineHTTP(),
+                               clock: EngineClock(), waiter: EngineWaiter(), tz: .current, budget: min(30, max(5, deadline - now())))
+            guard let it = r.item else { continue }
+            let label = apTargetLabel(it.target)
+            if it.state == .posted { event("board", "바깥에 올렸습니다: \(label) \(it.remote?.url ?? "")") }
+            else if it.state == .failed, r.requests > 0 { event("board", "바깥에 올리지 못했습니다(요청 \(r.requests)건): \(label): \(it.last?.note ?? "")") }
+            else if it.last?.what == "held", before.last?.note != it.last?.note { event("board", "올리지 않고 남겼습니다(요청 0): \(label): \(it.last?.note ?? "")") }
+            else if it.state == .uncertain, before.state != .uncertain { event("board", "앞 올리기가 끝나지 못한 글이 있어 자동으로 다시 올리지 않습니다: \(label)") }
+        }
+    }
+}
+
+// 보드의 검수 화면이 부르는 명령 — 사람이 누른 올리기·올리지 않기·나중에(앱 안 엔진). 뿌리(연결·키체인 항목)는 그 실행의 run.json dev
+func cmdOutbox(_ args: [String]) {
+    var rest = args
+    let devFlag = rest.contains("--dev"), asJSON = rest.contains("--json")
+    rest.removeAll { $0 == "--dev" || $0 == "--json" }
+    guard rest.count >= 2 else { usage() }
+    let dir = canonical(rest[0])
+    guard let run = readJSON(dir + "/run.json") as? [String: Any] else { fail("run.json 을 읽지 못했습니다") }
+    let root = apFinishRoot(flag: devFlag, runDev: run["dev"] as? Bool)
+    if root.refuse { fail("이 실행은 설치판 뿌리에서 출발해 --dev 로는 올리지 않습니다(연결·키체인 항목이 다른 뿌리). --dev 없이 부릅니다.") }
+    let store = EngineOutbox(dir: dir, lockWait: 5)
+    let verb = rest[1]
+    var ids = Array(rest.dropFirst(2))
+    if ids == ["--all"] { ids = store.ids().filter { [.waiting, .failed].contains(store.read($0)?.state) } }
+    var out: [[String: Any]] = []
+    func add(_ r: APPostResult, _ id: String) {
+        var d: [String: Any] = ["id": id, "note": r.note, "requests": r.requests, "busy": r.busy]
+        if let it = r.item { d["state"] = it.state.rawValue; d["url"] = it.remote?.url ?? "" }
+        out.append(d)
+        if !asJSON { print("\(id): \(r.item.map { apOutboxStateLabel($0) } ?? "?") · \(r.note)\(r.requests > 0 ? " (요청 \(r.requests)건)" : "")\(r.item?.remote.map { " " + $0.url } ?? "")") }
+    }
+    switch verb {
+    case "list":
+        for id in store.ids() {
+            guard let it = store.read(id) else { continue }
+            if asJSON { out.append(apOutboxJSON(it)) } else { print("\(id)\t\(apOutboxStateLabel(it))\t\(apTargetLabel(it.target))\t\(it.last?.note ?? "")") }
+        }
+    case "post":
+        guard !ids.isEmpty else { if !asJSON { print("올릴 글이 없습니다.") }; break }
+        let conns = loadConnections(dev: root.dev), secrets = EngineSecrets(dev: root.dev)
+        for id in ids {
+            add(apPostItem(id, store: store, trigger: .press, connections: conns, dev: root.dev, secrets: secrets, http: EngineHTTP(),
+                           clock: EngineClock(), waiter: EngineWaiter(), tz: .current), id)
+        }
+    case "skip", "later", "unskip":
+        for id in ids { add(apMarkItem(id, verb, store: store, clock: EngineClock()), id) }
+    default: usage()
+    }
+    if asJSON { print(jsonText(out)) }
+}
+
+// 설정 › 연결의 "연결 확인" — 읽기 요청 하나(webhook·토큰 없음·주소 규칙 밖이면 요청 0). 결과는 표준 출력 JSON 한 줄, 보드가 연결 목록에 적는다
+func cmdConnection(_ args: [String]) {
+    let dev = args.contains("--dev")
+    let rest = args.filter { $0 != "--dev" && $0 != "--json" }
+    guard rest.count == 2, rest[0] == "check" else { usage() }
+    let id = rest[1]
+    guard apConnectionIDOK(id), let c = loadConnections(dev: dev).first(where: { $0.id == id }) else {
+        print(jsonText(["kind": "local", "ok": false, "who": "", "note": "연결 목록에 \(id) 가 없습니다(먼저 저장합니다)"])); return
+    }
+    let o = apCheckConnection(c, dev: dev, secrets: EngineSecrets(dev: dev), http: EngineHTTP())
+    let d: [String: Any]
+    switch o {
+    case .ok(let who): d = ["kind": "ok", "ok": true, "who": who, "note": "읽기 요청이 됐습니다"]
+    case .rejected(let n): d = ["kind": "rejected", "ok": false, "who": "", "note": n]
+    case .failed(let n): d = ["kind": "failed", "ok": false, "who": "", "note": n]
+    case .local(let n): d = ["kind": "local", "ok": false, "who": "", "note": n]
+    }
+    print(jsonText(d))
+}
+
 let argv = Array(CommandLine.arguments.dropFirst())
 switch argv.first {
 case "report": cmdReport(Array(argv.dropFirst()))
@@ -4696,5 +4965,7 @@ case "status": cmdStatus(Array(argv.dropFirst()))
 case "records": cmdRecords(Array(argv.dropFirst()))
 case "prerun": cmdPrerun(Array(argv.dropFirst()))
 case "finish": cmdFinish(Array(argv.dropFirst()))
+case "outbox": cmdOutbox(Array(argv.dropFirst()))
+case "connection": cmdConnection(Array(argv.dropFirst()))
 default: usage()
 }

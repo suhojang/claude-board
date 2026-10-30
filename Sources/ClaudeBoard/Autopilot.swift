@@ -1372,6 +1372,7 @@ struct APEndedLine: View, Equatable {
 struct APBar: View {
     @ObservedObject var ap: AutopilotStore
     @ObservedObject private var start = APStart.shared
+    @ObservedObject private var outbox = APOutboxReview.shared
     @Binding var view: String
     var body: some View {
         HStack(spacing: 6) {
@@ -1385,6 +1386,10 @@ struct APBar: View {
                 .background(Capsule().fill(Color.white.opacity(0.06)))
             }
             Spacer(minLength: 4)
+            if outbox.waitingCount > 0 {
+                APButton(title: "올릴 글 \(outbox.waitingCount)", icon: "paperplane", tint: APColor.wait,
+                         help: "바깥에 올릴 글이 기다립니다(검수 뒤 올림). 받을 곳·계정·본문을 보고 올립니다", axid: "ap-outbox-bar") { APOutboxReview.shared.open() }
+            }
             APButton(title: "지난 실행", icon: "clock.arrow.circlepath", help: "끝난 자율주행 실행을 프로젝트별로 봅니다", axid: "ap-history") {
                 AutopilotStore.shared.screen = .history(nil)
             }
@@ -1395,6 +1400,7 @@ struct APBar: View {
                 APButton(title: "새 자율주행", icon: "plus", help: "출발 준비를 엽니다(지난 실행 이어 가기·주제로 시작)", axid: "ap-new") { APStart.shared.open() }
             }
         }
+        .onAppear { APOutboxReview.shared.startWatching() }   // 올릴 글(4단계): 3초마다 runs/*/outbox 폴더 시각만 본다
     }
     private func seg(_ v: String, _ title: String) -> some View {
         Button { withAnimation(foldSpring) { view = v } } label: {
@@ -1656,6 +1662,12 @@ struct APRunningScreen: View {
                 }
                 APButton(title: "중단", tint: APColor.fail, enabled: can, help: "실행을 마칩니다. 다시 띄우지 않습니다", axid: "ap-stop") {
                     ap.send("stop", run)
+                }
+                if APOutboxReview.shared.total(run: run.id) > 0 {
+                    let n = APOutboxReview.shared.count(run: run.id)
+                    APButton(title: n > 0 ? "올릴 글 \(n)" : "올릴 글", icon: "paperplane", tint: n > 0 ? APColor.wait : nil,
+                             help: "이 실행이 바깥에 올릴 글(검수 뒤 올림이면 여기서 올립니다). 검수를 기다리는 동안에도 자율주행은 계속합니다",
+                             axid: "ap-outbox-open") { APOutboxReview.shared.open(run: run.id) }
                 }
                 APButton(title: "멈추고 다시 출발", enabled: can && restartWhy.isEmpty,
                          help: restartWhy.isEmpty ? "지금 단위를 마친 뒤 멈추고, 이 실행을 이어 가는 출발 준비를 다시 엽니다. 목표나 범위를 바꿀 때 씁니다" : restartWhy,
@@ -2186,6 +2198,11 @@ struct APHistoryScreen: View {
                      help: r.purged == nil ? "결과 기록과 엔진 기록으로 그린 보고서(흐름 그림·단위별 기록)를 엽니다. 파일 하나로 저장할 수 있습니다"
                         : "원문을 지워 기록 저장소의 결과 기록으로 그립니다(판정 출력은 없습니다)",
                      axid: "ap-report-\(r.id)") { APReportViewer.show(run: r.id, runDir: r.runDir, title: r.title.isEmpty ? r.projectName : r.title) }
+            if APOutboxReview.shared.total(run: r.id) > 0 {
+                let n = APOutboxReview.shared.count(run: r.id)
+                APButton(title: n > 0 ? "올릴 글 \(n)" : "올린 글", icon: "paperplane", tint: n > 0 ? APColor.wait : nil,
+                         help: "이 실행의 바깥 글: 받을 곳·계정·본문을 보고 올리거나 올린 주소를 봅니다", axid: "ap-outbox-\(r.id)") { APOutboxReview.shared.open(run: r.id) }
+            }
         }
     }
 
@@ -2733,6 +2750,14 @@ extension APRecords {
     @Published private(set) var setNote: String?
     @Published private(set) var openParked: [APCarryRow] = []
     @Published private(set) var includeParked: Set<String> = []
+    // 4단계 ⑩-1 — 게시 방식·보고서 받을 곳·Jira 댓글(프로젝트 설정 publish → 지난 실행 → 기본: 검수 뒤 올림·받을 곳 없음).
+    // 이 준비의 run.json 에 쓰고, 바꿨거나 프로젝트 설정에 없으면 출발할 때 프로젝트 설정에 남긴다
+    @Published private(set) var publish = APPublish()
+    @Published private(set) var publishEdited = false
+    @Published private(set) var publishProblems: [String] = []
+    @Published var pubService = "none"
+    @Published var pubSpace = ""
+    @Published var pubParent = ""
     private(set) var id = ""
     private(set) var dir = ""
     private var settings: [String: Any] = [:]
@@ -2993,6 +3018,12 @@ extension APRecords {
             if let f = pick.five { sl["five_hour"] = f }
             if !sl.isEmpty { settings["stopline"] = sl }
         }
+        // 게시 방식(4단계 ⑩-1) — 프로젝트 설정에 있으면 그것, 없으면 지난 실행의 것, 그것도 없으면 검수 뒤 올림
+        let pubRaw = ps["publish"] ?? pr["publish"]
+        let pp = apPublishParse(pubRaw is NSNull ? nil : pubRaw).publish
+        publish = pp; publishEdited = false; publishProblems = []
+        pubService = pp.report?.service.rawValue ?? "none"; pubSpace = pp.report?.space ?? ""; pubParent = pp.report?.parent ?? ""
+        settings["publish"] = apPublishJSON(pp)
         // 이어 간 줄 밖의 열린 미룬 몫(5-2b) — 같은 프로젝트의 다른 실행이 미뤄 아직 정함·닫음으로 답하지 않은 것. 보이고, 고르면 출발 카드로
         let pc = APRecords.projectCarry(db, project: proj, from: runId)
         openParked = apOpenParked(rows: pc.rows, answers: pc.answers, chain: pc.chain, shown: carryPark.map { (id: $0.id, title: $0.title) })
@@ -3462,6 +3493,27 @@ extension APRecords {
         if prepared { buildCards() }
     }
 
+    // MARK: 4단계 ⑩-1 게시 방식 그 자리에서 바꾸기 — 칸 글을 규칙(apPublishParse)으로 다시 읽고, 고칠 것이 없으면 이 준비의 run.json 에
+    func setPublish(mode: APPublishMode? = nil, service: String? = nil, comments: Bool? = nil) {
+        guard !preparing, !starting, !rechecking else { return }
+        var d = apPublishJSON(publish)
+        if let mode { d["mode"] = mode.rawValue }
+        if let comments { d["jira_comments"] = comments }
+        if let service { pubService = service }
+        switch pubService {
+        case "confluence": d["report"] = ["service": "confluence", "space": pubSpace.trimmingCharacters(in: .whitespaces), "parent": pubParent.trimmingCharacters(in: .whitespaces)]
+        case "notion": d["report"] = ["service": "notion", "parent": pubParent.trimmingCharacters(in: .whitespaces)]
+        default: d["report"] = NSNull()
+        }
+        let (p, probs) = apPublishParse(d)
+        publishProblems = probs
+        publishEdited = true
+        guard probs.isEmpty else { return }
+        publish = p
+        settings["publish"] = apPublishJSON(p)
+        if !dir.isEmpty { writeDraft(chosen + heldByCards) }
+    }
+
     // MARK: 5-2b 설정 줄(모델·멈출 선) 그 자리에서 바꾸기 — 이 준비의 run.json 에 쓰고, 출발하면 프로젝트 설정에 남긴다
     func setModel(_ m: String) {
         applySettings(model: m, week: stop7 / 100, five: stop5 / 100)
@@ -3634,6 +3686,7 @@ extension APRecords {
         if !leftBranches.isEmpty { l.append("지난 실행의 스토리·작업 가지 \(leftBranches.count)개가 남아 있습니다. 합치기·승격에서 먼저 합치거나 버린 뒤 이어 갑니다") }
         if promotionEdited, !promotionProblems.isEmpty { l.append("바꾼 승격 차례에 고칠 것이 \(promotionProblems.count)개 있습니다") }
         if editingSet { l.append("자율주행 지시를 고치는 중입니다. 저장하거나 그만둔 뒤 출발합니다") }
+        if !publishProblems.isEmpty { l.append("게시 방식의 받을 곳에 고칠 것이 \(publishProblems.count)개 있습니다") }
         if jira {
             if epic.isEmpty { l.append("에픽 번호를 넣어 주세요(출발 준비 1단계)") }
             else if epic.range(of: "^[A-Z][A-Z0-9_]*-[0-9]+$", options: .regularExpression) == nil { l.append("에픽 번호 꼴이 아닙니다(예: SHOP-10)") }
@@ -3699,6 +3752,7 @@ extension APRecords {
             for (k, v) in settings["stopline"] as? [String: Any] ?? [:] { sl[k] = v }
             o["stopline"] = sl
         }
+        if publishEdited || o["publish"] == nil { o["publish"] = apPublishJSON(publish) }   // 게시 방식(4단계 ⑩-1)
         let pol = cards.filter(\.policy).compactMap { c in answers[c.id].map { (c.id, $0) } }
         if !pol.isEmpty {
             var pa = o["policy_answers"] as? [String: Any] ?? [:]
@@ -4682,8 +4736,9 @@ struct APConfirm: View {
     private var settingsFold: some View {
         let t = s.ticketsToMake
         let w = Int(s.stop7.rounded()), f = Int(s.stop5.rounded())
-        let head = "모델 \(s.model) · 멈출 선 주간 \(w)% · 5시간 \(f)%" + (s.jira ? " · 만들 티켓 \(t.stories + t.tasks + t.moved)" : "")
-        return APFold(title: "설정", summary: head, axid: "ap-fold-settings", open: bind("settings"), tag: s.settingsEdited ? "바꿈" : nil) {
+        let pubHead = (s.publish.mode == .auto ? "자동으로 올림" : "검수 뒤 올림") + (s.publish.report.map { " · " + apServiceName($0.service) } ?? "")
+        let head = "모델 \(s.model) · 멈출 선 주간 \(w)% · 5시간 \(f)% · \(pubHead)" + (s.jira ? " · 만들 티켓 \(t.stories + t.tasks + t.moved)" : "")
+        return APFold(title: "설정", summary: head, axid: "ap-fold-settings", open: bind("settings"), tag: s.settingsEdited || s.publishEdited ? "바꿈" : nil) {
             apNote(s.settingsEdited ? "바꾼 값은 이 출발에 쓰고, 출발하면 프로젝트 설정에 남깁니다(다음 출발의 기본값)."
                    : s.settingsFrom == "project" ? "프로젝트 설정에 저장된 값입니다. 그 자리에서 바꿉니다." : "지난 실행의 실행 설정을 그대로 잇습니다. 그 자리에서 바꿉니다.")
             pickRow("모델", apModelOptions(current: s.model), s.model, axid: "ap-set-model") { s.setModel($0) }
@@ -4691,9 +4746,42 @@ struct APConfirm: View {
             pickRow("5시간", apStopOptions(apStopFiveChoices, current: f).map(String.init), String(f), suffix: "%", axid: "ap-set-five") { s.setStop(five: Int($0)) }
             ForEach(s.settingsProblems, id: \.self) { apNote("· " + $0, APColor.fail) }
             apNote("모델을 바꾸면 단위 예상(보정)도 그 모델의 지난 값으로 다시 셉니다.")
-            row("게시 방식", "바깥 연결(4단계)과 함께 엽니다. 지금은 바깥에 올리는 글이 없습니다")
-            row("보고서·알림", "보고서는 엔진이 실행 폴더에 늘 그립니다(지난 실행의 보고서 보기). 받을 곳·알림은 바깥 연결(4단계)과 함께 엽니다")
+            publishRows
+            row("알림", "상태 알림·3시간 요약(webhook)은 다음 조각에서 엽니다. 보고서는 엔진이 실행 폴더에 늘 그립니다")
             if s.jira { row("만들 티켓", "\(t.stories + t.tasks + t.moved)건 · 출발 확인 위 '만들 티켓' 나무") }
+        }
+    }
+    // 게시 방식(4단계 ⑩-1, 와이어프레임 출발 확인 ⑧): 검수 뒤 올림(기본)·자동으로 올림, 보고서 받을 곳, Jira 댓글. 연결이 없으면 알림만(출발은 막지 않음)
+    @ViewBuilder private var publishRows: some View {
+        let cs = APConnections.shared
+        pickRow("게시 방식", ["검수 뒤 올림", "자동으로 올림"], s.publish.mode == .auto ? "자동으로 올림" : "검수 뒤 올림", axid: "ap-pub-mode") {
+            s.setPublish(mode: $0 == "자동으로 올림" ? .auto : .review)
+        }
+        pickRow("보고서 받을 곳", ["없음", "Confluence", "Notion"], ["none": "없음", "confluence": "Confluence", "notion": "Notion"][s.pubService] ?? "없음", axid: "ap-pub-target") {
+            s.setPublish(service: ["없음": "none", "Confluence": "confluence", "Notion": "notion"][$0] ?? "none")
+        }
+        if s.pubService == "confluence" {
+            pubField("스페이스 키", "예: TODO", $s.pubSpace, axid: "ap-pub-space")
+            pubField("상위 페이지 id", "숫자 · 비우면 스페이스 맨 위", $s.pubParent, axid: "ap-pub-parent")
+        } else if s.pubService == "notion" {
+            pubField("상위 페이지 id", "32자리 16진수(통합을 초대한 페이지)", $s.pubParent, axid: "ap-pub-parent")
+        }
+        pickRow("Jira 댓글", ["끔", "켬"], s.publish.jiraComments ? "켬" : "끔", axid: "ap-pub-comments") { s.setPublish(comments: $0 == "켬") }
+        ForEach(s.publishProblems, id: \.self) { apNote("· " + $0, APColor.fail) }
+        ForEach(apPublishNotes(s.publish, connections: cs.list, secrets: cs.secrets, dev: apDevBuild, now: Date(), tz: .current), id: \.self) { apNote("· " + $0, APColor.wait) }
+        apNote(s.publish.mode == .review
+               ? "검수 뒤 올림: 실행이 끝나도 바깥에 올라가지 않습니다. 보드의 '올릴 글'에서 받을 곳·계정·본문을 보고 올리기를 눌러야 올라가고, 오래 두어도 자동으로 올리지 않습니다."
+               : "자동으로 올림: 연결이 있으면 엔진이 바로 올립니다(보드 창이 꺼져 있어도). 연결이 없거나 만료면 글은 쌓이고 일은 계속합니다.")
+        apNote("Jira 댓글은 티켓 키가 있는 단위에만 판정 뒤 하나씩 만듭니다. 바깥 글의 첫 줄은 늘 '오토파일럿 작성'입니다.")
+    }
+    private func pubField(_ k: String, _ ph: String, _ b: Binding<String>, axid: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(k).boardFont(11, weight: .semibold).foregroundStyle(.secondary).frame(width: 70, alignment: .leading)
+            TextField(ph, text: b).textFieldStyle(.roundedBorder).font(.system(size: 11.5)).frame(maxWidth: 280)
+                .accessibilityIdentifier(axid)
+                .onSubmit { s.setPublish() }
+            APButton(title: "적용", axid: axid + "-apply") { s.setPublish() }
+            Spacer(minLength: 0)
         }
     }
     private func pickRow(_ k: String, _ options: [String], _ cur: String, suffix: String = "", axid: String, _ act: @escaping @MainActor (String) -> Void) -> some View {
@@ -4712,7 +4800,7 @@ struct APConfirm: View {
             Text(k).boardFont(11, weight: .semibold).foregroundStyle(.secondary).frame(width: 70, alignment: .leading)
             Text(v).boardFont(11).fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 4)
-            APButton(title: "바꾸기", enabled: false, help: "게시 방식·보고서 받을 곳·알림은 바깥 연결(4단계)과 함께 엽니다") {}
+            APButton(title: "바꾸기", enabled: false, help: "알림(webhook·3시간 요약)은 다음 조각에서 엽니다") {}
         }
     }
 

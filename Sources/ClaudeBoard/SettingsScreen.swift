@@ -18,7 +18,7 @@ import WebKit
 // terminalExpanded 에 남기지 않는다(열린 채 끄고 다시 켜도 접힌 채로 뜬다). 열린 동안 탭은 뒤에서 그대로 돌고, 탭을 다루는
 // 동작(⌘T·⌘1·⌘D·세션 줄 누르기 등)은 설정 화면을 닫고 한다. Esc 는 키 받기 취소 → 검색어 지우기 → 닫기 차례(Shortcuts.handle)
 enum SettingsSection: String, CaseIterable, Identifiable {
-    case general, window, notify, terminal, board, account, shortcuts, update
+    case general, window, notify, terminal, board, account, connections, shortcuts, update
     var id: String { rawValue }
 
     var title: String {
@@ -29,6 +29,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .terminal: "터미널"
         case .board: "보드"
         case .account: "계정"
+        case .connections: "연결"
         case .shortcuts: "단축키"
         case .update: "업데이트"
         }
@@ -42,6 +43,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .terminal: "terminal"
         case .board: "rectangle.grid.1x2"
         case .account: "person.crop.circle"
+        case .connections: "link"
         case .shortcuts: "keyboard"
         case .update: "arrow.down.circle"
         }
@@ -55,6 +57,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .terminal: "내장 터미널의 글자·테마와 새 세션 기본값"
         case .board: "세션 보드의 글자 크기와 사용 한도 칸"
         case .account: "Claude 계정 전환과 한도 자동 전환"
+        case .connections: "자율주행이 바깥(Atlassian·Notion·Figma·알림)에 쓰고 읽을 계정. 토큰은 키체인에만"
         case .shortcuts: "키 칸을 누르고 새 키를 누르면 바로 바뀝니다"
         case .update: "새 버전 확인과 설치"
         }
@@ -437,7 +440,7 @@ struct SettingsView: View {
     // MARK: 항목
 
     private var items: [SettingsItem] {
-        general + windowItems + notifyItems + terminalItems + boardItems + accountItems + shortcutItems + updateItems
+        general + windowItems + notifyItems + terminalItems + boardItems + accountItems + apConnectionItems() + shortcutItems + updateItems
     }
 
     private var general: [SettingsItem] {

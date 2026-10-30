@@ -179,6 +179,7 @@ Claude 가 도구 사용 승인을 기다리면 화면 가운데에 알림 패�
 - 🌿 **가지**: 일은 새 가지 `autopilot/<실행 id>` 에만 커밋하고 기존 가지는 움직이지 않습니다. 끝난 뒤 **합치기 · 승격** 화면에서 바뀐 줄을 보고 승격 차례대로 누르거나 버립니다.
 - 🗂️ **지난 실행**: 프로젝트별로 결과 · 시간 · 비용 · 단위별 판정을 보고, 이어 가거나 원문을 지웁니다.
 - 📄 **보고서**: 엔진이 단위가 끝날 때마다 실행 폴더에 보고서(HTML 파일 하나, 흐름 그림 포함)를 그립니다. 보드를 꺼 두어도 그려지고, 인터넷 없이 보입니다. 지난 실행 · 합치기 · 승격 화면의 **보고서 보기** 로 열고 **파일로 저장…** 으로 내려받습니다.
+- 🔗 **연결과 올릴 글**: **설정 > 연결** 에 Atlassian · Notion · Figma · 알림 webhook 계정을 넣습니다(토큰은 키체인에만, 만료일 · 임박 표시, "연결 확인" 은 읽기 요청 하나). 출발 확인의 **게시 방식** 에서 검수 뒤 올림(기본) · 자동으로 올림과 받을 곳(Confluence · Notion 보고서, 단위 티켓의 Jira 댓글)을 고릅니다. 검수 뒤 올림이면 **올릴 글** 에서 받을 곳 · 계정 · 본문을 보고 누를 때만 올라가고, 자동으로 올림이면 보드를 꺼 두어도 엔진이 올립니다. 연결이 없거나 만료면 요청 없이 쌓아 두고 일은 계속합니다.
 
 엔진은 실행마다 백그라운드 작업(LaunchAgent)으로 돌아 보드를 꺼도 이어 갑니다. 자세한 내용은 [설치 가이드](packaging/README.txt) 의 "5. 자율주행" 에 있습니다.
 
@@ -205,7 +206,7 @@ curl -fsSL https://raw.githubusercontent.com/suhojang/claude-board/main/packagin
 ```
 
 앱, 설치된 파일(보드가 옮겨 둔 `~/.claude/notifier/plugins/` 포함), settings.json 의 hook 과 환경변수, 자동 실행 등록, `~/.zshrc` 에 넣은 줄, 계정 전환용으로 저장한 로그인 정보를 지웁니다.
-남은 자율주행 실행(LaunchAgent)은 끄고, 자율주행이 만든 따로 작업 트리(`~/.claude-board/worktrees/`)도 지웁니다. 저장소에 남은 `autopilot/<실행 id>` 가지와 실행 기록(`~/Library/Application Support/Claude Board/autopilot/`)은 그대로 둡니다.
+남은 자율주행 실행(LaunchAgent)은 끄고, 자율주행이 만든 따로 작업 트리(`~/.claude-board/worktrees/`)도 지웁니다. 설정 > 연결의 토큰(키체인)도 지웁니다. 저장소에 남은 `autopilot/<실행 id>` 가지와 실행 기록(`~/Library/Application Support/Claude Board/autopilot/`)은 그대로 둡니다.
 `/Applications` 의 앱을 지울 때 관리자 비밀번호를 묻습니다.
 
 ## 🛠️ 배포 (관리자)

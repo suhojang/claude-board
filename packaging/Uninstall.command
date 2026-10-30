@@ -46,6 +46,8 @@ for f in claude-notifier notify.py state.py board-tui.py hooks.py notify-positio
 rm -rf "$N/sessions" "$N/__pycache__" "$N/plugins"
 # 계정 전환용으로 저장해 둔 로그인 토큰(키체인)과 계정 목록 — 지금 Claude Code 로그인("Claude Code-credentials")은 그대로 둔다
 while security delete-generic-password -s "Claude Board-account" >/dev/null 2>&1; do :; done
+# 자율주행 설정 > 연결의 토큰·webhook 주소(키체인, 4단계). 시험 빌드의 "Claude Board Dev-connection" 은 그대로 둔다(LaunchAgent 정리와 같은 꼴)
+while security delete-generic-password -s "Claude Board-connection" >/dev/null 2>&1; do :; done
 # accounts.json.broken-*: 깨진 목록을 보드가 옆으로 치운 것(이메일이 들어 있다)
 rm -rf "$N/accounts.json" "$N"/accounts.json.broken-* "$N/accounts"
 rmdir "$N" 2>/dev/null || true
