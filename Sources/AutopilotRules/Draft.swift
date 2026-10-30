@@ -282,6 +282,11 @@ public enum APDraftLimit {
     public static let scenarioBytes = 256 << 10, scenariosPerUnit = 12, criteriaPerUnit = 20
 }
 public let apDraftKinds: Set<String> = ["setup", "dev", "fix", "test", "docs"]
+// 초안 단위에서 받는 칸(허용 목록)과, 받지 않는 칸 가운데 샌드박스·범위를 넓히는 것(까닭을 따로 적는다)
+public let apDraftUnitKeys: Set<String> = ["id", "title", "kind", "folder", "prompt", "check", "est_min", "depends", "criteria", "scenarios", "check_ports"]
+public let apDraftWideningKeys: Set<String> = ["precheck", "action", "check_sandbox", "local_binding", "write_roots", "network_allow", "context", "cwd",
+                                               "unix_sockets", "check_unix_sockets", "sandbox_exclude", "env_pass", "allowed_tools", "read_deny", "prerun",
+                                               "caps", "check_timeout_min", "action_timeout_min", "story", "tickets", "branch", "review"]
 public let apDraftUnitIdPattern = "^u[0-9]{1,3}$"
 public let apDraftFileNamePattern = "^[A-Za-z0-9][A-Za-z0-9._-]{0,59}$"
 
@@ -360,8 +365,12 @@ public func apDraftCheck(files: APDraftFiles, harness: [APHarnessPoint], firstUn
         for (i, v) in arr.prefix(apDraftUnitMax).enumerated() {
             let n = i + 1
             guard let o = v as? [String: Any] else { bad("단위 \(n) 이 JSON 객체가 아닙니다"); continue }
-            let known: Set<String> = ["id", "title", "kind", "folder", "prompt", "check", "est_min", "depends", "criteria", "scenarios", "check_ports"]
-            for k in o.keys where !known.contains(k) { bad("단위 \(n) 에 형식 밖 칸 \(k) 가 있습니다") }
+            // 받는 칸은 허용 목록뿐(⑪-2 보안 검토): 샌드박스 밖에서 돌거나(precheck·action) 판정·세션 범위를 넓히는(check_sandbox·local_binding·쓰기 범위·
+            // 근거 묶음 자리·작업 폴더) 칸은 모델이 쓸 수 없다. 그런 칸이 있으면 기계 검사 실패 줄로 보이고 준비가 멈춘다(사람이 넣는 길은 대기열·출발 확인)
+            for k in o.keys.sorted() where !apDraftUnitKeys.contains(k) {
+                bad(apDraftWideningKeys.contains(k) ? "단위 \(n) 의 \(k) 는 초안 세션이 쓸 수 없는 칸입니다(샌드박스 밖에서 돌거나 범위를 넓힘, 사람만 넣음)"
+                                                     : "단위 \(n) 에 형식 밖 칸 \(k) 가 있습니다")
+            }
             let id = str(o["id"])
             if id.range(of: apDraftUnitIdPattern, options: .regularExpression) == nil { bad("단위 \(n) 의 id 는 u1 꼴이어야 합니다(\(id.prefix(20)))") }
             if unitIds.contains(id) { bad("단위 id \(id) 가 두 번 있습니다") }

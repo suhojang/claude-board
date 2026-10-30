@@ -3859,6 +3859,13 @@ extension APRecords {
     func saveSet() {
         guard let p = project, !starting else { return }
         if let why = apInstructionSaveProblem(setDraft) { setNote = why; return }
+        // 주제로 시작(⑪-2 보안 검토): 세트는 출발을 누를 때만 쓴다. 여기서는 출발 때 쓸 글만 바꾼다(준비를 버리면 세트는 그대로)
+        if source == "topic" {
+            setText = setDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+            editingSet = false
+            setNote = "저장했습니다. 출발을 누를 때 이 글을 세트에 씁니다(지금 세트는 그대로입니다)."
+            return
+        }
         let dirSet = autopilotRoot + "/private/projects/\(p)/set", path = dirSet + "/autopilot.md"
         let text = setDraft.trimmingCharacters(in: .whitespacesAndNewlines) + "\n"
         let fm = FileManager.default
@@ -4165,6 +4172,11 @@ extension APRecords {
                     self.harnessCards = missing.compactMap(APStart.harnessCard)
                     self.setText = (try? String(contentsOfFile: d + "/draft/autopilot.md", encoding: .utf8)).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.flatMap { $0.isEmpty ? nil : $0 }
                     self.setAt = Date().timeIntervalSince1970
+                    // 지금 세트에 지시가 있으면 그것과 견준다(출발을 눌러야 세트를 바꾸므로, 무엇이 바뀌는지 출발 확인에서 본다. ⑪-2 보안 검토)
+                    let cur = autopilotRoot + "/private/projects/\(self.project ?? "")/set/autopilot.md"
+                    if let t = (try? String(contentsOfFile: cur, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty {
+                        self.lastSet = APSetVersion(text: t, at: mtime(cur)?.timeIntervalSince1970 ?? 0, run: "지금 세트")
+                    }
                     self.seedScenarios { ok in if ok { self.topicCheck() } }
                 }
             }
@@ -4197,7 +4209,8 @@ extension APRecords {
 
     // 초안 단위(대기열 꼴) → 출발 준비의 단위, 그 뒤는 이어 가기와 같은 확인(status --json)·판정 미리 돌리기
     private func topicCheck() {
-        let qs = draftResult["units"] as? [[String: Any]] ?? []
+        // 초안 단위는 엔진이 허용 목록 칸만 내놓지만, 샌드박스 밖에서 돌거나 범위를 넓히는 칸은 여기서 한 번 더 버린다(⑪-2 보안 검토, 작업 폴더·근거 묶음은 엔진이 정한 값)
+        let qs = (draftResult["units"] as? [[String: Any]] ?? []).map { $0.filter { k, _ in k == "cwd" || k == "context" || !apDraftWideningKeys.contains(k) } }
         units = qs.enumerated().map { i, d in
             var u = APDraftUnit(id: d["id"] as? String ?? "u\(i + 1)")
             u.n = i + 1
@@ -5179,6 +5192,7 @@ struct APConfirm: View {
                 }
             }
         }
+        .onAppear { if s.source == "topic" { open.insert("set"); open.insert("checks") } }   // 주제로 시작: 초안 지시와 판정을 펼친 채로(⑪-2 보안 검토)
         .onChange(of: s.flash) { _, _ in
             hl = true
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) { withAnimation(.easeOut(duration: 0.6)) { hl = false } }
@@ -5600,7 +5614,8 @@ struct APConfirm: View {
         let counts = apDiffCount(diff)
         return APFold(title: "자율주행 지시", summary: head, axid: "ap-fold-set", open: bind("set"), tag: s.editingSet ? "고치는 중" : nil) {
             if s.editingSet {
-                apNote("지시 글 · 이 자리에서 고치는 중입니다. 저장하면 세트(private/projects/\(s.project ?? "")/set/autopilot.md)가 바뀌고 다음 출발의 기준이 됩니다.")
+                apNote(s.source == "topic" ? "지시 글 · 이 자리에서 고치는 중입니다. 저장하면 출발 때 세트에 쓸 글이 바뀝니다(출발을 누르기 전에는 세트를 바꾸지 않습니다)."
+                                           : "지시 글 · 이 자리에서 고치는 중입니다. 저장하면 세트(private/projects/\(s.project ?? "")/set/autopilot.md)가 바뀌고 다음 출발의 기준이 됩니다.")
                 TextEditor(text: $s.setDraft)
                     .font(.system(size: 11, design: .monospaced))
                     .scrollContentBackground(.hidden)
@@ -5630,7 +5645,7 @@ struct APConfirm: View {
             }
             if let n = s.setNote { apNote(n, n.hasPrefix("저장했습니다") ? APColor.ok : APColor.fail) }
             if let l = s.lastSet, counts.add + counts.del > 0 {
-                APFold(title: "지난 판과 차이 +\(counts.add) −\(counts.del)", summary: "\(apDay(l.at)) 판(실행 \(l.run)) · 기록 저장소", axid: "ap-fold-set-diff", open: bind("setdiff")) {
+                APFold(title: "지난 판과 차이 +\(counts.add) −\(counts.del)", summary: l.run == "지금 세트" ? "\(apDay(l.at)) 판 · 지금 세트 파일(출발하면 바뀜)" : "\(apDay(l.at)) 판(실행 \(l.run)) · 기록 저장소", axid: "ap-fold-set-diff", open: bind("setdiff")) {
                     ForEach(Array(diff.prefix(300).enumerated()), id: \.offset) { _, d in
                         Text((d.kind == .add ? "+ " : d.kind == .del ? "− " : "  ") + d.text)
                             .boardFont(10.5, design: .monospaced)
@@ -5653,13 +5668,19 @@ struct APConfirm: View {
                             Text("\(u.n). 시나리오 \(sc["file"] as? String ?? "")(\(sc["kind"] as? String == "browser" ? "브라우저" : "셸")\((sc["criterion"] as? String).map { " · 수용 기준 \($0)" } ?? ""))")
                                 .boardFont(10.5, design: .monospaced).foregroundStyle(.secondary).lineLimit(2)
                         }
+                        // 판정이 스스로 띄우는 서버 포트(⑪-2 보안 검토: 주제로 시작이면 초안 세션이 적은 값이라 사람이 보고 출발한다)
+                        if let ports = ((try? JSONSerialization.jsonObject(with: u.def)) as? [String: Any])?["check_ports"] as? [Int], !ports.isEmpty {
+                            Text("\(u.n). 판정이 여는 localhost 포트 " + ports.map(String.init).joined(separator: ", ") + (s.source == "topic" ? " (초안 세션이 적음, 판정 샌드박스는 이 포트만 엶)" : ""))
+                                .boardFont(10.5, design: .monospaced).foregroundStyle(s.source == "topic" ? APColor.limit : Color.secondary).lineLimit(2)
+                                .accessibilityIdentifier("ap-check-ports-\(u.id)")
+                        }
                     }
                 }
                 apNote("판정은 샌드박스 안에서 돕니다. 쓰기는 작업 폴더·쓰기 범위·증거 폴더만, 네트워크는 실행의 localhost 설정과 단위 check_ports 만 엽니다.")
             }
             apNote("하네스 지문: 출발 때 엔진이 하네스 사본과 지문을 남기고, 끝나면 같은지 확인합니다. 저장소 하네스는 고치지 않습니다.")
             if s.source == "topic" {
-                apNote("주제로 시작: 이 지시는 초안 세션이 쓴 초안입니다. 출발하면 세트(private/projects/\(s.project ?? "")/set/autopilot.md)에 씁니다(고치기 전 글은 set-backup/). 하네스 확인 지점 가운데 지시가 다루지 않은 곳은 출발 카드로 묻습니다.")
+                apNote("주제로 시작: 이 지시는 초안 세션(모델)이 쓴 초안이고 지금은 준비 폴더(drafts/\(s.id)/draft/)에만 있습니다. 출발을 누를 때만 세트(private/projects/\(s.project ?? "")/set/autopilot.md)에 쓰고(고치기 전 글은 set-backup/), 준비를 버리면 세트는 그대로입니다. 하네스 확인 지점 가운데 지시가 다루지 않은 곳은 출발 카드로 묻습니다.")
             } else {
                 apNote("하네스 확인 지점 읽기와 지시 초안은 하네스 읽기(7단계)에서 엽니다.")
             }
