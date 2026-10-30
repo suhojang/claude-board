@@ -17,9 +17,10 @@ import WebKit
 // 3단계(2026-10-30, 설계 6장): 지난 실행·합치기 시트의 "보고서 보기"가 여는 창. 보고서 글은 규칙 AutopilotRules 의 틀(apReportHTML)로
 // 보드가 그 자리에서 그린다 — 실행 폴더가 있으면 그 기록(엔진이 report.html 을 그린 것과 같은 바탕), 원문을 지웠으면 기록 저장소(결과 기록 전문).
 // 엔진이 쓴 report.html 파일을 열지 않는 것은 설계 판단: 단위 폴더는 모델이 쓸 수 있는 자리이고, 화면은 늘 지금 기록으로 그리며, 원문을 지운 실행도 같은 길로 보인다.
-// 웹 보기는 가둔다: JavaScript 끔, 처음 글(about:blank)과 같은 문서 안 이동(#unit-n)만 허용, https 링크는 확인 뒤 기본 브라우저로,
-// 그 밖 이동·새 창은 막음, http(s)·ws(s)·ftp 요청은 콘텐츠 규칙으로도 막음(보고서 글의 CSP 와 겹쳐), 저장소는 nonPersistent,
-// 글은 loadHTMLString(baseURL: nil) 로 넣어 로컬 파일을 하나도 읽지 않는다. "파일로 저장…"은 화면에 보이는 글 그대로 한 파일로 쓴다
+// 웹 보기는 가둔다: JavaScript 끔, 처음 글과 같은 문서 안 이동(#unit-n)만 허용, https 링크는 확인 뒤 기본 브라우저로,
+// 그 밖 이동·새 창은 막음, http(s)·ws(s)·ftp 요청은 콘텐츠 규칙으로도 막음(보고서 글의 CSP 와 겹쳐), 저장소는 nonPersistent.
+// 글은 loadHTMLString 에 처리기 없는 자체 주소(claude-board-report://report/)를 바탕으로 넣는다 — 파일 주소가 아니라 로컬 파일을 하나도 읽지 않고,
+// baseURL nil(about:blank)은 #unit-n 이 about:blank%23unit-n 으로 바뀌어 문서 안 이동이 안 돼서다(실측). "파일로 저장…"은 보이는 글 그대로 한 파일로 쓴다
 
 // 보드 쪽 읽을 곳(실행 폴더) — 모델이 쓸 수 있는 단위 폴더의 파일(result.json·engine.json)은 링크가 아닌 보통 파일이고 상한 아래일 때만 읽는다
 struct APFolderReportSource: APReportSource {
@@ -67,8 +68,12 @@ final class APReportViewer: NSObject, NSWindowDelegate, WKNavigationDelegate, WK
     private static var open: [String: APReportViewer] = [:]
     private static var blockList: WKContentRuleList?
     private static var blockTried = false
-    // 바깥 요청 막기(콘텐츠 규칙): 주소 꼴이 http(s)·ws(s)·ftp 면 어떤 자원이든 막는다. about:blank 와 같은 문서 안 이동은 걸리지 않는다
-    private static let blockRules = #"[{"trigger":{"url-filter":"^(https?|wss?|ftps?)://"},"action":{"type":"block"}}]"#
+    // 바깥 요청 막기(콘텐츠 규칙): 주소 꼴이 http(s)·ws(s)·ftp(s) 면 어떤 자원이든 막는다. 바탕 주소와 같은 문서 안 이동은 걸리지 않는다.
+    // 규칙 글의 정규식은 갈래(|)를 받지 않아(컴파일 실패, 실측) 꼴마다 규칙 하나다
+    private static let blockRules = #"[{"trigger":{"url-filter":"^https?://"},"action":{"type":"block"}},"#
+        + #"{"trigger":{"url-filter":"^wss?://"},"action":{"type":"block"}},{"trigger":{"url-filter":"^ftps?://"},"action":{"type":"block"}}]"#
+    // 보고서 글의 바탕 주소 — 처리기가 없어 이 주소로는 아무것도 읽지 않는다. 같은 문서 안 이동만 이 주소에 # 을 붙인 꼴로 온다
+    static let base = URL(string: "claude-board-report://report/")!
 
     let id: String
     private var html = ""
@@ -109,7 +114,7 @@ final class APReportViewer: NSObject, NSWindowDelegate, WKNavigationDelegate, WK
         withBlockList { [weak self] in
             guard let self, let web = self.web else { return }
             self.loaded = false
-            web.loadHTMLString(self.html, baseURL: nil)
+            web.loadHTMLString(self.html, baseURL: Self.base)
         }
         win?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
@@ -186,9 +191,12 @@ final class APReportViewer: NSObject, NSWindowDelegate, WKNavigationDelegate, WK
         let board = boardWindow()
         w.level = board.level   // 위에 고정한 보드에 가리지 않게
         w.delegate = self
-        let f = board.frame
-        w.setFrameOrigin(NSPoint(x: max(f.minX - 920, 20), y: max(f.midY - 410, 20)))
-        if let screen = board.screen?.visibleFrame, !screen.intersects(w.frame) { w.center() }
+        // 보드 옆(왼쪽에 자리가 있으면 왼쪽, 아니면 오른쪽)에, 둘 다 없으면 화면 가운데
+        let f = board.frame, vis = board.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? f
+        let y = min(max(f.maxY - w.frame.height, vis.minY), vis.maxY - w.frame.height)
+        if f.minX - w.frame.width - 8 >= vis.minX { w.setFrameOrigin(NSPoint(x: f.minX - w.frame.width - 8, y: y)) }
+        else if f.maxX + 8 + w.frame.width <= vis.maxX { w.setFrameOrigin(NSPoint(x: f.maxX + 8, y: y)) }
+        else { w.center() }
         self.web = web; self.note = note; self.win = w
     }
 
@@ -221,7 +229,7 @@ final class APReportViewer: NSObject, NSWindowDelegate, WKNavigationDelegate, WK
     func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
         let url = action.request.url
         let main = action.targetFrame?.isMainFrame ?? false
-        if let u = url, u.scheme == "about", u.absoluteString.hasPrefix("about:blank"), main, !loaded || u.fragment != nil {
+        if let u = url, u.scheme == Self.base.scheme, u.host == Self.base.host, u.path == "/" || u.path.isEmpty, u.query == nil, main, !loaded || u.fragment != nil {
             decisionHandler(.allow)
             return
         }

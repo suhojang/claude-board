@@ -215,6 +215,7 @@ for k, l in todo:
     elif verb == "RESULT":
         try:
             custom = json.load(open(rest))
+            open(os.path.join(UNIT, "fake-result.txt"), "w").write(rest)   # 판정을 다시 해 이어 열 때도 같은 견본을 쓴다
         except Exception as e:
             log("fake-errors.log", "RESULT %s: %s\n" % (rest, e))
     elif verb == "NEXT":
@@ -224,6 +225,11 @@ for k, l in todo:
 if stop.is_set(): interrupted()
 res = {"unit": {"title": "가짜 단위"}, "outcome": "done", "headline": "가짜 claude 가 줄대로 했습니다.", "summary": ["줄 %d개" % len(todo)],
        "next_start": nexts, "new_work": news}
+if custom is None and os.path.exists(os.path.join(UNIT, "fake-result.txt")):
+    try:
+        custom = json.load(open(open(os.path.join(UNIT, "fake-result.txt")).read().strip()))
+    except Exception:
+        pass
 if isinstance(custom, dict):
     res = custom   # 견본 결과 기록을 그대로(보고서 틀 시험, 3단계)
 try:
