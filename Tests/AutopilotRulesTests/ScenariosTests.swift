@@ -221,6 +221,7 @@ private let interpreterRows: [InterpreterRow] = [
     func 카드() {
         let c = apPrerunScenarioCard(n: 2, id: "u2", title: "예약 API", file: "s/a.sh", criterion: "AC-1")
         #expect(c["id"] as? String == "prerun-u2-s/a.sh" && c["recommended"] as? String == "fix_check" && c["scenario"] as? String == "s/a.sh")
+        #expect(c["unit_id"] as? String == "u2" && c["unit"] as? Int == 2)
         #expect(c["title"] as? String == "「예약 API」 의 시나리오 s/a.sh(수용 기준 AC-1) 가 일하기 전부터 통과합니다")
     }
 }

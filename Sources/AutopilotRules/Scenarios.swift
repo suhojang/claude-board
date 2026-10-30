@@ -416,7 +416,7 @@ public func apJudgeSummary(_ o: APJudgeOutcome, sandbox: String, at: Double) -> 
 // 단위 전체는 실패했지만 시나리오 하나가 일하기 전부터 통과(이미 통과)했을 때의 출발 카드 감. 단위 전체가 통과하면 apPrerunCard(단위 카드)를 쓴다.
 // 추천은 판정 고치기(그 시나리오가 뜻을 보지 않을 수 있다. 설계 2장 ① 반대 탐침 카드와 같은 꼴)
 public func apPrerunScenarioCard(n: Int, id: String, title: String, file: String, criterion: String?) -> [String: Any] {
-    ["id": "prerun-\(id)-\(file)", "unit": n, "kind": "prerun", "scenario": file,
+    ["id": "prerun-\(id)-\(file)", "unit": n, "unit_id": id, "kind": "prerun", "scenario": file,
      "title": "「\(title)」 의 시나리오 \(file)\(criterion.map { "(수용 기준 \($0))" } ?? "") 가 일하기 전부터 통과합니다",
      "why": "그 시나리오가 일한 결과의 뜻을 보지 않거나 이미 된 기준이라는 뜻입니다. 그대로 두면 그 기준은 일하지 않아도 통과로 남습니다.",
      "options": [["key": "fix_check", "label": "판정 고치기"], ["key": "keep", "label": "그대로"], ["key": "drop", "label": "빼기"]],
