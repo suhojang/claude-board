@@ -35,10 +35,7 @@ func apStamp(_ path: String) -> Double { mtime(path)?.timeIntervalSince1970 ?? 0
 func apStrings(_ v: Any?) -> [String] { (v as? [Any] ?? []).map { "\($0)" } }
 func apText(_ v: Any?) -> String? { (v as? String).flatMap { $0.isEmpty ? nil : $0 } }
 
-// 모델이 쓴 글의 긴 줄표는 보드에 그릴 때 쉼표로 바꾼다(설계: 보고서를 그릴 때 바꾼다, 사용자에게 보이는 글에는 긴 줄표를 쓰지 않는다)
-func apPlain(_ s: String) -> String {
-    s.replacingOccurrences(of: " — ", with: ", ").replacingOccurrences(of: "—", with: ", ")
-}
+// 모델이 쓴 글의 긴 줄표 바꾸기 apPlain 은 규칙 AutopilotRules(Prose.swift)에 있다 — 보고서 틀과 함께 쓴다(3단계)
 
 private let apDayTime = formatter("M월 d일 HH:mm"), apDayOnly = formatter("M월 d일")
 func apDate(_ ts: Double?) -> String { ts.map { apDayTime.string(from: Date(timeIntervalSince1970: $0)) } ?? "날짜 모름" }
