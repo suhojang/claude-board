@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
+<meta name="generator" content="Claude Board 자율주행 보고서 틀 1">
+<title>자율주행 보고서: &lt;script&gt;alert(1)&lt;/script&gt; 실행, 줄표</title>
+<style>
+:root{color-scheme:light dark;--bg:#f6f7f8;--card:#ffffff;--fg:#1f2328;--muted:#57606a;--line:#d8dee4;--soft:#eef1f4;--code:#f1f3f5;--accent:#0b62d6;--ok:#1a7f37;--ok-bg:#dcf5e3;--fail:#c4252f;--fail-bg:#ffe9e8;--cap:#8a5a00;--cap-bg:#fff3c4;--run:#0b62d6;--run-bg:#e2edff;--chip:#e9edf1;--note:#fff6cc;--note-line:#c9a227;--frame:#8c959f;--tag:#e9edf1}
+@media (prefers-color-scheme:dark){:root{--bg:#101215;--card:#181b20;--fg:#e6edf3;--muted:#9aa4af;--line:#30363d;--soft:#20252c;--code:#1c2027;--accent:#6aa8ff;--ok:#56d37f;--ok-bg:#132a1b;--fail:#ff8078;--fail-bg:#311719;--cap:#e3a93a;--cap-bg:#2e2410;--run:#6aa8ff;--run-bg:#14243d;--chip:#232830;--note:#2d2712;--note-line:#8f7425;--frame:#76808b;--tag:#232830}}
+*{box-sizing:border-box}
+html{background:var(--bg)}
+body{margin:0 auto;max-width:960px;padding:24px 16px 40px;background:var(--bg);color:var(--fg);font:14px/1.6 -apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Malgun Gothic","Segoe UI",sans-serif;word-break:keep-all;overflow-wrap:anywhere}
+header,nav,section{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px 20px;margin:0 0 14px}
+h1{font-size:21px;line-height:1.35;margin:2px 0 4px}
+h2{font-size:16.5px;line-height:1.4;margin:0 0 4px}
+h3{font-size:12.5px;color:var(--muted);font-weight:600;margin:16px 0 4px}h3.top{margin-top:0}
+p{margin:4px 0}
+.mark{color:var(--muted);font-size:12px;margin:0}
+.meta{color:var(--muted);font-size:12.5px}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0 4px}
+.chip{display:inline-block;padding:1px 9px;border-radius:999px;font-size:12px;line-height:1.7;background:var(--chip);white-space:nowrap}
+.chip.ok{background:var(--ok-bg);color:var(--ok)}.chip.fail{background:var(--fail-bg);color:var(--fail)}
+.chip.cap{background:var(--cap-bg);color:var(--cap)}.chip.run{background:var(--run-bg);color:var(--run)}
+dl{display:grid;grid-template-columns:max-content 1fr;gap:3px 14px;margin:10px 0 0;font-size:13px}
+dt{color:var(--muted)}dd{margin:0}
+nav ol{margin:4px 0 0;padding-left:24px}nav li{margin:2px 0}
+a{color:var(--accent)}nav a{text-decoration:none}
+.headline{font-size:15px;font-weight:600;margin:10px 0 2px}
+ul{margin:4px 0;padding-left:20px}li{margin:2px 0}
+ul.risk li::marker{color:var(--cap)}
+table{border-collapse:collapse;width:100%;font-size:13px;margin:2px 0}
+th,td{border-bottom:1px solid var(--line);padding:5px 8px;text-align:left;vertical-align:top}
+th{color:var(--muted);font-weight:600}
+code,pre{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
+code{background:var(--code);border-radius:5px;padding:1px 5px}
+pre{background:var(--code);border-radius:8px;padding:10px 12px;margin:6px 0;overflow:auto;white-space:pre-wrap}
+details{margin:6px 0}summary{color:var(--muted);font-size:12.5px;cursor:pointer}
+figure{margin:8px 0 12px}figcaption{color:var(--muted);font-size:12.5px;margin:0 0 4px}
+.pic{overflow-x:auto;border:1px solid var(--line);border-radius:8px;padding:8px;background:var(--bg)}
+.pic svg{display:block;max-width:none}.pic svg.tl{width:100%;height:auto}
+svg text{font-family:-apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Malgun Gothic","Segoe UI",sans-serif}
+.sq .pb{fill:var(--soft);stroke:var(--frame)}.sq .pt{fill:var(--fg);font-size:13px}
+.sq .ll{stroke:var(--frame);stroke-dasharray:3 4}
+.sq .ml{stroke:var(--fg);stroke-width:1.3;fill:none}.sq .ml.d{stroke-dasharray:5 4}
+.sq .ah{fill:var(--fg)}.sq .mt{fill:var(--fg);font-size:12.5px}
+.sq .nb{fill:var(--note);stroke:var(--note-line)}.sq .nt{fill:var(--fg);font-size:12.5px}
+.sq .fr{fill:none;stroke:var(--frame)}.sq .fr.rc{fill:var(--soft);fill-opacity:.5;stroke-dasharray:2 3}
+.sq .ft{fill:var(--tag);stroke:var(--frame)}.sq .fl{fill:var(--fg);font-size:11.5px;font-weight:600}
+.sq .fc{fill:var(--muted);font-size:11.5px}.sq .fs{stroke:var(--frame);stroke-dasharray:4 3}
+.tl .ax{stroke:var(--line)}.tl .lb{fill:var(--muted);font-size:11px}.tl .bar{fill:var(--frame)}
+.tl .ok{fill:var(--ok)}.tl .fail{fill:var(--fail)}.tl .cap{fill:var(--cap)}.tl .run{fill:var(--run)}
+.empty{color:var(--muted)}
+footer{color:var(--muted);font-size:12px;margin:16px 4px 0}
+@media (max-width:560px){header,nav,section{padding:14px}dl{grid-template-columns:1fr}dt{margin-top:6px}}
+</style>
+</head>
+<body>
+<header>
+<p class="mark">자율주행 보고서</p>
+<h1>&lt;script&gt;alert(1)&lt;/script&gt; 실행, 줄표</h1>
+<p class="meta">zz&quot;&gt;&lt;img src=x onerror=alert(1)&gt; · 2026년 10월 30일 09:00 ~ 10월 30일 09:30 · 모델 &lt;b&gt;sonnet&lt;/b&gt; · 실행 <code>20261030-1000-zz-evil</code></p>
+<div class="chips"><span class="chip ok">끝남</span><span class="chip">1개 중 0개 통과</span><span class="chip fail">미통과 1</span></div>
+<p>끝, 났습니다exe.txt</p>
+<dl>
+<dt>걸린 시간</dt><dd>30분</dd>
+<dt>일한 시간</dt><dd>10분 (단위 시계 합, 대기·일시정지 뺌)</dd>
+<dt>비용</dt><dd>0.10 USD</dd>
+<dt>어디서</dt><dd>원래 작업 트리 · 저장소 <code>zz-evil</code></dd>
+<dt>자율주행 가지</dt><dd><code>autopilot/20261030-1000-zz-evil</code> (출발 zz-evil: live&quot;&gt;&lt;script&gt;x&lt;/script&gt;)</dd>
+<dt>하네스</dt><dd>출발 때와 다름 1곳</dd>
+<dt>움직인 기존 가지</dt><dd><code>zz-evil main&lt;i&gt;</code></dd>
+<dt>따로 보관한 변경</dt><dd>1번 (읽기 전용 자리에 남은 변경, git stash list 로 봅니다)</dd>
+</dl>
+<details><summary>바뀐 하네스 파일</summary><ul><li><code>~/workspace/zz-evil/CLAUDE.md&lt;script&gt; (바뀜)</code></li></ul></details>
+</header>
+<nav aria-label="단위 차례">
+<h3 class="top">단위</h3>
+<ol>
+<li><a href="#unit-1">&lt;img src=https://evil.example/a.png&gt; 단위</a> <span class="chip fail">미통과</span></li>
+</ol>
+<figure><figcaption>단위가 돈 때</figcaption><div class="pic"><svg class="tl" viewBox="0 0 640 54" width="640" height="54" role="img" aria-label="단위가 돈 때"><text class="lb" x="0" y="17">단위 1</text><rect class="bar fail" x="89" y="8" width="198" height="12" rx="3"/><line class="ax" x1="70" y1="30" x2="628" y2="30"/><text class="lb" x="70" y="46">09:00</text><text class="lb" x="628" y="46" text-anchor="end">09:30</text></svg></div></figure>
+</nav>
+<section id="unit-1">
+<h2>단위 1. &lt;img src=https://evil.example/a.png&gt; 단위 <span class="chip fail">미통과</span></h2>
+<p class="meta">fix&quot;x · 작업 SHOP-13&lt;b&gt; · 스토리 SHOP-12 · 가지 <code>fix/_SHOP-12/SHOP-13</code> · 일한 시간 10분 · 0.10 USD · 턴 3 · 09:01 ~ 09:11</p>
+<p class="meta">엔진: &lt;script&gt;alert(&#39;reason&#39;)&lt;/script&gt;</p>
+<p class="meta">스토리 가지에 합치지 않음</p>
+<p class="headline">&lt;script&gt;alert(&#39;x&#39;)&lt;/script&gt;, 끝, 줄표</p>
+<h3>한 일</h3>
+<ul><li>&lt;img src=https://evil.example/a.png&gt;</li><li>a, b, c</li><li>txt.exe 뒤집기</li><li>앞 줄표</li><li>끝 줄표</li><li>42</li></ul>
+<h3>시험</h3>
+<table><thead><tr><th>시험</th><th>결과</th><th>메모</th></tr></thead><tbody>
+<tr><td>&quot; onmouseover=&quot;alert(1)</td><td><span class="chip">pass&quot; onclick=&quot;x</span></td><td>&lt;iframe src=//evil.example&gt;&lt;/iframe&gt;</td></tr>
+</tbody></table>
+<h3>바꾼 것</h3>
+<ul><li>&lt;a href=javascript:alert(1)&gt;누르기&lt;/a&gt; <code>src/&#39;onfocus=&#39;x.js</code></li></ul>
+<h3>따른 결정</h3>
+<ul><li>결정, 하나 <span class="meta">(근거: &lt;link rel=stylesheet href=https://evil.example/x.css&gt;)</span></li></ul>
+<h3>흐름 그림</h3>
+<figure>
+<figcaption>&lt;script&gt;그림&lt;/script&gt;</figcaption>
+<div class="pic"><svg class="sq" viewBox="-42 0 441 226" width="441" height="226" role="img" aria-label="흐름 그림: &lt;script&gt;그림&lt;/script&gt;"><line class="ll" x1="94" y1="44" x2="94" y2="182"/><line class="ll" x1="336" y1="44" x2="336" y2="182"/><rect class="pb" x="12" y="10" width="164" height="34" rx="4"/><text class="pt" x="94" y="30" text-anchor="middle">&lt;script&gt;x&lt;/script&gt;</text><rect class="pb" x="12" y="182" width="164" height="34" rx="4"/><text class="pt" x="94" y="202" text-anchor="middle">&lt;script&gt;x&lt;/script&gt;</text><rect class="pb" x="285" y="10" width="102" height="34" rx="4"/><text class="pt" x="336" y="30" text-anchor="middle">&quot;&gt;&lt;b&gt;B&lt;/b&gt;</text><rect class="pb" x="285" y="182" width="102" height="34" rx="4"/><text class="pt" x="336" y="202" text-anchor="middle">&quot;&gt;&lt;b&gt;B&lt;/b&gt;</text><text class="mt" x="215" y="74" text-anchor="middle">&lt;img src=x onerror=alert(1)&gt;</text><line class="ml" x1="94" y1="84" x2="334" y2="84"/><polygon class="ah" points="334,84 325,80 325,89"/><rect class="nb" x="-36" y="100" width="260" height="26" rx="3"/><text class="nt" x="94" y="115" text-anchor="middle">&lt;/text&gt;&lt;script&gt;alert(1)&lt;/script&gt;</text><text class="mt" x="215" y="150" text-anchor="middle">답, 줄표</text><line class="ml d" x1="336" y1="160" x2="96" y2="160"/><polygon class="ah" points="96,160 105,156 105,165"/></svg></div>
+<details><summary>원문 보기</summary><pre>sequenceDiagram
+ participant A as &lt;script&gt;x&lt;/script&gt;
+ participant B as &quot;&gt;&lt;b&gt;B&lt;/b&gt;
+ A-&gt;&gt;B: &lt;img src=x onerror=alert(1)&gt;
+ Note over A: &lt;/text&gt;&lt;script&gt;alert(1)&lt;/script&gt;
+ B--&gt;&gt;A: 답, 줄표</pre></details>
+</figure>
+<figure>
+<figcaption>click 줄</figcaption>
+<p class="empty">그리지 못해 원문을 보입니다(1번째 줄: sequenceDiagram 으로 시작하지 않습니다).</p>
+<pre>graph TD; A--&gt;B; click A &quot;javascript:alert(1)&quot;</pre>
+</figure>
+<h3>알아 둘 위험</h3>
+<ul class="risk"><li>&lt;style&gt;body{display:none}&lt;/style&gt;</li></ul>
+<h3>사람 몫이라 미룬 것(다음 출발 카드)</h3>
+<ul><li>&lt;style&gt;body{display:none}&lt;/style&gt;: @import url(https://evil.example/x.css);</li></ul>
+<h3>새로 찾은 일(다음 출발 대기열 후보)</h3>
+<ul><li>url(https://evil.example/bg.png): &lt;object data=https://evil.example/x&gt;</li></ul>
+<h3>다음에 할 일</h3>
+<p>&lt;meta http-equiv=refresh content=0;url=https://evil.example&gt;</p>
+<h3>참고</h3>
+<ul><li>bs: https://example.com\@evil.example/</li><li>data: data:text/html,&lt;script&gt;alert(1)&lt;/script&gt;</li><li>doc: <a href="https://example.com/ok?q=1&amp;r=2" rel="noopener noreferrer">https://example.com/ok?q=1&amp;r=2</a></li><li>http: http://example.com/plain</li><li>jira: javascript:alert(1)</li><li>js2:  JaVaScRiPt:alert(1)</li><li>ssot: https://evil.example/&quot;onmouseover=&quot;alert(1)</li><li>user: https://user:pw@example.com/</li><li>ws: https://exa mple.com/</li></ul>
+<h3>판정</h3>
+<ul><li>1번째: 종료 코드 1 · 3초 · 시간 상한에서 멈춤</li></ul>
+<details><summary>마지막 판정 출력 끝부분</summary><pre>&lt;/pre&gt;&lt;script&gt;alert(1)&lt;/script&gt;, 끝</pre></details>
+<h3>허용 범위 밖이라 거부한 일</h3>
+<ul><li>Bash: &lt;b&gt;curl https://evil.example&lt;/b&gt;</li></ul>
+</section>
+<footer>Claude Board 가 결과 기록(모델이 씀)과 엔진 기록으로 그렸습니다. 모델을 부르지 않았고, 바깥 글꼴·스크립트·그림 없이 이 파일 하나로 보입니다. 단위의 통과·미통과는 엔진의 판정입니다. 모델 글의 긴 줄표는 쉼표로 바꿔 옮겼습니다. 그린 때 2026년 10월 30일 10:00 · 바탕 실행 폴더.</footer>
+</body>
+</html>

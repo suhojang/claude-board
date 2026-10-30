@@ -1,0 +1,178 @@
+{
+ "id": "20261030-1000-zz-evil",
+ "home": "/Users/toy",
+ "at": 1793322000,
+ "run": {
+  "title": "<script>alert(1)</script> 실행 — 줄표",
+  "project": "zz\"><img src=x onerror=alert(1)>",
+  "model": "<b>sonnet</b>",
+  "state": "done",
+  "reason": "끝 — 났습니다‮exe.txt",
+  "started": 1793318400,
+  "ended": 1793320200,
+  "worktree": {
+   "mode": "in_place",
+   "repos": [
+    "/Users/toy/workspace/zz-evil"
+   ],
+   "branch": "autopilot/20261030-1000-zz-evil"
+  },
+  "branches": {
+   "repos": {
+    "/Users/toy/workspace/zz-evil": {
+     "base": {
+      "branch": "live\"><script>x</script>",
+      "head": "2222222"
+     },
+     "work": "autopilot/20261030-1000-zz-evil"
+    }
+   },
+   "moved": [
+    {
+     "repo": "/Users/toy/workspace/zz-evil",
+     "branch": "main<i>",
+     "from": "a",
+     "to": "b"
+    }
+   ],
+   "stashed": [
+    {
+     "repo": "x"
+    }
+   ]
+  },
+  "harness": {
+   "files": 2,
+   "same": false,
+   "changed": [
+    {
+     "path": "/Users/toy/workspace/zz-evil/CLAUDE.md<script>",
+     "change": "changed"
+    }
+   ]
+  }
+ },
+ "queue": [
+  {
+   "id": "u1",
+   "title": "<img src=https://evil.example/a.png> 단위",
+   "kind": "fix\"x",
+   "status": "failed",
+   "story": "SHOP-12",
+   "tickets": [
+    "SHOP-13<b>"
+   ]
+  }
+ ],
+ "engines": {
+  "1": {
+   "status": "failed",
+   "reason": "<script>alert('reason')</script>",
+   "active_sec": 600,
+   "cost_usd": 0.1,
+   "turns": 3,
+   "try": 0,
+   "started": 1793318460,
+   "ended": 1793319100,
+   "branch": "fix/_SHOP-12/SHOP-13",
+   "merge": {
+    "state": "not_merged"
+   },
+   "checks": [
+    {
+     "try": 0,
+     "exit": 1,
+     "sec": 3,
+     "tail": "</pre><script>alert(1)</script> — 끝",
+     "interrupted": false,
+     "timed_out": true
+    }
+   ],
+   "denials": [
+    {
+     "tool": "Bash",
+     "what": "<b>curl https://evil.example</b>"
+    }
+   ]
+  }
+ },
+ "results": {
+  "1": {
+   "unit": {
+    "title": "<script>t</script>",
+    "kind": "fix",
+    "ref": "javascript:alert(1)"
+   },
+   "outcome": "failed\"",
+   "headline": "<script>alert('x')</script> — 끝 — 줄표",
+   "summary": [
+    "<img src=https://evil.example/a.png>",
+    "a — b — c",
+    "‮txt.exe 뒤집기",
+    "— 앞 줄표",
+    "끝 줄표 —",
+    42,
+    {
+     "x": 1
+    },
+    null
+   ],
+   "risks": [
+    "<style>body{display:none}</style>"
+   ],
+   "tests": [
+    {
+     "name": "\" onmouseover=\"alert(1)",
+     "result": "pass\" onclick=\"x",
+     "note": "<iframe src=//evil.example></iframe>"
+    }
+   ],
+   "changes": [
+    {
+     "what": "<a href=javascript:alert(1)>누르기</a>",
+     "where": "src/'onfocus='x.js"
+    }
+   ],
+   "decisions_applied": [
+    {
+     "what": "결정 — 하나",
+     "basis": "<link rel=stylesheet href=https://evil.example/x.css>"
+    }
+   ],
+   "sequence": [
+    {
+     "title": "<script>그림</script>",
+     "mermaid": "sequenceDiagram\n participant A as <script>x</script>\n participant B as \"><b>B</b>\n A->>B: <img src=x onerror=alert(1)>\n Note over A: </text><script>alert(1)</script>\n B-->>A: 답 — 줄표"
+    },
+    {
+     "title": "click 줄",
+     "mermaid": "graph TD; A-->B; click A \"javascript:alert(1)\""
+    }
+   ],
+   "next_start": [
+    {
+     "title": "<style>body{display:none}</style>",
+     "why": "@import url(https://evil.example/x.css);"
+    }
+   ],
+   "new_work": [
+    {
+     "title": "url(https://evil.example/bg.png)",
+     "why": "<object data=https://evil.example/x>"
+    }
+   ],
+   "next": "<meta http-equiv=refresh content=0;url=https://evil.example>",
+   "refs": {
+    "jira": "javascript:alert(1)",
+    "ssot": "https://evil.example/\"onmouseover=\"alert(1)",
+    "doc": "https://example.com/ok?q=1&r=2",
+    "data": "data:text/html,<script>alert(1)</script>",
+    "http": "http://example.com/plain",
+    "user": "https://user:pw@example.com/",
+    "js2": " JaVaScRiPt:alert(1)",
+    "ws": "https://exa mple.com/",
+    "bs": "https://example.com\\@evil.example/"
+   }
+  }
+ }
+}

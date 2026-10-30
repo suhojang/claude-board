@@ -1,6 +1,7 @@
 // 자율주행 규칙의 포트 — 규칙이 바깥(파일·git·HTTP·시각)을 부르는 자리(2026-10-30 2단계 5-2b 에서 처음 생김).
 // 새 폴더 만들기(NewRepo.swift)가 바깥(폴더·git)을, 기술 스택 감지(Stack.swift)가 바깥(저장소 빌드 파일)을,
-// 버전 목록(Versions.swift)이 바깥(공식 목록 받기·하루 캐시)을, 원문 지우기(Purge.swift)가 바깥(실행 폴더·지운 기록)을 부르는 자리.
+// 버전 목록(Versions.swift)이 바깥(공식 목록 받기·하루 캐시)을, 원문 지우기(Purge.swift)가 바깥(실행 폴더·지운 기록)을,
+// 보고서 그리기(Report.swift, 3단계)가 바깥(실행 폴더·기록 저장소 읽기, 보고서 파일 쓰기)을 부르는 자리.
 // 진짜 어댑터는 보드(Sources/ClaudeBoard/AutopilotTopic.swift)에, 가짜 어댑터는 Tests/AutopilotRulesTests 에만 둔다(BoardRules 의 Ports.swift 와 같은 꼴, 이슈 #9).
 // 이름의 AP 는 보드 자율주행 절의 이름 짓기를 따르고, 보드가 BoardRules 도 import 하므로 겹치지 않게 한다(BoardRules.Clock 과 APClock).
 // 포트는 역할로 나눈다(범용 파일 포트를 두면 시험이 경로 글자 시험이 된다)
@@ -66,4 +67,29 @@ public protocol APRawFiles: Sendable {
     func remove(_ path: String) -> String?
     /// 지운 기록을 쓴다(실행 id 마다 한 파일). 되면 true
     func writeRecord(_ run: String, _ data: Data) -> Bool
+}
+
+// MARK: - 보고서 그리기 (Report.swift)
+
+// 보고서를 그릴 기록 — 실행 폴더(엔진: 메모리의 run·queue 와 단위 파일, 보드: 실행 폴더 파일)나 기록 저장소(보드: 원문을 지운 실행).
+// 모두 run.json·queue.json·engine.json 과 같은 꼴의 사전으로 내놓는다(기록 저장소 어댑터가 행을 그 꼴로 바꾼다)
+public enum APReportOrigin: String, Equatable, Sendable { case folder, records }   // 기록의 바탕: 실행 폴더 · 기록 저장소
+
+public protocol APReportSource {
+    var origin: APReportOrigin { get }
+    func run() -> [String: Any]?
+    func queue() -> [[String: Any]]
+    func engine(_ n: Int) -> [String: Any]?
+    /// 모델이 쓴 결과 기록 글(보통 파일이고 크기 상한 아래일 때만, 어댑터가 본다). 없으면 nil
+    func result(_ n: Int) -> String?
+}
+
+public enum APReportFile: Equatable, Hashable, Sendable {
+    case run           // runs/<실행 id>/report.html — 실행 하나(단위 모두)
+    case unit(Int)     // runs/<실행 id>/units/<n>/report.html — 단위 하나
+}
+
+// 보고서 쓸 곳 — 되면 nil, 아니면 까닭. 링크를 따라가지 않게 쓰는 것은 어댑터 몫(엔진: 엔진 전용 폴더에 쓰고 rename)
+public protocol APReportSink {
+    func write(_ file: APReportFile, _ html: String) -> String?
 }

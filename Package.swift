@@ -43,6 +43,7 @@ let package = Package(
         .testTarget(name: "BoardRulesTests", dependencies: ["BoardRules"]),
         // 자율주행 판정 규칙 — 보드 자율주행 화면과 엔진이 함께 쓴다. 자율주행 규칙은 맨 위 rules-table/(Windows 판과 함께 쓰는 표)에 넣지 않는다
         .target(name: "AutopilotRules", swiftSettings: [.swiftLanguageMode(.v5)]),
-        .testTarget(name: "AutopilotRulesTests", dependencies: ["AutopilotRules"]),
+        // Report/ 는 보고서 틀 시험의 견본 기록과 골든 HTML — 시험이 #filePath 로 읽으므로 자원으로 싣지 않는다
+        .testTarget(name: "AutopilotRulesTests", dependencies: ["AutopilotRules"], exclude: ["Report"]),
     ]
 )
