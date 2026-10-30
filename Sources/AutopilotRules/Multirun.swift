@@ -78,6 +78,7 @@ public struct APSlotGate: Equatable, Sendable {
     public var change: APSlotChange
     public var others: Int          // 견준 다른 실행의 자리 수(hold)
     public var held: Double         // 그 자리의 아직 쓰지 않은 %p 합
+    public var byOthers = false     // 다른 실행의 자리·차례 때문에 기다림(1분마다 다시 봄 — 엔진은 상태를 그대로 두고 진행 기록도 한 번만)
 }
 
 // 새 단위를 시작해도 되는가(자리 표를 함께 봄). 1) 계정 사용률만으로 멈출 선에 닿거나 모르면 지금처럼(apStoplineWait) 기다리고 내 기다림 줄도 지운다(모두 초기화까지 기다림).
@@ -104,14 +105,14 @@ public func apSlotDecide(me: String, project: String?, unit: Int, pp: Double, pi
     if v7 + held / 100 >= l7 - 1e-9 {
         change.put.append(waitRow)
         let reason = "계정 주간 사용률 \(pct(v7)) 에 다른 실행 \(holds.count)개가 잡아 둔 자리 \(apPPText(held))%p 를 더하면 멈출 선 \(pct(l7)) 에 닿아, 새 단위를 시작하지 않고 그 단위가 끝나기를 기다립니다(1분마다 다시 봅니다)."
-        return APSlotGate(wait: APStoplineWait(until: t + apSlotRecheck, reason: reason), change: change, others: holds.count, held: held)
+        return APSlotGate(wait: APStoplineWait(until: t + apSlotRecheck, reason: reason), change: change, others: holds.count, held: held, byOthers: true)
     }
     let ahead = live.filter { $0.kind == .wait && ($0.since, $0.run) < (since, me) }
     let aheadPP = ahead.reduce(0) { $0 + $1.pp }
     if !ahead.isEmpty, v7 + (held + aheadPP) / 100 >= l7 - 1e-9 {
         change.put.append(waitRow)
         let reason = "먼저 기다리던 실행 \(ahead.count)개(자리 \(apPPText(aheadPP))%p)에 차례를 넘겨, 새 단위를 시작하지 않고 기다립니다(1분마다 다시 봅니다)."
-        return APSlotGate(wait: APStoplineWait(until: t + apSlotRecheck, reason: reason), change: change, others: holds.count, held: held)
+        return APSlotGate(wait: APStoplineWait(until: t + apSlotRecheck, reason: reason), change: change, others: holds.count, held: held, byOthers: true)
     }
     change.put.append(APSlot(run: me, project: project, unit: unit, kind: .hold, pp: pp, used: 0, pid: pid, since: t, beat: t))
     return APSlotGate(wait: nil, change: change, others: holds.count, held: held)
@@ -128,6 +129,7 @@ public struct APSlotTake: Equatable, Sendable {
     public var others: Int
     public var held: Double
     public var note: String?
+    public var byOthers = false
 }
 
 // 유스케이스: 새 단위 앞에서 자리를 잡는다. 표를 쓰지 못하면(저장소 잠김·깨짐) 6단계 전처럼 사용률만으로 정하고 까닭을 남긴다(실행은 멈추지 않음)
@@ -146,7 +148,7 @@ public func apTakeSlot(me: String, project: String?, unit: Int, pp: Double, pid:
         return APSlotTake(wait: w, others: 0, held: 0, note: "멈출 선 자리 표를 쓰지 못해(\(error)) 다른 실행의 자리 없이 사용률만으로 정했습니다.")
     }
     guard let g = gate else { return APSlotTake(wait: apStoplineWait(usage: usage, stopline: stopline, now: t, tz: tz), others: 0, held: 0, note: nil) }
-    return APSlotTake(wait: g.wait, others: g.others, held: g.held, note: nil)
+    return APSlotTake(wait: g.wait, others: g.others, held: g.held, note: nil, byOthers: g.byOthers)
 }
 
 // 유스케이스: 도는 단위의 자리를 다시 적는다(1분마다, 다시 뜬 엔진이 이어 가는 단위도 이것으로 자리를 되찾는다). 죽은 엔진의 자리도 함께 지운다
@@ -273,3 +275,14 @@ public func apClaimBusyText(_ r: APClaimResult, home: String) -> String? {
     let shown = path.hasPrefix(home + "/") ? "~/" + path.dropFirst(home.count + 1) : path
     return "이 경로에서 자율주행이 돌고 있습니다(\(other), \(shown)). 그 실행이 끝난 뒤에 출발합니다"
 }
+
+// MARK: - ④ 여러 엔진이 같은 기록 저장소를 쓸 때
+
+// 잠겨 있어(SQLITE_BUSY·LOCKED) 실패한 걸음을 다시 할 때 쉬는 초 — attempt 는 1 부터. 여덟 번까지(0.1·0.2·0.4·0.8 뒤로는 1초), 그 뒤는 nil(포기).
+// 엔진은 busy_timeout 5초로 한 번 더 기다리므로 다른 엔진이 오래 잡아도 몇십 초까지 다시 한다. 열기의 journal_mode·판 읽기와 쓰기 transaction 이 함께 쓴다
+public let apBusyRetries = 8
+public func apBusyRetryDelay(_ attempt: Int) -> Double? {
+    guard attempt >= 1, attempt <= apBusyRetries else { return nil }
+    return min(0.1 * Double(1 << min(attempt - 1, 4)), 1.0)
+}
+

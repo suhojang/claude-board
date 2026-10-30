@@ -175,6 +175,7 @@ private let aliveRows: [AliveRow] = [
         #expect(g.change.drop == r.drop)
         if let p = g.change.put.first { #expect(p.unit == 3 && p.pp == 5 && p.beat == T && p.pid == 7) }
         #expect(!(g.wait?.reason.contains("—") ?? false))
+        #expect(g.byOthers == (r.want.hasPrefix("wait:60:")))   // 다른 실행 때문에 기다릴 때만(1분마다 다시 봄)
     }
 
     @Test("두 엔진이 같은 때 자리를 잡으면 하나만 시작하고 다른 하나는 기다린다(잠금 하나)")
@@ -214,6 +215,12 @@ private let aliveRows: [AliveRow] = [
         #expect(throws: Never.self) { try apReleaseSlot(me: "b", book: book) }
         #expect(!take("b", T + 70))                     // 이번엔 a 가 먼저 기다렸다
         #expect(take("a", T + 62 + 60))
+    }
+
+    @Test("잠긴 저장소를 다시 하는 간격")
+    func 다시하기() {
+        #expect((1...apBusyRetries).compactMap(apBusyRetryDelay) == [0.1, 0.2, 0.4, 0.8, 1, 1, 1, 1])
+        #expect(apBusyRetryDelay(0) == nil && apBusyRetryDelay(apBusyRetries + 1) == nil)
     }
 
     @Test("자리 다시 적기·풀기·표를 못 쓰면 사용률만으로")
