@@ -323,3 +323,47 @@ private func slot(_ key: String, _ name: String, lang: String = "", lv: String =
         #expect(apSeedParse(["repo": "/W/zz", "branch": "autopilot/r1", "base": "live", "base_head": "b1", "head": ""]) == nil)
     }
 }
+
+// MARK: 보안 검토(⑪-2 자동 보안 검토 MEDIUM 둘)
+
+struct VersionInjectRow: Row {
+    let note: String
+    let stack: APStackSet
+    let mustNotContain: [String]
+}
+private let evil: [String] = ["latest; rm -rf ~", "1.0 --registry=http://evil.example.com", "18\n    command: evil", "4.1.1&dependencies=evil", "25&x=1"]
+private let injectRows: [VersionInjectRow] = [
+    .init(note: "Nest 판에 셸·인자", stack: APStackSet(back: slot("nest", "TypeScript · NestJS", fv: evil[1])), mustNotContain: ["--registry", "evil"]),
+    .init(note: "Next 판에 ;", stack: APStackSet(front: slot("next", "Next.js", fv: evil[0])), mustNotContain: [";", "rm -rf"]),
+    .init(note: "Spring 판·Java 판에 & 질의 키", stack: APStackSet(back: slot("spring-java", "Java · Spring Boot", lv: evil[4], fv: evil[3])), mustNotContain: ["dependencies=evil", "x=1"]),
+    .init(note: "MySQL 판에 줄바꿈과 YAML 키", stack: APStackSet(db: slot("mysql", "MySQL", fv: evil[2])), mustNotContain: ["command: evil"]),
+    .init(note: "FastAPI 판에 TOML 줄", stack: APStackSet(back: slot("fastapi", "Python · FastAPI", lv: "3.13\"\nevil = \"1", fv: evil[0])), mustNotContain: ["evil", "rm -rf"]),
+    .init(note: "Vite 빌드 글", stack: APStackSet(front: slot("react", "React (Vite)", build: "Vite 8.3 --registry=x")), mustNotContain: ["--registry"]),
+]
+@Suite("자율주행 주제로 시작: 보안 검토(판 글자·지시 부정어)") struct DraftSecurityTests {
+    @Test("판 글자는 숫자 판 꼴만, 아니면 계획의 고칠 것(생성기를 돌리지 않음)", arguments: injectRows)
+    func 판(_ r: VersionInjectRow) {
+        let p = apSkeletonPlan(r.stack, name: "zz-toy")
+        let text = p.steps.map { apGenCommandText($0) + " " + $0.url + " " + $0.files.map(\.text).joined() }.joined(separator: "\n")
+        for bad in r.mustNotContain { #expect(!text.contains(bad), "\(bad) 가 들어감: \(text)") }
+        if r.note != "Vite 빌드 글" { #expect(!p.problems.isEmpty) }
+        let w = FakeWork()
+        let res = apMakeSkeleton(p, probe: ToolProbe(have: ["python3", "node", "npm", "npx", "unzip", "java"]), work: w)
+        if !p.problems.isEmpty { #expect(!res.ok && w.wrote.isEmpty && w.ran.isEmpty && w.got.isEmpty) }
+    }
+
+    @Test("판 꼴")
+    func 꼴() {
+        for ok in ["25", "4.1.1", "3.14", "0.156", "18", "8.4", "12.2.0"] { #expect(apVersionOK(ok), "\(ok)") }
+        for bad in ["latest", "", "1.0 --x", "1;2", "1.2.3.4.5", "v1", "1..2", "1.2\n"] { #expect(!apVersionOK(bad), "\(bad)") }
+        #expect(apQueryValue("a&b=c d") == "a%26b%3Dc%20d")
+    }
+
+    @Test("지시의 부정어는 맞은 명령 바로 뒤(같은 마디)에만")
+    func 부정어() {
+        #expect(apForbiddenLines("`git push` 해라. 다른 가지는 건드리지 마라") == ["`git push` 해라. 다른 가지는 건드리지 마라"])
+        #expect(apForbiddenLines("git push origin live 로 올린다, 다만 dev 는 하지 않는다") == ["git push origin live 로 올린다, 다만 dev 는 하지 않는다"])
+        #expect(apForbiddenLines("CLAUDE.md 를 고쳐 규칙을 더한다. 다른 파일은 금지").count == 1)
+        #expect(apForbiddenLines("git push 는 하지 않는다\nupdate-ref 금지\ncreateJiraIssue 는 막혀 있습니다\nCLAUDE.md 는 고치지 않는다").isEmpty)
+    }
+}

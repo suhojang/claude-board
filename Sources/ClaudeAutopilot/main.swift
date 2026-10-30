@@ -5979,32 +5979,53 @@ func runWithEnv(_ argv: [String], cwd: String, env: [String: String], timeout: D
     return (p.terminationStatus, String(decoding: data.suffix(8000), as: UTF8.self))
 }
 
-// 뼈대를 쓰는 자리(임시 작업 트리) — 쓰기는 그 안의 상대 경로만, 링크를 따라 밖으로 나가지 않게 부모의 진짜 경로를 본다
+// root 안의 폴더 rel 을 링크 없이 연다(⑪-2 자동 보안 검토 MEDIUM 4): 만들기 전에 이미 있는 구성 요소마다 lstat 해 링크·폴더 아님이면 거절하고,
+// 없는 것만 하나씩 mkdir(부모를 따라가지 않음) 한 뒤 다시 lstat 하고, 끝 폴더의 진짜 경로가 root 의 진짜 경로 아래인지 본다. 되면 그 경로
+func safeDirIn(_ root: String, _ rel: String) -> String? {
+    guard rel.isEmpty || apScenarioPathOK(rel) else { return nil }
+    let rootReal = realPathLoose(root)
+    var st = stat()
+    guard lstat(root, &st) == 0, st.st_mode & S_IFMT == S_IFDIR else { return nil }
+    var cur = root
+    for comp in rel.split(separator: "/").map(String.init) {
+        cur += "/" + comp
+        if lstat(cur, &st) != 0 {
+            guard mkdir(cur, 0o755) == 0, lstat(cur, &st) == 0 else { return nil }
+        }
+        guard st.st_mode & S_IFMT == S_IFDIR else { return nil }   // 링크(S_IFLNK)·파일이면 거절
+    }
+    let real = realPathLoose(cur)
+    return real == rootReal || real.hasPrefix(rootReal + "/") ? cur : nil
+}
+
+// 뼈대를 쓰는 자리(임시 작업 트리) — 쓰기는 그 안의 상대 경로만, 링크를 따라 밖으로 나가지 않게(폴더는 safeDirIn, 파일은 O_NOFOLLOW)
 struct EngineSkeletonWork: APSkeletonWork {
     let root: String
     let env: [String: String]
-    private func inside(_ rel: String) -> String? {
-        guard rel.isEmpty || apScenarioPathOK(rel) else { return nil }
-        return rel.isEmpty ? root : root + "/" + rel
-    }
+    private func inside(_ rel: String) -> String? { safeDirIn(root, rel) }
     func write(_ relative: String, _ text: String) -> Bool {
-        guard let p = inside(relative) else { return false }
-        let parent = (p as NSString).deletingLastPathComponent
-        try? fm.createDirectory(atPath: parent, withIntermediateDirectories: true)
-        guard realPathLoose(parent) == realPathLoose(root) || realPathLoose(parent).hasPrefix(realPathLoose(root) + "/"), !isLink(p) else { return false }
-        return fm.createFile(atPath: p, contents: Data(text.utf8), attributes: [.posixPermissions: 0o644])
+        guard apScenarioPathOK(relative) else { return false }
+        let parentRel = (relative as NSString).deletingLastPathComponent
+        guard let parent = safeDirIn(root, parentRel) else { return false }
+        let p = parent + "/" + (relative as NSString).lastPathComponent
+        let fd = open(p, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0o644)   // 그 자리가 링크면 열지 않는다
+        guard fd >= 0 else { return false }
+        defer { close(fd) }
+        var st = stat()
+        guard fstat(fd, &st) == 0, st.st_mode & S_IFMT == S_IFREG else { return false }
+        let d = Data(text.utf8)
+        return d.withUnsafeBytes { Darwin.write(fd, $0.baseAddress, $0.count) } == d.count
     }
     func run(_ argv: [String], in relative: String) -> (code: Int32, out: String) {
-        guard let d = inside(relative) else { return (-1, "폴더 꼴이 틀렸습니다") }
+        guard let d = inside(relative) else { return (-1, "폴더 꼴이 틀렸거나 링크가 있습니다") }
         return runWithEnv(argv, cwd: d, env: env)
     }
     func download(_ url: String, into relative: String) -> String? {
-        guard url.hasPrefix("https://start.spring.io/starter.zip?"), let d = inside(relative) else { return "허용한 생성기 주소가 아닙니다" }
+        guard url.hasPrefix("https://start.spring.io/starter.zip?"), let d = inside(relative) else { return "허용한 생성기 주소가 아니거나 풀 자리에 링크가 있습니다" }
         let zip = NSTemporaryDirectory() + "claude-board-starter-\(getpid()).zip"
         defer { unlink(zip) }
         let c = runTool("/usr/bin/curl", ["-fsS", "--max-time", "120", "--proto", "=https", "-o", zip, url], timeout: 150, withErr: true)
         guard c.code == 0 else { return "받지 못했습니다(curl \(c.code)): \(firstLine(c.out))" }
-        try? fm.createDirectory(atPath: d, withIntermediateDirectories: true)
         let u = runTool("/usr/bin/unzip", ["-q", "-o", zip, "-d", d], timeout: 120, withErr: true)
         return u.code == 0 ? nil : "풀지 못했습니다(unzip \(u.code)): \(firstLine(u.out))"
     }
@@ -6101,7 +6122,7 @@ func dropSeed(_ x: TopicPrep) -> String {
     let parent = (wt as NSString).deletingLastPathComponent
     if (try? fm.contentsOfDirectory(atPath: parent))?.isEmpty == true { try? fm.removeItem(atPath: parent) }
     guard let h = headOf(x.repo, "refs/heads/" + work) else { return "가지가 없습니다" }
-    guard let s = sd, s.head == h || (x.run["seed_pending"] as? String) == h else { return "가지 \(work) 가 준비 기록과 달라 남깁니다" }
+    guard sd?.head == h || (x.run["seed_pending"] as? String) == h else { return "가지 \(work) 가 준비 기록과 달라 남깁니다" }   // 만들다 끊긴 가지는 seed_pending(출발 가지 머리)과 같을 때
     guard !branchUsedElsewhere(x.repo, work, except: wt) else { return "가지 \(work) 가 작업 트리에 걸려 있어 남깁니다" }
     let d = gitRun(["branch", "-D", work], cwd: x.repo)
     return d.code == 0 ? "가지 \(work) 를 지웠습니다" : "가지를 지우지 못했습니다: \(firstLine(d.out))"
@@ -6165,23 +6186,36 @@ func cmdSeed(_ args: [String]) {
         let points = (readJSON(x.dir + "/harness-points.json") as? [[String: Any]] ?? []).compactMap(harnessPointOf)
         let c = apDraftCheck(files: EngineDraftFiles(root: x.dir + "/draft"), harness: points, firstUnit: seed["first_unit"] as? Bool ?? false)
         guard c.ok else { reply(["ok": false, "problems": ["초안 결과가 기계 검사를 지나지 않았습니다"] + c.problems.prefix(5)], false) }
+        // 시나리오는 파일 시스템을 거치지 않고 git 색인에만 넣는다(⑪-2 자동 보안 검토 MEDIUM 3: 출발 가지에 .autopilot 이 저장소 밖을 가리키는 링크로
+        // 커밋돼 있으면 작업 트리에 지우고 쓰는 길이 링크를 따라 밖을 지우고 썼다). 검사한 글자를 엔진 전용 임시 파일에 쓰고 hash-object(필터 없음),
+        // update-index --cacheinfo 로 넣는다(경로가 링크 너머면 git 이 거절한다). git 자리는 임시 작업 트리 것으로 박는다(GIT_DIR·GIT_WORK_TREE)
         let files = EngineDraftFiles(root: x.dir + "/draft")
-        try? fm.removeItem(atPath: wt + "/" + apScenarioRoot)
+        guard let gd = gitOut(["rev-parse", "--absolute-git-dir"], cwd: wt) else { reply(["ok": false, "problems": ["임시 작업 트리의 git 자리를 읽지 못했습니다"]], false) }
+        let pin = ["GIT_DIR=" + gd, "GIT_WORK_TREE=" + wt]
+        let tmpDir = privateRoot(dev: x.dev) + "/draft/" + x.id
+        mkdirPrivate(privateRoot(dev: x.dev)); mkdirPrivate(privateRoot(dev: x.dev) + "/draft"); mkdirPrivate(tmpDir)
         var n = 0
-        for u in c.units {
+        for u in c.units where !u.scenarios.isEmpty {
+            let rm = gitRun(["rm", "-r", "-q", "--cached", "--ignore-unmatch", "--", apScenarioRoot + "/" + u.id], cwd: wt, env: pin)
+            guard rm.code == 0 else { reply(["ok": false, "problems": ["앞 시나리오(\(apScenarioRoot)/\(u.id))를 색인에서 빼지 못했습니다: \(firstLine(rm.out))"]], false) }
             for sc in u.scenarios {
                 guard let data = files.read("scenarios/\(u.id)/\(sc.file)") else { reply(["ok": false, "problems": ["시나리오 scenarios/\(u.id)/\(sc.file) 를 읽지 못했습니다"]], false) }
+                let tmp = tmpDir + "/blob"
+                unlink(tmp)
+                guard writePrivate(tmp, data) else { reply(["ok": false, "problems": ["시나리오 임시 파일을 쓰지 못했습니다"]], false) }
+                let h = gitRun(["hash-object", "-w", "--no-filters", "--", tmp], cwd: wt, env: pin)
+                unlink(tmp)
+                guard h.code == 0, h.out.range(of: "^[0-9a-f]{40,64}$", options: .regularExpression) != nil else { reply(["ok": false, "problems": ["시나리오를 git 객체로 넣지 못했습니다: \(firstLine(h.out))"]], false) }
                 let rel = apScenarioPath(unit: u.id, file: sc.file)
-                try? fm.createDirectory(atPath: (wt + "/" + rel as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
-                guard fm.createFile(atPath: wt + "/" + rel, contents: data, attributes: [.posixPermissions: 0o755]) else { reply(["ok": false, "problems": ["\(rel) 를 쓰지 못했습니다"]], false) }
+                let ui = gitRun(["update-index", "--add", "--cacheinfo", "100755,\(h.out),\(rel)"], cwd: wt, env: pin)
+                guard ui.code == 0 else { reply(["ok": false, "problems": ["\(rel) 를 색인에 넣지 못했습니다(출발 가지의 그 자리가 링크·파일이면 넣지 않습니다): \(firstLine(ui.out))"]], false) }
                 n += 1
             }
         }
         var head = sd.head
         if n > 0 {
-            _ = gitRun(["add", "-A", "--", apScenarioRoot], cwd: wt)
-            let cm = gitRun(["commit", "-q", "--no-verify", "-m", apScenarioCommitMessage(units: c.units.filter { !$0.scenarios.isEmpty }.count, scenarios: n)], cwd: wt, commit: true)
-            guard cm.code == 0, let h = headOf(wt, "HEAD") else { reply(["ok": false, "problems": ["판정 시나리오를 커밋하지 못했습니다: \(firstLine(cm.out))"]], false) }
+            let cm = gitRun(["commit", "-q", "--no-verify", "-m", apScenarioCommitMessage(units: c.units.filter { !$0.scenarios.isEmpty }.count, scenarios: n)], cwd: wt, commit: true, env: pin)
+            guard cm.code == 0, let h = headOf(wt, "HEAD", env: pin) else { reply(["ok": false, "problems": ["판정 시나리오를 커밋하지 못했습니다: \(firstLine(cm.out))"]], false) }
             head = h
         }
         _ = gitRun(["worktree", "remove", "--force", wt], cwd: x.repo); try? fm.removeItem(atPath: wt)

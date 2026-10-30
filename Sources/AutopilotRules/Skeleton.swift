@@ -40,6 +40,7 @@ public struct APSkeletonPlan: Equatable, Sendable {
     public var steps: [APGenStep] = []
     public var firstUnit = false        // 직접 입력 칸이 있어 첫 단위 "프로젝트 구성"을 모델이 함
     public var notes: [String] = []     // 쉬운 말(준비 줄)
+    public var problems: [String] = []  // 판 글자 꼴이 틀림(⑪-2 보안 검토) — 있으면 생성기를 돌리지 않는다
     public init() {}
 }
 
@@ -50,11 +51,24 @@ public func apPackagePart(_ name: String) -> String {
     return s
 }
 
-private func ver(_ s: APStackSlot, _ fallback: String) -> String { s.frameworkVersion.isEmpty ? fallback : s.frameworkVersion }
-// React 칸의 빌드 도구 글 "Vite 8.3" 에서 판(없으면 latest)
+// 판 글자 꼴(⑪-2 자동 보안 검토 MEDIUM 1): 숫자 판(1~4 조각, 조각마다 1~6자리)만. 판은 생성기 명령 인자(npx 의 패키지 지정 — "npm:<다른 패키지>" 같은 별칭이
+// 들어가면 다른 패키지를 받는다)·Spring Initializr 주소의 질의 값·보드 틀(compose YAML·pyproject TOML)에 들어가므로, 꼴이 틀리면 기본값으로 바꾸지 않고
+// 계획의 고칠 것으로 둔다(생성기를 돌리지 않음). 판은 공식 버전 목록·앱에 든 목록·주제 글 낱말 대조·사람이 고른 값에서 온다(초안 세션 결과는 닿지 않는다)
+public func apVersionOK(_ v: String) -> Bool { v.range(of: "^[0-9]{1,6}(\\.[0-9]{1,6}){0,3}$", options: .regularExpression) != nil }
+// 주소 질의 값 — 영문·숫자·-._~ 밖은 모두 퍼센트 인코딩(& = 빈칸 등이 다른 질의 키가 되지 않게)
+public func apQueryValue(_ v: String) -> String {
+    v.addingPercentEncoding(withAllowedCharacters: CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")) ?? ""
+}
+private func ver(_ v: String, _ fallback: String, _ what: String, _ p: inout APSkeletonPlan) -> String {
+    if v.isEmpty { return fallback }
+    if apVersionOK(v) { return v }
+    p.problems.append("\(what) 판 글자 꼴이 틀려 생성기를 돌리지 않습니다(숫자 판만 받습니다): \(String(v.prefix(40)).debugDescription)")
+    return fallback
+}
+// React 칸의 빌드 도구 글 "Vite 8.3" 에서 판(없거나 꼴이 틀리면 latest)
 private func viteVersion(_ s: APStackSlot) -> String {
     let p = s.build.split(separator: " ")
-    return p.count == 2 && p[0] == "Vite" && p[1].range(of: "^[0-9][0-9.]*$", options: .regularExpression) != nil ? String(p[1]) : "latest"
+    return p.count == 2 && p[0] == "Vite" && apVersionOK(String(p[1])) ? String(p[1]) : "latest"
 }
 
 // 스택 → 생성기 계획(설계 2장 "기술 스택"의 뼈대). 프론트와 백엔드를 함께 고르면 frontend/·backend/ 두 폴더, 하나면 뿌리.
@@ -68,24 +82,24 @@ public func apSkeletonPlan(_ st: APStackSet, name: String) -> APSkeletonPlan {
         switch b.key {
         case "fastapi":
             var s = APGenStep(slot: "back", label: "FastAPI 틀(보드에 든 것, 공식 생성기가 없음)", folder: folder, kind: .template)
-            let py = b.langVersion.isEmpty ? "3.13" : b.langVersion
-            s.files = apFastAPITemplate(name: name, python: py, fastapi: ver(b, "0.115"))
+            let py = ver(b.langVersion, "3.13", "Python", &p)
+            s.files = apFastAPITemplate(name: name, python: py, fastapi: ver(b.frameworkVersion, "0.115", "FastAPI", &p))
             s.tools = [APGenTool("python3", "Python(python3)")]
             p.steps.append(s)
         case "spring-java", "spring-kotlin":
             var s = APGenStep(slot: "back", label: "Spring Initializr(start.spring.io)", folder: folder, kind: .download)
             let type = ["Gradle Kotlin": "gradle-project-kotlin", "Maven": "maven-project"][b.build] ?? "gradle-project"
             let lang = b.key == "spring-kotlin" ? "kotlin" : "java"
-            let java = b.key == "spring-kotlin" ? "" : b.langVersion
-            var q = ["type=\(type)", "language=\(lang)", "bootVersion=\(ver(b, "4.1.1"))", "groupId=com.example", "artifactId=\(pkg)", "name=\(pkg)",
-                     "packageName=com.example.\(pkg)", "dependencies=web"]
-            if !java.isEmpty { q.insert("javaVersion=\(java)", at: 3) }
-            s.url = "https://start.spring.io/starter.zip?" + q.joined(separator: "&")
+            let java = b.key == "spring-kotlin" ? "" : ver(b.langVersion, "", "Java", &p)
+            var q: [(String, String)] = [("type", type), ("language", lang), ("bootVersion", ver(b.frameworkVersion, "4.1.1", "Spring Boot", &p)), ("groupId", "com.example"),
+                                         ("artifactId", pkg), ("name", pkg), ("packageName", "com.example." + pkg), ("dependencies", "web")]
+            if !java.isEmpty { q.insert(("javaVersion", java), at: 3) }
+            s.url = "https://start.spring.io/starter.zip?" + q.map { "\($0.0)=\(apQueryValue($0.1))" }.joined(separator: "&")
             s.tools = [APGenTool("unzip", "unzip"), APGenTool("java", "JDK(java)")]
             p.steps.append(s)
         case "nest":
             var s = APGenStep(slot: "back", label: "Nest CLI(nest new)", folder: folder, kind: .command)
-            s.argv = ["npx", "--yes", "@nestjs/cli@\(ver(b, "latest"))", "new", folder.isEmpty ? pkg : folder, "--package-manager", "npm", "--skip-git"]
+            s.argv = ["npx", "--yes", "@nestjs/cli@\(ver(b.frameworkVersion, "latest", "NestJS", &p))", "new", folder.isEmpty ? pkg : folder, "--package-manager", "npm", "--skip-git"]
             if folder.isEmpty { s.argv[4] = "." }
             s.tools = [APGenTool("node", "Node.js(node)"), APGenTool("npx", "npm(npx)")]
             p.steps.append(s)
@@ -106,7 +120,7 @@ public func apSkeletonPlan(_ st: APStackSet, name: String) -> APSkeletonPlan {
             p.steps.append(s)
         case "next":
             s.label = "create-next-app"
-            s.argv = ["npx", "--yes", "create-next-app@\(ver(f, "latest"))", dir, "--ts", "--app", "--use-npm", "--yes", "--disable-git"]
+            s.argv = ["npx", "--yes", "create-next-app@\(ver(f.frameworkVersion, "latest", "Next.js", &p))", dir, "--ts", "--app", "--use-npm", "--yes", "--disable-git"]
             s.tools = [APGenTool("node", "Node.js(node)"), APGenTool("npx", "npm(npx)")]
             p.steps.append(s)
         case "vue":
@@ -122,7 +136,7 @@ public func apSkeletonPlan(_ st: APStackSet, name: String) -> APSkeletonPlan {
         switch d.key {
         case "postgresql", "mysql":
             var s = APGenStep(slot: "db", label: "docker compose 틀(로컬 시험 DB)", folder: "", kind: .template)
-            s.files = [apComposeTemplate(d)]
+            s.files = [apComposeTemplate(d, version: ver(d.frameworkVersion.isEmpty ? d.langVersion : d.frameworkVersion, "", d.name, &p))]
             p.steps.append(s)
         default:
             p.firstUnit = true
@@ -160,7 +174,7 @@ public func apFastAPITemplate(name: String, python: String, fastapi: String) -> 
         """),
         APGenFile(".gitignore", "__pycache__/\n*.pyc\n.venv/\n.pytest_cache/\n"),
         APGenFile("README.md", """
-        # \(name)
+        # \(String(name.filter { $0.isLetter || $0.isNumber || "._-".contains($0) }.prefix(60)))
 
         Claude Board 자율주행이 주제로 시작에서 만든 FastAPI 뼈대입니다(보드에 든 틀, 바깥 요청 없음).
         띄우기: `python3 -m venv .venv && .venv/bin/pip install -e . && .venv/bin/uvicorn app.main:app`
@@ -169,8 +183,7 @@ public func apFastAPITemplate(name: String, python: String, fastapi: String) -> 
     ]
 }
 
-public func apComposeTemplate(_ d: APStackSlot) -> APGenFile {
-    let v = d.frameworkVersion.isEmpty ? d.langVersion : d.frameworkVersion
+public func apComposeTemplate(_ d: APStackSlot, version v: String) -> APGenFile {
     if d.key == "mysql" {
         return APGenFile("compose.yaml", """
         # 로컬 시험 DB(Claude Board 자율주행 뼈대). 운영 DB 연결은 범위 밖입니다
@@ -239,6 +252,7 @@ public func apSkeletonMessage(_ p: APSkeletonPlan) -> String {
 // allowExternal 이 거짓이면 바깥 요청 걸음을 돌리지 않고 실패로 둔다(시험: 레지스트리를 두드리지 않음)
 public func apMakeSkeleton(_ p: APSkeletonPlan, probe: APToolProbe, work: APSkeletonWork, allowExternal: Bool = true) -> APSkeletonResult {
     var r = APSkeletonResult()
+    guard p.problems.isEmpty else { r.problems = p.problems; return r }
     r.problems = apSkeletonToolProblems(p, probe: probe)
     guard r.problems.isEmpty else { return r }
     for s in p.steps {

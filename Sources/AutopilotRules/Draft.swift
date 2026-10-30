@@ -84,7 +84,7 @@ public let apInstructionGuide = """
 자율주행 지시(autopilot.md) 쓰는 법
 ① 첫 줄은 "\(apInstructionHeadLine)" 그대로 쓰고, 다음 줄에 그 이유를 씁니다: 자율주행 중에는 대답할 사람이 없어 그 자리에서 일이 멈추고, 사람의 답은 출발 카드로 이미 받았습니다.
 ② 확인 지점마다 한 항목: 파일:줄(예: CLAUDE.md:12), 원래 글, 자율주행에서 대신 할 일, 그 일을 정한 출발 카드 답(카드 id).
-③ 하지 말 것만 쓰지 않고 대신 할 일을 씁니다(예: "묻지 않고 그 부분만 보류해 next_start 에 남긴다").
+③ 하지 말 것만 쓰지 않고 대신 할 일을 씁니다(예: "묻지 않고 그 부분만 보류해 next_start 에 남긴다"). 하지 않을 명령은 "<명령> 는 하지 않는다" 꼴로 명령 바로 뒤에 씁니다(기계 검사가 그 꼴만 받습니다).
 ④ 규칙마다 짧은 이유를 붙입니다. 대문자·"절대"·"반드시" 같은 강조는 쓰지 않습니다.
 ⑤ 목록에 없는 확인 지점을 만나면 그 부분만 보류하고 이어 간다는 줄을 둡니다.
 ⑥ 끝내기 전에 위 자리마다 다시 보게 하는 줄로 끝냅니다.
@@ -310,16 +310,25 @@ public func apParseSpec(_ text: String) -> (counts: APSpecCounts, problems: [Str
     return (c, problems)
 }
 
-// 다른 가지 맞추기·push·바깥 쓰기를 시키는 꼴(단위 프롬프트·판정·지시 글에서). 그 줄에 하지 않는다는 말이 있으면 지난다
+// 다른 가지 맞추기·push·바깥 쓰기를 시키는 꼴(단위 프롬프트·판정·지시 글에서). 하지 않는다는 말은 맞은 꼴 바로 뒤, 같은 마디(문장 끝 . ! ? ; 앞)의
+// 16자 안에 있을 때만 받는다(⑪-2 자동 보안 검토 MEDIUM 2: 전에는 그 줄 어디든 부정어가 있으면 지나 "git push 해라. 다른 가지는 건드리지 않는다" 가 지났다).
+// 한 줄에 맞은 꼴이 여럿이면 모두 그래야 한다. 하지 않을 일은 "<명령> 는 하지 않는다" 꼴로 쓰게 한다(지시 쓰는 법)
 private let forbiddenShape = try! NSRegularExpression(pattern: "git\\s+(-C\\s+\\S+\\s+)?push|branch\\s+-[fDd]\\b|update-ref|createJiraIssue|editJiraIssue|addCommentToJiraIssue|transitionJiraIssue|create(Confluence)?Page|updateConfluence|mcp__", options: [.caseInsensitive])
-private let harnessEditShape = try! NSRegularExpression(pattern: "(CLAUDE\\.md|\\.claude/|\\.mcp\\.json)[^\\n]{0,30}(고치|고쳐|바꾸|바꿔|수정|편집|지우|지워|추가하|더하|더한)", options: [])
-private let negation = try! NSRegularExpression(pattern: "않|말고|금지|하지 ?마|막혀|막힌|보류|없습니다|없다|못 ", options: [])
+private let harnessEditShape = try! NSRegularExpression(pattern: "(CLAUDE\\.md|\\.claude/|\\.mcp\\.json)[^\\n]{0,30}?(고치|고쳐|바꾸|바꿔|수정|편집|지우|지워|추가하|더하|더한)", options: [])
+private let negation = try! NSRegularExpression(pattern: "^[^.!?;。]{0,16}?(않|말고|금지|하지 ?마|막혀|막힌|보류|없습니다|없다|못 )", options: [])
+public let apNegationWindow = 16
 public func apForbiddenLines(_ text: String) -> [String] {
     text.components(separatedBy: "\n").compactMap { raw in
         let l = raw.trimmingCharacters(in: .whitespaces)
-        let r = NSRange(l.startIndex..., in: l)
-        guard forbiddenShape.firstMatch(in: l, range: r) != nil || harnessEditShape.firstMatch(in: l, range: r) != nil else { return nil }
-        return negation.firstMatch(in: l, range: r) == nil ? String(l.prefix(160)) : nil
+        let ns = l as NSString
+        let hits = (forbiddenShape.matches(in: l, range: NSRange(location: 0, length: ns.length))
+                    + harnessEditShape.matches(in: l, range: NSRange(location: 0, length: ns.length)))
+        guard !hits.isEmpty else { return nil }
+        let bad = hits.contains { m in
+            let after = ns.substring(from: m.range.location + m.range.length)
+            return negation.firstMatch(in: after, range: NSRange(location: 0, length: (after as NSString).length)) == nil
+        }
+        return bad ? String(l.prefix(160)) : nil
     }
 }
 
