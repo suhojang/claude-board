@@ -257,8 +257,8 @@ private let caseFiles: [String: String] = ["findings.json": findingsJSON, "cases
         let (fs, problems) = apCriticParse(FakeOut(files: caseFiles), units: criticUnits, targets: criticTargets)
         #expect(fs.map(\.id) == ["f1", "f2", "f3", "f4", "f5"])
         #expect(fs.map(\.kind) == [.counterexample, .unverifiable, .interpretation, .unverifiable, .unverifiable])
-        #expect(fs[3].why.contains("판정·하네스 자리라"))
-        #expect(fs[4].why.contains("판정이 보는 자리(app/todos.py)가 아닌 파일"))
+        #expect(fs[3].refusal?.contains("판정·하네스 자리라") == true && fs[3].why == "시나리오를 바꾸면 통과합니다")
+        #expect(fs[4].refusal?.contains("판정이 보는 자리(app/todos.py)가 아닌 파일") == true)
         #expect(fs[2].recommended == "works")
         #expect(problems.count == 4)
         #expect(apCriticParse(FakeOut(files: [:]), units: criticUnits, targets: criticTargets).problems == ["결과 파일 findings.json 이 없습니다"])
@@ -272,6 +272,7 @@ private let caseFiles: [String: String] = ["findings.json": findingsJSON, "cases
         let weak = FakeTree(steps: toySteps, verdict: weakVerdict)
         let r = apVerifyFindings(fs, views: views, baseline: ["u1": failedBaseline(toySteps)], read: read, ws: weak)
         #expect(r.map { apVerdictKey($0.verdict) } == ["confirmed", "unverified", "reading", "unverified", "unverified"])
+        #expect(r[3].verdict == .unverified(fs[3].refusal ?? "") && r[1].verdict == .unverified("비판 세션이 반례를 만들지 못했다고 적었습니다"))
         #expect(r[0].step == "scenario-2")
         #expect(weak.files == [:])
         let strong = FakeTree(steps: toySteps, verdict: strongVerdict)
@@ -500,7 +501,7 @@ private let caseFiles: [String: String] = ["findings.json": findingsJSON, "cases
         let files = FakeOut(files: ["findings.json": "[{\"id\":\"f1\",\"unit\":\"u1\",\"judge\":\"check\",\"kind\":\"counterexample\",\"why\":\"시험을 건너뜀\",\"files\":[\"conftest.py\"]}]",
                                     "cases/f1/conftest.py": "collect_ignore_glob = ['*']\n"])
         let (fs, _) = apCriticParse(files, units: u, targets: ["u1": []])
-        #expect(fs.map(\.kind) == [.unverifiable] && fs[0].why.contains("conftest.py"))
+        #expect(fs.map(\.kind) == [.unverifiable] && fs[0].refusal?.contains("conftest.py") == true && fs[0].refusal?.contains("설정 파일") == true)
     }
 
     @Test("탐침 대상도 접은 꼴로 겹침을 뺀다")

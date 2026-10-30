@@ -376,8 +376,8 @@ public func apProbeCard(n: Int, unitId: String, title: String, hit: APProbeHit, 
     let what = hit.kinds.map(apProbeLabel).joined(separator: " · ")
     var o: [String: Any] = [
         "id": "probe-\(unitId)-\(hit.file ?? "check")", "unit": n, "unit_id": unitId, "kind": "probe", "step": hit.step,
-        "title": "「\(title)」 의 \(hit.file.map { "시나리오 \($0)" } ?? "판정 명령")\(hit.criterion.map { "(수용 기준 \($0))" } ?? "") 이 망친 결과물로도 통과합니다",
-        "why": "\(what) 로 바꾼 버리는 작업 트리에서 이 판정이 통과했습니다. 판정이 결과의 뜻(값·동작)을 보지 않고 꼴만 보는 것 같습니다. 탐침 대상: \(targets.joined(separator: ", "))",
+        "title": "「\(title)」 의 \(hit.file.map { "시나리오 \($0)" } ?? "판정 명령")\(hit.criterion.map { "(수용 기준 \($0))" } ?? "")이 망친 결과물로도 통과합니다",
+        "why": "\(what)(으)로 바꾼 버리는 작업 트리에서 이 판정이 통과했습니다. 판정이 결과의 뜻(값·동작)을 보지 않고 꼴만 보는 것 같습니다. 탐침 대상: \(targets.joined(separator: ", "))",
         "options": [["key": apFixCheck, "label": "판정 고치기"], ["key": "keep", "label": "그대로"], ["key": "drop", "label": "빼기"]],
         "recommended": apFixCheck, "probes": hit.kinds.map(\.rawValue)]
     if let f = hit.file { o["file"] = f }
@@ -521,10 +521,11 @@ public struct APCriticFinding: Equatable, Sendable {
     public var files: [String]
     public var readings: [APDraftOption]
     public var recommended: String?
+    public var refusal: String?          // 보드가 반례를 받지 않은 까닭(판정·하네스 자리·설정 파일·보는 자리 밖·파일 없음) — 확인 안 됨으로 내린 것
     public init(id: String, unit: String, criterion: String? = nil, judge: String? = nil, kind: APFindingKind, why: String, files: [String] = [],
-                readings: [APDraftOption] = [], recommended: String? = nil) {
+                readings: [APDraftOption] = [], recommended: String? = nil, refusal: String? = nil) {
         self.id = id; self.unit = unit; self.criterion = criterion; self.judge = judge; self.kind = kind; self.why = why; self.files = files
-        self.readings = readings; self.recommended = recommended
+        self.readings = readings; self.recommended = recommended; self.refusal = refusal
     }
 }
 
@@ -563,13 +564,13 @@ public func apCriticParse(_ files: APDraftFiles, units: [APCriticUnit], targets:
             guard (1...apCaseFileMax).contains(fl.count), Set(fl).count == fl.count else { problems.append("지적 \(id) 의 반례 파일은 1~\(apCaseFileMax)개입니다"); continue }
             if let bad = fl.lazy.compactMap({ p in apCasePathProblem(p, judgeFiles: judgeFiles, targets: targets[uid] ?? []).map { (p, $0) } }).first {
                 // 판정 자체·하네스·.git·설정 파일, 또는 판정이 보는 자리 밖을 바꾸는 반례는 받지 않는다(반례가 판정을 바꿔 통과하는 가짜 확인이 되므로) — 확인 안 됨으로 남긴다
-                f.kind = .unverifiable
-                f.why = why + " (반례 파일 \(String(bad.0.prefix(80))) 은 \(bad.1))"
+                f.kind = .unverifiable; f.files = fl
+                f.refusal = "반례 파일 \(String(bad.0.prefix(80))) 은 \(bad.1)"
                 out.append(f); continue
             }
             if let miss = fl.first(where: { files.read("cases/\(id)/\($0)").map { $0.count > apCaseFileBytes } ?? true }) {
-                f.kind = .unverifiable
-                f.why = why + " (반례 파일 cases/\(id)/\(String(miss.prefix(80))) 이 없거나 64 KB 보다 큽니다)"
+                f.kind = .unverifiable; f.files = fl
+                f.refusal = "반례 파일 cases/\(id)/\(String(miss.prefix(80))) 이 없거나 64 KB 보다 큽니다"
                 out.append(f); continue
             }
             f.files = fl
@@ -615,7 +616,7 @@ public func apVerifyFindings(_ fs: [APCriticFinding], views: [String: APJudgeVie
     for f in fs {
         switch f.kind {
         case .interpretation: out.append(APCriticResult(finding: f, verdict: .reading)); continue
-        case .unverifiable: out.append(APCriticResult(finding: f, verdict: .unverified("비판 세션이 반례를 만들지 못했다고 적었습니다"))); continue
+        case .unverifiable: out.append(APCriticResult(finding: f, verdict: .unverified(f.refusal ?? "비판 세션이 반례를 만들지 못했다고 적었습니다"))); continue
         case .counterexample: break
         }
         guard let v = views[f.unit] else { out.append(APCriticResult(finding: f, verdict: .unverified("단위 판정을 찾지 못했습니다"))); continue }
@@ -677,7 +678,7 @@ public func apCriticCard(_ r: APCriticResult, n: Int, unitTitle: String) -> [Str
     switch r.verdict {
     case .confirmed:
         o["kind"] = "critic"
-        o["title"] = "「\(unitTitle)」 의 \(where_)\(crit) 이 틀린 결과물(반례)로도 통과합니다"
+        o["title"] = "「\(unitTitle)」 의 \(where_)\(crit)이 틀린 결과물(반례)로도 통과합니다"
         o["why"] = f.why + " (보드가 반례 파일 \(f.files.joined(separator: ", ")) 을 버리는 작업 트리에 넣고 판정을 돌려 통과를 확인했습니다.)"
         o["options"] = [["key": apFixCheck, "label": "판정 고치기"], ["key": "keep", "label": "그대로"], ["key": "drop", "label": "빼기"]]
         o["recommended"] = apFixCheck
