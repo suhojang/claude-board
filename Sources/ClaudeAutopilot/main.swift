@@ -1768,6 +1768,22 @@ extension RecordsDB {
         }
     }
 
+    // 가져오기 줄(7단계 ⑫-7a, 판 4 칸): 같은 키면 한 줄을 고쳐 쓴다. 상태는 규칙 apImportedState(끝난·뺀·보류한 줄은 그대로, 없거나 열린 줄은 열림)
+    func upsertImported(_ lines: [APImportQueueLine], project: String, origin: String) throws -> Int {
+        let t = r3(now())
+        var n = 0
+        for l in lines {
+            let old = try rows("SELECT state FROM queue_items WHERE project_id=? AND source_key=?", [project, l.key]).first?[0] as? String
+            n += try run("""
+                INSERT INTO queue_items(project_id,source_key,title,kind,est_min,state,origin,digest,summary,source,def,added,updated)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(project_id,source_key) DO UPDATE SET title=excluded.title, kind=excluded.kind, est_min=excluded.est_min, state=excluded.state,
+                  origin=excluded.origin, digest=excluded.digest, summary=excluded.summary, source=excluded.source, def=excluded.def, updated=excluded.updated
+                """, [project, l.key, l.title, l.kind.isEmpty ? nil : l.kind, l.estMin, apImportedState(old: old), origin, l.digest, l.summary, l.source, l.def, t, t])
+        }
+        return n
+    }
+
     // 일반 꼴 대기열 파일(설계 5장 7절)을 queue_items 로. 프로젝트 전용 꼴은 그 프로젝트의 변환 스크립트가 이 꼴로 바꿔 넘긴다
     static let queueStates: Set<String> = ["open", "done", "parked", "dropped", "board"]
     func importQueue(_ path: String, project override: String?) throws -> Int {
@@ -1948,7 +1964,7 @@ final class Engine {
                               "check_sandbox", "check_unix_sockets", "browser_path", "usage_path"]
     static let unitKeys = ["id", "title", "prompt", "check", "precheck", "action", "context", "cwd", "caps", "check_timeout_min", "action_timeout_min",
                            "tickets", "review", "source_key", "kind", "est_min", "est_basis", "est_pp", "story", "branch", "depends", "prerun",
-                           "scenarios", "criteria", "check_sandbox", "check_ports"]
+                           "scenarios", "criteria", "check_sandbox", "check_ports", "source_digest"]
     func syncFromFrozen() {
         for k in Engine.settingKeys { run[k] = cfg[k] }
         run["set"] = setSummary(cfg)
@@ -4095,6 +4111,10 @@ func usage() -> Never {
              이 프로젝트의 열린 판정 놓침과 세션에 넘길 요약을 misses.json 에
            claude-autopilot revise <출발 준비 폴더> [--dev] [--max-sec <초>]
              세트 이어 쓰기(이어 가기, 판정 놓침이 있을 때): 이어 갈 단위의 판정 명령·지시를 고친 초안을 revise/ 에, 판정 차이를 revise.json 에
+           claude-autopilot import <출발 준비 폴더> gather|session [--dev] [--max-sec <초>]
+             가져오기(7단계): gather 는 import.json 의 원천(할 일 문서·바깥 목록·옛 자동화)을 항목으로 모아 이미 끝난 것·진행 중인 것을 가리고
+             근거 묶음(context/import/, 비밀 가리기)에 넣어 import/gather.json 에, session 은 가져오기 세션(읽기 도구만)의 단위 초안을 기계 검사해
+             import-check.json 에. 시험 빌드만 --claude <가짜 claude>
     """)
 }
 
@@ -4253,7 +4273,8 @@ func prepare(_ dir: String, dev: Bool) -> (problems: [String], frozen: [String: 
         if let c = q["caps"] { if c is [String: Any] { d["caps"] = c } else { problems.append("단위 \(n) 의 caps 는 객체여야 합니다") } }
         if q["tickets"] != nil, !(q["tickets"] is [Any]) { problems.append("단위 \(n) 의 tickets 는 배열이어야 합니다") }
         // 기록 저장소에 남길 칸(원천 항목 키·종류·출발 때 예상). 판정·도구와 상관없지만 출발 뒤 바뀌지 않게 함께 고정한다
-        for k in ["source_key", "kind", "est_basis"] {
+        // source_digest(7단계 ⑫-7a): 가져온 단위의 원천 지문 — 다음 가져오기가 같은 항목의 바뀐 본문을 볼 때 쓴다
+        for k in ["source_key", "kind", "est_basis", "source_digest"] {
             if let v = q[k] { if v is String { d[k] = v } else { problems.append("단위 \(n) 의 \(k) 는 글자여야 합니다") } }
         }
         if let v = q["est_min"] { if num(v) != nil, !(v is String) { d["est_min"] = v } else { problems.append("단위 \(n) 의 est_min 은 수여야 합니다") } }
@@ -4664,6 +4685,17 @@ func cmdStart(_ args: [String]) -> Never {
         fail("launchctl bootstrap 이 실패했습니다(코드 \(r.code)). 가지는 출발 때로 되돌렸습니다")
     }
     failCleanup = nil   // 출발했다 — 경로 자리는 그 실행의 엔진이 끝 정리를 마칠 때 푼다
+    // 가져오기 줄(7단계 ⑫-7a): 보드가 출발 때 쓴 import-queue.json(고른 단위와 고르지 않은 후보)을 기록 저장소 대기열에 한 줄씩(같은 키는 한 줄,
+    // 끝난·사람이 뺀·보류한 줄은 그대로). 다음 가져오기가 원천 항목 키로 이것과 견준다. 못 써도 출발은 막지 않는다(진행 기록에 까닭)
+    if let iq = apImportQueueParse(plainFile(dir + "/import-queue.json", max: 8 << 20)), iq.project == frozen["project"] as? String {
+        do {
+            let db = try RecordsDB(recordsPath(dev: dev))
+            var n = 0
+            try db.transaction { n = try db.upsertImported(iq.lines, project: iq.project, origin: "import:" + iq.source) }
+            db.close()
+            print("가져오기 줄 \(n)개를 대기열에 남겼습니다")
+        } catch { print("가져오기 줄을 기록 저장소에 쓰지 못했습니다: \(error)") }
+    }
     print("출발했습니다: \(label)\n상태 보기: \(pinned) status \(dir)")
     exit(0)
 }
@@ -7044,6 +7076,289 @@ func cmdRevise(_ args: [String]) -> Never {
            "cost_usd": sr.cost ?? NSNull(), "sec": r3(sr.sec), "at": r3(now())], r.ok)
 }
 
+// MARK: - 가져오기(7단계 ⑫-7a, 설계 2장 "목록으로 이어 가기: 원천과 차례")
+// 출발 전 준비 폴더(drafts/<실행 id>/)에서 보드가 부른다. 보드가 쓴 import.json(원천·작업 경로·프로젝트·원천 칸·사람이 덧붙인 말·되살린 키)을 읽는다.
+//   import <준비> gather   원천을 읽어 항목으로 모으고(할 일 문서·바깥 목록·옛 자동화), 기록 저장소(읽기 전용)와 바깥 상태로 가리고, 새 항목·이을 항목과
+//                           옛 자동화 파일을 근거 묶음(context/import/, 비밀 가리기·믿지 않는 자료 표시·형식 검사 — ⑩-2 와 같은 문)에 넣고, 하네스 확인 지점을 찾음
+//                           → import/gather.json·import/items.json·harness-points.json
+//   import <준비> session  가져오기 세션(claude, 읽기 도구와 결과 폴더 import/out/ 쓰기만, Bash·웹·MCP 없음) → 기계 검사 → import-check.json(대기열 단위·카드)
+// 규칙(항목 꼴·가리기·세션 글·검사·대기열 단위)은 AutopilotRules/Import.swift. 결과는 표준 출력 JSON 하나
+
+struct ImportPrep {
+    let dir: String, id: String, run: [String: Any], cfg: [String: Any], repo: String, project: String, source: APImportSource, dev: Bool
+}
+func importPrep(_ args: [String]) -> ImportPrep {
+    let dev = args.contains("--dev")
+    guard let raw = args.first(where: { !$0.hasPrefix("--") }) else { usage() }
+    let dir = runDir(raw), id = (dir as NSString).lastPathComponent
+    guard validName(id) else { fail("준비 폴더 이름은 영문·숫자·.-_ 로만 씁니다: \(id)") }
+    guard let run = readJSON(dir + "/run.json") as? [String: Any] else { fail("run.json 을 읽지 못했습니다") }
+    guard run["state"] == nil else { fail("이미 출발한 실행입니다. 가져오기는 출발 전에만 합니다") }
+    guard let cfg = readJSON(dir + "/import.json") as? [String: Any] else { fail("import.json(가져오기 입력)을 읽지 못했습니다") }
+    guard let src = (cfg["source"] as? String).flatMap(APImportSource.init(rawValue:)) else { fail("import.json 의 source 는 todo·list·legacy 가운데 하나입니다") }
+    guard let r0 = cfg["repo"] as? String, r0.hasPrefix("/"), isDir(r0) else { fail("import.json 의 repo 는 있는 폴더의 절대 경로여야 합니다") }
+    let repo = canonical(gitOut(["rev-parse", "--show-toplevel"], cwd: r0) ?? r0)
+    guard repo == canonical(r0) else { fail("import.json 의 repo 는 git 저장소 뿌리여야 합니다(\(r0))") }
+    guard let project = cfg["name"] as? String, validName(project) else { fail("import.json 의 name(프로젝트)은 영문·숫자·.-_ 로 씁니다") }
+    return ImportPrep(dir: dir, id: id, run: run, cfg: cfg, repo: repo, project: project, source: src, dev: dev)
+}
+
+// 저장소 안 할 일 문서 하나 — 상대 경로 꼴(apTodoPathOK), 구성 요소마다 lstat 해 링크를 따라가지 않고, 실제 경로가 저장소 안, 보통 파일, 크기 상한
+func importTodoText(_ repo: String, _ rel: String) -> (text: String?, why: String?) {
+    guard apTodoPathOK(rel) else { return (nil, "할 일 문서는 저장소 안 상대 경로의 글 문서(md·txt)여야 합니다: \(rel)") }
+    var cur = repo, st = stat()
+    for comp in rel.split(separator: "/").map(String.init) {
+        cur += "/" + comp
+        guard lstat(cur, &st) == 0 else { return (nil, "할 일 문서가 없습니다: \(rel)") }
+        if st.st_mode & S_IFMT == S_IFLNK { return (nil, "할 일 문서 경로에 바로 가기(링크)가 있어 읽지 않습니다: \(rel)") }
+    }
+    guard st.st_mode & S_IFMT == S_IFREG else { return (nil, "할 일 문서가 보통 파일이 아닙니다: \(rel)") }
+    guard st.st_size <= apTodoMaxBytes else { return (nil, "할 일 문서가 \(apTodoMaxBytes >> 10) KB 보다 큽니다: \(rel)") }
+    let real = realPathLoose(cur), rootReal = realPathLoose(repo)
+    guard real.hasPrefix(rootReal + "/") else { return (nil, "할 일 문서의 실제 자리가 저장소 밖입니다: \(rel)") }
+    let fd = open(cur, O_RDONLY | O_NOFOLLOW)
+    guard fd >= 0 else { return (nil, "할 일 문서를 열지 못했습니다: \(rel)") }
+    let h = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+    guard let d = try? h.read(upToCount: apTodoMaxBytes + 1), let t = String(data: d, encoding: .utf8) else { return (nil, "할 일 문서가 UTF-8 글이 아닙니다: \(rel)") }
+    return (t, nil)
+}
+
+// 옛 자동화 폴더(사람이 고른 폴더) — 링크를 따라가지 않고 깊이·개수·크기 상한 안의 글 파일만(규칙 apLegacySkipReason). 비밀이 흔한 자리·엔진 뿌리는 거절
+func importLegacyFiles(_ raw: String) -> (folder: String, files: [(path: String, text: String)], skipped: [String], why: String?) {
+    guard raw.hasPrefix("/") else { return ("", [], [], "옛 자동화 폴더는 절대 경로로 씁니다") }
+    let p = (raw as NSString).standardizingPath
+    guard isDir(p), !isLink(p) else { return ("", [], [], "옛 자동화 폴더가 없거나 바로 가기(링크)입니다: \(raw)") }
+    let c = canonical(p)
+    let deny = sessionDenyRead() + [autopilotRoot(dev: false), autopilotRoot(dev: true), home + "/Library", "/System", "/private/etc"]
+    if c == home || c == "/" || c.count < 2 { return ("", [], [], "옛 자동화 폴더로 홈 폴더 전체나 / 는 고를 수 없습니다") }
+    for d in deny where c == canonical(d) || c.hasPrefix(canonical(d) + "/") || canonical(d).hasPrefix(c + "/") {
+        return ("", [], [], "옛 자동화 폴더가 읽지 않는 자리(키체인·엔진 뿌리·~/.ssh 등)와 겹칩니다")
+    }
+    var files: [(path: String, text: String)] = [], skipped: [String] = [], total = 0
+    guard let e = fm.enumerator(atPath: c) else { return (c, [], [], "옛 자동화 폴더를 읽지 못했습니다") }
+    while let rel = e.nextObject() as? String {
+        let full = c + "/" + rel
+        var st = stat()
+        guard lstat(full, &st) == 0 else { continue }
+        let kind = st.st_mode & S_IFMT
+        if kind == S_IFLNK { skipped.append("\(rel): 바로 가기(링크)"); if isDir(full) { e.skipDescendants() }; continue }
+        if kind == S_IFDIR {
+            if (rel as NSString).lastPathComponent.hasPrefix(".") || rel.split(separator: "/").count > apLegacyDepth { e.skipDescendants() }
+            continue
+        }
+        guard kind == S_IFREG else { continue }
+        if let why = apLegacySkipReason(rel) { if why != "숨은 자리" { skipped.append("\(rel): \(why)") }; continue }
+        if Int(st.st_size) > apLegacyFileBytes { skipped.append("\(rel): \(apLegacyFileBytes >> 10) KB 넘음"); continue }
+        if files.count >= apLegacyMaxFiles { skipped.append("\(rel): 파일 \(apLegacyMaxFiles)개 상한"); continue }
+        if total + Int(st.st_size) > apLegacyTotalBytes { skipped.append("\(rel): 합계 상한"); continue }
+        let fd = open(full, O_RDONLY | O_NOFOLLOW)
+        guard fd >= 0 else { skipped.append("\(rel): 열지 못함"); continue }
+        let h = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        guard let d = try? h.read(upToCount: apLegacyFileBytes), let t = String(data: d, encoding: .utf8) else { skipped.append("\(rel): UTF-8 글 아님"); continue }
+        total += d.count
+        files.append((rel, t))
+    }
+    files.sort { $0.path < $1.path }
+    return (c, files, skipped, nil)
+}
+
+// 기록 저장소(읽기 전용)의 이 프로젝트 대기열 줄·단위 줄. 판 4 앞의 저장소면 가져오기 칸은 빈 값
+func importRecords(project: String, dev: Bool) -> (queue: [APQueueRow], units: [APUnitRow]) {
+    let path = recordsPath(dev: dev)
+    let v = readOnlyRows(path, "PRAGMA user_version").first.flatMap { inum($0[0]) } ?? 0
+    let cols = v >= 4 ? "digest, summary, title, def, origin" : "NULL, NULL, title, NULL, origin"
+    let q = readOnlyRows(path, "SELECT source_key, state, done_run, \(cols) FROM queue_items WHERE project_id=?", [project]).compactMap { r -> APQueueRow? in
+        guard let k = r[0] as? String else { return nil }
+        return APQueueRow(key: k, state: r[1] as? String ?? "open", doneRun: r[2] as? String, digest: r[3] as? String, summary: r[4] as? String,
+                          title: r[5] as? String, def: r[6] as? String, origin: r[7] as? String)
+    }
+    let u = readOnlyRows(path, """
+        SELECT u.source_key, COALESCE(u.status,'pending'), u.run_id, COALESCE(r.state,'') FROM units u JOIN runs r ON r.id=u.run_id
+        WHERE r.project_id=? AND u.source_key IS NOT NULL
+        """, [project]).compactMap { r -> APUnitRow? in
+        guard let k = r[0] as? String, let run = r[2] as? String else { return nil }
+        return APUnitRow(key: k, status: r[1] as? String ?? "pending", run: run, runState: r[3] as? String ?? "")
+    }
+    return (q, u)
+}
+
+func setInstructionText(project: String, dev: Bool) -> String? {
+    (try? String(contentsOfFile: setDir(project: project, dev: dev) + "/autopilot.md", encoding: .utf8))
+        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.flatMap { $0.isEmpty ? nil : $0 }
+}
+
+func gatheredJSON(_ g: APGathered, id: String?, evidence: String?) -> [String: Any] {
+    let it = g.item
+    var d: [String: Any] = ["key": it.key, "title": it.title, "state": it.state.rawValue, "state_note": it.stateNote, "place": it.place, "url": it.url,
+                            "source": it.source, "kind": it.kind, "digest": it.digest, "body_lines": it.bodyLines, "tickets": it.tickets,
+                            "decision": g.decision, "why": g.why, "changed": g.changed, "note": g.note]
+    if let s = it.story { d["story"] = s }
+    if let h = g.hide { d["hide"] = h.rawValue }
+    if let id { d["id"] = id }
+    if let evidence { d["evidence"] = evidence }
+    if !g.carry.isEmpty { d["carry"] = g.carry.map { ["key": $0.key, "def": $0.def ?? "", "title": $0.title ?? ""] } }
+    return d
+}
+
+func cmdImport(_ args: [String]) {
+    let x = importPrep(args)
+    let action = args.filter { !$0.hasPrefix("--") }.dropFirst().first ?? ""
+    func reply(_ o: [String: Any], _ ok: Bool, to file: String? = nil) -> Never {
+        if let file { writeJSON(x.dir + "/" + file, o) }
+        print(jsonText(o)); exit(ok ? 0 : 1)
+    }
+    let work = x.dir + "/import", bundleDir = x.dir + "/context/import"
+    switch action {
+    case "gather":
+        try? fm.removeItem(atPath: work); try? fm.removeItem(atPath: bundleDir)
+        try? fm.createDirectory(atPath: work, withIntermediateDirectories: true)
+        try? fm.createDirectory(atPath: bundleDir, withIntermediateDirectories: true)
+        let t0 = now()
+        var items: [APImportItem] = [], origin = "", requests = 0, notes: [String] = [], legacy: (folder: String, files: [(path: String, text: String)], skipped: [String])?
+        func stop(_ why: String) -> Never { reply(["ok": false, "problems": [why], "source": x.source.rawValue, "requests": requests, "sec": r3(now() - t0)], false, to: "import/gather.json") }
+        switch x.source {
+        case .todo:
+            let t = x.cfg["todo"] as? [String: Any] ?? [:]
+            let rel = t["path"] as? String ?? "", section = (t["section"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            let (text, why) = importTodoText(x.repo, rel)
+            guard let text else { stop(why ?? "할 일 문서를 읽지 못했습니다") }
+            if let sec = section, !apTodoHeadings(text).contains(where: { apNorm($0.title) == apNorm(sec) }) { stop("할 일 문서에 절 \"\(sec)\" 가 없습니다") }
+            items = apTodoItems(text, path: rel, section: section)
+            origin = rel + (section.map { " · 절 \($0)" } ?? " · 문서 전체")
+        case .list:
+            let l = x.cfg["list"] as? [String: Any] ?? [:]
+            guard let svc = (l["service"] as? String).flatMap(APService.init(rawValue:)), [.atlassian, .notion].contains(svc) else { stop("바깥 목록의 서비스는 atlassian·notion 입니다") }
+            let q = apListQuery(l["query"] as? String ?? "", service: svc)
+            if case .bad(let why) = q { stop(why) }
+            let r = apReadList(q, connections: loadConnections(dev: x.dev), dev: x.dev, secrets: EngineSecrets(dev: x.dev), http: EngineHTTP(), clock: EngineClock(),
+                               waiter: EngineWaiter(), tz: .current)
+            requests = r.requests
+            guard r.ok else { stop(r.note) }
+            items = r.items
+            origin = q.label
+            notes.append(r.note)
+        case .legacy:
+            let lg = x.cfg["legacy"] as? [String: Any] ?? [:]
+            let got = importLegacyFiles(lg["folder"] as? String ?? "")
+            if let why = got.why { stop(why) }
+            let label = String((got.folder as NSString).lastPathComponent.map { $0.isASCII && ($0.isLetter || $0.isNumber || "._-".contains($0)) ? $0 : "-" }).prefix(60)
+            legacy = (String(label), got.files, got.skipped)
+            items = apLegacyItems(got.files, folder: String(label))
+            origin = apHomeTilde(got.folder) + " · 파일 \(got.files.count)" + (got.skipped.isEmpty ? "" : " · 읽지 않은 파일 \(got.skipped.count)")
+        }
+        let include = Set((x.cfg["include"] as? [String] ?? []).prefix(500))
+        let rec = importRecords(project: x.project, dev: x.dev)
+        let decided = apImportDecide(items, queue: rec.queue, units: rec.units, include: include)
+        // 근거 묶음: 새 항목·이을 항목마다 메타 파일 하나, 옛 자동화는 읽은 파일마다 하나(멈춘 자리 기록·원장). 모두 apAddEvidence 문(가리기 → 표시 → 검사)
+        let store = EngineEvidence(dir: canonical(bundleDir))
+        var redacted = 0, refused: [String] = [], evidence: [String: String] = [:]
+        for g in decided where g.decision != "hidden" {
+            let w = apAddEvidence(apImportItemMeta(g.item, dev: x.dev), image: nil, imageHost: "", url: g.item.key, via: x.source == .list ? "rest" : "file",
+                                  requests: 0, redacted: 0, store: store, clock: EngineClock())
+            if let e = w.entry { redacted += e.redacted; evidence[g.item.key] = e.file } else { refused.append("\(g.item.title.prefix(40)): \(w.note)") }
+        }
+        if let lg = legacy {
+            for f in lg.files {
+                let w = apAddEvidence(apLegacyMeta(f.path, f.text, folder: lg.folder, dev: x.dev), image: nil, imageHost: "", url: "legacy:\(lg.folder)/\(f.path)",
+                                      via: "file", requests: 0, redacted: 0, store: store, clock: EngineClock())
+                if let e = w.entry { redacted += e.redacted } else { refused.append("\(f.path): \(w.note)") }
+            }
+        }
+        // 세션에 넘길 항목 — 새 항목만 i1·i2…(제목은 가린 뒤 꺾쇠를 바꾼 글)
+        var k = 0, out: [[String: Any]] = [], prompt: [[String: Any]] = []
+        for g in decided {
+            var id: String?
+            if g.decision == "new" {
+                k += 1; id = "i\(k)"
+                prompt.append(["id": id!, "key": g.item.key, "title": apMetaText(apRedact(g.item.title).text, 300), "state": g.item.state.rawValue,
+                               "note": g.note, "evidence": evidence[g.item.key] ?? "", "tickets": g.item.tickets, "story": g.item.story ?? NSNull()])
+            }
+            var d = gatheredJSON(g, id: id, evidence: evidence[g.item.key])
+            d["title"] = apMetaText(apRedact(g.item.title).text, 300)
+            d["body_lines"] = g.item.bodyLines.map { apMetaText(apRedact($0).text, 300) }
+            d["changed"] = g.changed.map { apMetaText(apRedact($0).text, 300) }
+            out.append(d)
+        }
+        writeJSON(work + "/items.json", prompt)
+        let points = apHarnessPoints(harnessTexts(x.repo))
+        writeJSON(x.dir + "/harness-points.json", points.map(harnessPointJSON))
+        let setText = setInstructionText(project: x.project, dev: x.dev)
+        var hidden: [String: Int] = [:]
+        for g in decided { if let h = g.hide { hidden[h.rawValue, default: 0] += 1 } }
+        let o: [String: Any] = ["ok": true, "source": x.source.rawValue, "origin": origin, "items": out, "requests": requests, "redacted": redacted,
+                                "counts": ["total": decided.count, "new": decided.filter { $0.decision == "new" }.count,
+                                           "continue": decided.filter { $0.decision == "continue" }.count,
+                                           "changed": decided.filter { !$0.changed.isEmpty }.count, "hidden": hidden],
+                                "evidence_refused": refused, "legacy_skipped": legacy?.skipped ?? [], "notes": notes,
+                                "harness_points": points.count, "need_instruction": setText == nil, "bundle": canonical(bundleDir),
+                                "manifest": apManifestParse(store.read(apManifestName)).count, "sec": r3(now() - t0), "at": r3(now())]
+        reply(o, true, to: "import/gather.json")
+    case "session":
+        guard let g = readJSON(work + "/gather.json") as? [String: Any], g["ok"] as? Bool == true else { reply(["ok": false, "problems": ["모으기(gather)를 먼저 합니다"]], false) }
+        let pitems = (readJSON(work + "/items.json") as? [[String: Any]] ?? []).compactMap { d -> APImportPromptItem? in
+            guard let id = d["id"] as? String, let key = d["key"] as? String else { return nil }
+            return APImportPromptItem(id: id, key: key, title: d["title"] as? String ?? "", state: d["state"] as? String ?? "open", note: d["note"] as? String ?? "",
+                                      evidence: d["evidence"] as? String ?? "", tickets: d["tickets"] as? [String] ?? [])
+        }
+        let storyItems = Set((readJSON(work + "/items.json") as? [[String: Any]] ?? []).compactMap { d in (d["story"] as? String).flatMap { _ in d["id"] as? String } })
+        let setText = setInstructionText(project: x.project, dev: x.dev)
+        let points = (readJSON(x.dir + "/harness-points.json") as? [[String: Any]] ?? []).compactMap(harnessPointOf)
+        let model = modelName(x.run["model"]) ?? apDraftModel
+        guard !pitems.isEmpty else {
+            reply(["ok": true, "session": false, "note": "새 항목이 없어 가져오기 세션을 돌리지 않았습니다(모델 0)", "units": [], "cards": [], "skipped": [],
+                   "harness_missing": apHarnessMissing(points, instruction: setText ?? "").map(harnessPointJSON), "model": model, "at": r3(now())], true, to: "import-check.json")
+        }
+        let out = work + "/out"
+        try? fm.removeItem(atPath: out)
+        guard (try? fm.createDirectory(atPath: out, withIntermediateDirectories: true)) != nil else { reply(["ok": false, "problems": ["결과 폴더를 만들지 못했습니다"]], false) }
+        let maxSec = argValue(args, "--max-sec").flatMap(Double.init).map { min(max($0, 10), 3600) } ?? apImportMaxSec
+        let claudePath = sessionClaudePath(args, dev: x.dev, run: x.run)
+        let bundle = canonical(bundleDir)
+        let input = APImportInput(source: x.source, origin: g["origin"] as? String ?? "", request: x.cfg["request"] as? String ?? "", repo: x.repo,
+                                  bundle: isDir(bundle) ? bundle : nil, out: canonical(out), items: pitems, harness: points, misses: prepMissDigest(x.dir),
+                                  needInstruction: setText == nil)
+        let paths = APDraftPaths(out: canonical(out), reads: [x.repo] + (isDir(bundle) ? [bundle] : []), denyRead: sessionDenyRead())
+        let (sr, problem) = readSession(kind: "import", id: x.id, dev: x.dev, claudePath: claudePath, paths: paths, model: model, budget: apImportBudgetUSD,
+                                        prompt: apImportPrompt(input), maxSec: maxSec, envKey: "CLAUDE_BOARD_IMPORT")
+        guard let sr else { reply(["ok": false, "session": false, "problems": [problem ?? "세션을 띄우지 못했습니다"]], false, to: "import-check.json") }
+        let chk = apImportCheck(files: EngineDraftFiles(root: out), items: pitems, storyItems: storyItems, harness: points, needInstruction: setText == nil, setInstruction: setText)
+        // 대기열 단위 — 항목 id 로 모은 항목을 찾아 원천 항목 키·지문·티켓을 붙인다
+        var byId: [String: APImportItem] = [:]
+        for d in g["items"] as? [[String: Any]] ?? [] {
+            guard let id = d["id"] as? String else { continue }
+            var it = APImportItem()
+            it.key = d["key"] as? String ?? ""; it.title = d["title"] as? String ?? ""; it.place = d["place"] as? String ?? ""; it.source = d["source"] as? String ?? ""
+            it.tickets = d["tickets"] as? [String] ?? []; it.story = d["story"] as? String
+            byId[id] = it
+        }
+        let digests = Dictionary((g["items"] as? [[String: Any]] ?? []).compactMap { d in (d["id"] as? String).map { ($0, d["digest"] as? String ?? "") } }, uniquingKeysWith: { a, _ in a })
+        let queue = chk.units.compactMap { u -> [String: Any]? in
+            guard let it = byId[u.item] else { return nil }
+            var q = apImportQueueUnit(u, item: it, repo: x.repo, context: isDir(bundle) ? bundle : nil)
+            q["source_digest"] = digests[u.item] ?? it.digest   // 모은 때의 지문(제목·본문 원문으로 낸 것)
+            return q
+        }
+        let cards = chk.cards.map { c -> [String: Any] in
+            var d: [String: Any] = ["id": c.id, "title": c.title, "why": c.why, "recommended": c.recommended, "units": c.units,
+                                    "options": c.options.map { ["key": $0.key, "label": $0.label, "note": $0.note] }]
+            if let it = chk.cardItems[c.id] { d["item"] = it; d["item_key"] = byId[it]?.key ?? "" }
+            return d
+        }
+        let missing = chk.harnessMissing.map { p -> [String: Any] in
+            let t = apHarnessCard(p)
+            return harnessPointJSON(p).merging(["card": apHarnessCardId(p), "title": t.title, "why": t.why, "recommended": t.recommended,
+                                                "options": t.options.map { ["key": $0.key, "label": $0.label, "note": $0.note] }]) { a, _ in a }
+        }
+        let ok = sr.note.isEmpty && chk.ok
+        reply(["ok": ok, "session": sr.note.isEmpty, "note": sr.note.isEmpty ? (chk.ok ? "기계 검사를 지났습니다" : "기계 검사에 걸렸습니다") : sr.note,
+               "problems": (sr.note.isEmpty ? [] : [sr.note]) + chk.problems, "warnings": chk.warnings, "cost_usd": sr.cost ?? NSNull(), "sec": r3(sr.sec),
+               "units": queue, "cards": cards, "skipped": chk.skipped.map { ["item": $0.item, "key": byId[$0.item]?.key ?? "", "why": $0.why] },
+               "harness_points": points.count, "harness_missing": missing, "need_instruction": setText == nil, "instruction_chars": chk.instruction.count,
+               "model": model, "items": pitems.count, "at": r3(now())], ok, to: "import-check.json")
+    default: usage()
+    }
+}
+
 let argv = Array(CommandLine.arguments.dropFirst())
 switch argv.first {
 case "report": cmdReport(Array(argv.dropFirst()))
@@ -7064,5 +7379,6 @@ case "draft": cmdDraft(Array(argv.dropFirst()))
 case "critic": cmdCritic(Array(argv.dropFirst()))
 case "misses": cmdMisses(Array(argv.dropFirst()))
 case "revise": cmdRevise(Array(argv.dropFirst()))
+case "import": cmdImport(Array(argv.dropFirst()))
 default: usage()
 }
