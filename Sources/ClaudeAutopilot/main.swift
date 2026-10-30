@@ -135,6 +135,115 @@ func canonical(_ path: String) -> String {
 
 func isDir(_ p: String) -> Bool { var d: ObjCBool = false; return fm.fileExists(atPath: p, isDirectory: &d) && d.boolValue }
 
+// MARK: - 시험 실행기 도우미(5단계 ⑪-1)
+
+// 진짜 경로(Seatbelt 는 풀린 경로로 맞춘다: /tmp → /private/tmp, /var → /private/var). 없는 경로는 있는 조상까지 풀고 나머지를 붙이고,
+// 글롭 조각(*)이 있으면 그 앞까지만 푼다
+func realPathLoose(_ p: String) -> String {
+    let comps = p.split(separator: "/").map(String.init)
+    var i = comps.firstIndex { $0.contains("*") } ?? comps.count
+    while i >= 0 {
+        let head = "/" + comps.prefix(i).joined(separator: "/")
+        if let r = realpath(head, nil) {
+            defer { free(r) }
+            let base = String(cString: r), rest = comps.dropFirst(i).joined(separator: "/")
+            return rest.isEmpty ? base : (base == "/" ? "" : base) + "/" + rest
+        }
+        i -= 1
+    }
+    return p
+}
+
+// 판정 시나리오 파일을 읽을 수 있는가: 작업 폴더 안의 보통 파일(링크가 아님, 진짜 경로도 작업 폴더 안), 1 MB 까지. 되면 글자, 아니면 까닭
+func scenarioSource(_ cwd: String, _ file: String) -> (data: Data?, why: String?) {
+    let p = cwd + "/" + file
+    var st = stat()
+    guard lstat(p, &st) == 0 else { return (nil, "작업 폴더에 없습니다") }
+    guard st.st_mode & S_IFMT == S_IFREG else { return (nil, "보통 파일이 아닙니다(링크·폴더 등)") }
+    guard st.st_size <= 1 << 20 else { return (nil, "1 MB 보다 큽니다") }
+    let real = realPathLoose(p), root = realPathLoose(cwd)
+    guard real.hasPrefix(root + "/") else { return (nil, "작업 폴더 밖을 가리킵니다") }
+    guard let d = fm.contents(atPath: p) else { return (nil, "읽지 못했습니다") }
+    return (d, nil)
+}
+
+// 판정 시나리오 칸 하나(대기열·고정 설정의 꼴)를 규칙의 값으로
+func scenarioOf(_ o: [String: Any]) -> APScenario {
+    APScenario(file: o["file"] as? String ?? "", kind: APScenarioKind(rawValue: o["kind"] as? String ?? "") ?? .shell,
+               criterion: o["criterion"] as? String, driver: (o["driver"] as? String).flatMap(APBrowserDriver.init(rawValue:)))
+}
+func scenarioHead(_ d: Data) -> String { String(decoding: d.prefix(512), as: UTF8.self) }
+
+// Chrome 계열 브라우저 자리(드라이버 chrome). 시험 빌드는 실행 browser_path 로 바꿀 수 있다(가짜 드라이버·없음 길)
+let judgeBrowserApps = ["Google Chrome.app/Contents/MacOS/Google Chrome", "Chromium.app/Contents/MacOS/Chromium", "Microsoft Edge.app/Contents/MacOS/Microsoft Edge"]
+// 판정 샌드박스 안에서 headless 로 돌린 플래그(2026-10-30 잼: 브라우저 자기 샌드박스는 겹쳐 걸 수 없어 --no-sandbox, 바깥은 판정 샌드박스가 막는다).
+// 사용자 프로필 폴더는 판정 임시 폴더 안. MAC_CHROMIUM_TMPDIR 도 그 폴더(엔진이 넘김, Chrome 은 TMPDIR 대신 이것으로 SingletonSocket 자리를 정한다)
+func judgeBrowserFlags(_ tmp: String) -> String {
+    "--headless=new --no-sandbox --disable-gpu --disable-breakpad --disable-crash-reporter --no-service-autorun --disable-background-networking "
+        + "--disable-component-update --disable-sync --no-first-run --no-default-browser-check --use-mock-keychain --password-store=basic --user-data-dir=\(tmp)/browser-profile"
+}
+
+// 도구 찾기 진짜 어댑터: 로그인 셸 PATH·앱 자리·node 의 require.resolve. 도구를 깔지 않는다
+struct EngineToolProbe: APToolProbe {
+    let path: String
+    var browserPath: String?   // 시험 빌드 browser_path
+    func program(_ p: String) -> Bool { fm.isExecutableFile(atPath: p) && !isDir(p) }
+    func command(_ name: String) -> String? {
+        guard !name.contains("/") else { return program(name) ? name : nil }
+        for d in path.split(separator: ":") where d.hasPrefix("/") {
+            let c = d + "/" + name
+            if program(c) { return c }
+        }
+        return nil
+    }
+    func browser() -> String? {
+        if let b = browserPath { return program(b) ? b : nil }
+        for root in ["/Applications", home + "/Applications"] { for a in judgeBrowserApps where program(root + "/" + a) { return root + "/" + a } }
+        return nil
+    }
+    func nodeModule(_ name: String, from dir: String) -> Bool {
+        guard let node = command("node"), name.range(of: "^[@A-Za-z0-9._/-]+$", options: .regularExpression) != nil else { return false }
+        return runTool(node, ["-e", "require.resolve(process.argv[1])", name], cwd: dir, timeout: 15).code == 0
+    }
+}
+
+// 로그인 셸의 PATH(환경 확인용, 한 번만 읽음). 못 읽으면 엔진 기본 PATH
+var loginPathCache: String?
+func loginPath() -> String {
+    if let p = loginPathCache { return p }
+    let p = captureLoginEnv(loginShell())?["PATH"] ?? "\(home)/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+    loginPathCache = p
+    return p
+}
+
+// sandbox-exec 로 판정 샌드박스를 걸 수 있는가(한 번만 잼). 엔진 자신이 이미 샌드박스 안이면 겹쳐 걸 수 없다
+var sandboxExecCache: Bool?
+func sandboxExecOK() -> Bool {
+    if let v = sandboxExecCache { return v }
+    let v = fm.isExecutableFile(atPath: "/usr/bin/sandbox-exec")
+        && runTool("/usr/bin/sandbox-exec", ["-p", "(version 1)(allow default)(deny network*)", "/usr/bin/true"], timeout: 10).code == 0
+    sandboxExecCache = v
+    return v
+}
+
+// 127.0.0.1 의 그 포트를 누가 이미 듣고 있는가(판정이 띄우기 전에 다른 서비스가 있으면 판정이 거기에 닿지 않게 돌리지 않는다)
+func portListening(_ port: Int) -> Bool {
+    let fd = socket(AF_INET, SOCK_STREAM, 0)
+    guard fd >= 0 else { return false }
+    defer { close(fd) }
+    var a = sockaddr_in()
+    a.sin_family = sa_family_t(AF_INET); a.sin_port = in_port_t(UInt16(port).bigEndian); a.sin_addr.s_addr = inet_addr("127.0.0.1")
+    return withUnsafePointer(to: &a) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) == 0 } }
+}
+
+// 증거 폴더 안 파일을 읽기 전용(0444)으로. 링크는 따라가지 않는다
+func lockEvidence(_ dir: String) {
+    for rel in (fm.enumerator(atPath: dir)?.allObjects as? [String]) ?? [] {
+        let p = dir + "/" + rel
+        if !isDir(p), !isLink(p) { chmod(p, 0o444) }
+    }
+}
+
 // 짧은 명령(ps·git·launchctl·security)을 돌려 표준 출력을 받는다
 @discardableResult
 func runTool(_ path: String, _ args: [String], cwd: String? = nil, timeout: Double = 30, withErr: Bool = false) -> (code: Int32, out: String) {
@@ -1646,9 +1755,11 @@ final class Engine {
     // run.json·queue.json 의 설정 칸을 고정 값으로 되돌려 쓴다 — 누가 바꿔 놓았어도 보드가 그리는 값이 엔진이 쓰는 값과 같게
     static let settingKeys = ["title", "model", "effort", "stopline", "caps", "check_timeout_min", "check_retries", "precheck_retry_min", "background_quiet_sec",
                               "allowed_tools", "disallowed_tools", "write_roots", "network_allow", "local_binding", "env_pass", "unix_sockets",
-                              "read_deny", "sandbox_exclude", "claude_args", "claude_path", "project", "project_root", "base_branch", "publish"]
+                              "read_deny", "sandbox_exclude", "claude_args", "claude_path", "project", "project_root", "base_branch", "publish",
+                              "check_sandbox", "check_unix_sockets", "browser_path"]
     static let unitKeys = ["id", "title", "prompt", "check", "precheck", "action", "context", "cwd", "caps", "check_timeout_min", "action_timeout_min",
-                           "tickets", "review", "source_key", "kind", "est_min", "est_basis", "story", "branch", "depends", "prerun"]
+                           "tickets", "review", "source_key", "kind", "est_min", "est_basis", "story", "branch", "depends", "prerun",
+                           "scenarios", "criteria", "check_sandbox", "check_ports"]
     func syncFromFrozen() {
         for k in Engine.settingKeys { run[k] = cfg[k] }
         run["set"] = setSummary(cfg)
@@ -2719,7 +2830,23 @@ final class Engine {
         var s = (q["prompt"] as? String ?? "") + (directions.isEmpty ? "" : "\n\n" + directions) + "\n\n---\n"
         s += "이 일은 Claude Board 자율주행의 작업 단위 하나입니다(「\(title(n))」).\n"
         s += "- 작업 폴더: \(cwd(n))\n"
-        s += "- 판정 명령: `\(q["check"] as? String ?? "")` (일을 마치면 엔진이 작업 폴더에서 돌려 종료 코드 0 이면 통과로 봅니다. 마치기 전에 직접 돌려 보세요.)\n"
+        let scs = q["scenarios"] as? [[String: Any]] ?? []
+        if scs.isEmpty {
+            s += "- 판정 명령: `\(q["check"] as? String ?? "")` (일을 마치면 엔진이 작업 폴더에서 돌려 종료 코드 0 이면 통과로 봅니다. 마치기 전에 직접 돌려 보세요.)\n"
+        } else {
+            // 시험 실행기(⑪-1): 시나리오 목록과 고정본·샌드박스 안내. 시나리오 파일은 고칠 수 없다(쓰기 금지), 고쳐도 판정은 출발 때의 고정본으로 한다
+            let list = scs.map { o in "`\(o["file"] ?? "")`(\(apKindLabel(APScenarioKind(rawValue: o["kind"] as? String ?? "") ?? .shell))\((o["criterion"] as? String).map { " · 수용 기준 \($0)" } ?? ""))" }
+            let chk = (q["check"] as? String ?? "").isEmpty ? "" : " 그리고 판정 명령 `\(q["check"] as? String ?? "")`"
+            s += "- 판정: 작업 폴더 기준 판정 시나리오 \(list.joined(separator: ", "))\(chk). 일을 마치면 엔진이 출발 때 고정한 시나리오 사본으로 판정 샌드박스 안에서 돌려 모두 종료 코드 0 이면 통과로 봅니다. 시나리오 파일은 고칠 수 없고, 고쳐도 판정은 고정본으로 합니다. 마치기 전에 작업 폴더의 시나리오를 직접 돌려 보세요.\n"
+            if let ports = q["check_ports"] as? [Int], !ports.isEmpty { s += "- 판정이 스스로 띄우는 서버 포트: \(ports.map(String.init).joined(separator: ", ")) (판정 샌드박스는 이 포트만 엽니다).\n" }
+        }
+        if let crs = q["criteria"] as? [[String: Any]], !crs.isEmpty {
+            func line(_ a: String) -> [String] { crs.filter { $0["answer"] as? String == a }.map { "\($0["id"] ?? "")(\($0["text"] ?? ""))" } }
+            let sc = line("scenario"), mj = line(apCriterionModelJudge), dr = line(apCriterionDrop)
+            if !sc.isEmpty { s += "- 수용 기준(판정 시나리오로 봄): \(sc.joined(separator: "; "))\n" }
+            if !mj.isEmpty { s += "- 수용 기준(실행 파일 판정이 없어 출발 카드 답으로 모델 판정): \(mj.joined(separator: "; ")). 이 기준은 결과 기록 decisions_applied 에 무엇을 근거로 됐다고 보았는지 적으세요(사람이 합치기·승격 때 봅니다).\n" }
+            if !dr.isEmpty { s += "- 이번 범위에서 뺀 수용 기준(출발 카드 답, 하지 않습니다): \(dr.joined(separator: "; "))\n" }
+        }
         s += tickets.isEmpty
             ? "- 이 단위에 쓸 Jira 티켓 번호는 없습니다. 새 티켓이 있어야 하는 부분은 하지 말고 next_start 에 적으세요.\n"
             : "- 이 단위에 쓸 Jira 티켓: \(tickets.joined(separator: ", ")) (보드가 만들어 둔 번호입니다. 새로 만들지 않습니다.)\n"
@@ -2921,7 +3048,7 @@ final class Engine {
                         event("board", "판정은 통과했지만 그 사이 사람이 이 단위에 보낸 말이 있어, 그 말을 넘기고 같은 세션으로 다시 맡깁니다.")
                         continue
                     }
-                    var why = "판정 명령을 통과했습니다."
+                    var why = (def(n)["scenarios"] as? [Any] ?? []).isEmpty ? "판정 명령을 통과했습니다." : "판정(\(judgeLabel(n)))을 통과했습니다."
                     if def(n)["story"] != nil {   // Jira 작업: 판정 통과 때 엔진이 바로 스토리 가지로 합친다
                         let m = mergeTask(n)
                         why += m["state"] as? String == "merged" ? " 스토리 가지에 합쳤습니다." : m["state"] as? String == "nothing" ? " 합칠 커밋이 없었습니다." : " 스토리 가지에는 합치지 않았습니다."
@@ -2935,7 +3062,7 @@ final class Engine {
                     }
                     u["try"] = k + 1; u["phase"] = "model"
                     // 글은 규칙 apCheckFailMessage·apCheckFailEvent(AutopilotRules/Checks.swift)
-                    u["next_message"] = apCheckFailMessage(code: code, check: def(n)["check"] as? String ?? "", tail: tail, timedOut: timedOut)
+                    u["next_message"] = apCheckFailMessage(code: code, check: judgeLabel(n), tail: tail, timedOut: timedOut)
                     saveUnit(n, u)
                     event("board", apCheckFailEvent(code: code, tries: k, retries: retries, timedOut: timedOut))
                 case .capped(let kind):
@@ -2979,6 +3106,9 @@ final class Engine {
                    "tickets.json", "tickets-plan.json", ".tickets.lock"].map { "Edit(/\(dir)/\($0))" }
         denied += ["engine.json", "stream.jsonl", "stderr.log", "evidence/**", "context/**", "report.html"].map { "Edit(/\(unitDir(n))/\($0))" }
         denied += (1...total).filter { $0 != n }.map { "Edit(/\(unitDir($0))/**)" }
+        denied += ["prerun/**"].map { "Edit(/\(dir)/\($0))" }
+        // 판정 시나리오 원본(작업 폴더 쪽, 모든 단위): 모델이 고칠 수 없다(판정은 고정본으로 하지만, 원본도 출발 때 판 그대로 두려고)
+        denied += scenarioSources().map { "Edit(/\($0))" }
         // 엔진 전용 폴더(복원 전 백업 등)와 read_deny 는 파일 도구로도 읽지 못하게(샌드박스 denyRead 는 Read 도구를 막지 않는다)
         for p in engineDeny + readDenyPaths + modelReadDeny { denied += ["Read(/\(p)/**)", "Read(/\(p))", "Edit(/\(p)/**)"] }
         // 가지 보호는 파일 도구에도(Write 로 ref 파일을 고쳐 쓰는 길). 폴더 자리(스토리 가지 꼴)는 안까지
@@ -2997,6 +3127,11 @@ final class Engine {
         return a
     }
 
+    // 모든 단위의 판정 시나리오 원본(작업 폴더 기준 → 절대 경로)
+    func scenarioSources() -> [String] {
+        defs.indices.flatMap { i in (defs[i]["scenarios"] as? [[String: Any]] ?? []).compactMap { o in (o["file"] as? String).map { cwd(i + 1) + "/" + $0 } } }
+    }
+
     // 이번 단위의 샌드박스 설정 파일(엔진 비공개 폴더, 0600). Bash 와 그 자식 프로세스에 운영체제가 건다:
     // 쓰기는 작업 폴더·write_roots·단위 폴더·임시 폴더, 그 안에서도 하네스 자리는 쓰기 금지, 네트워크는 허용 목록만(git 원격 없음)
     func sandboxSettings(_ n: Int) -> String {
@@ -3004,6 +3139,7 @@ final class Engine {
         deny += ["engine.json", "stream.jsonl", "stderr.log", "evidence", "context", "report.html"].map { unitDir(n) + "/" + $0 }   // report.html: 단위 보고서(엔진이 그림, 3단계)
         deny += protectDeny()   // 지금 작업 가지 밖의 가지·HEAD·packed-refs(단위마다, 엔진이 가지를 바꾼 뒤 다시 계산)
         deny.append(dir + "/outbox")   // 올릴 글(4단계): 모델 쓰기·읽기 범위 밖(엔진·보드만)
+        deny += scenarioSources()   // 판정 시나리오 원본(⑪-1): 샌드박스 쓰기 금지
         let readDeny = engineDeny + readDenyPaths + modelReadDeny
         let s: [String: Any] = ["sandbox": [
             "enabled": true, "failIfUnavailable": true, "allowUnsandboxedCommands": false, "autoAllowBashIfSandboxed": true,
@@ -3488,21 +3624,178 @@ final class Engine {
         return (finished ? (c.code ?? -1) : -1, tail, now() - start, !finished)
     }
 
+    // MARK: 시험 실행기(5단계 ⑪-1): 판정 시나리오(고정본)와 판정 명령을 판정 샌드박스 안에서
+
+    func judgeSandboxOn(_ n: Int) -> Bool { def(n)["check_sandbox"] as? Bool ?? cfg["check_sandbox"] as? Bool ?? true }
+    func judgeNet(_ n: Int) -> APJudgeNet {
+        apJudgeNet(networkAllow: cfg["network_allow"] as? [String] ?? defaultNetwork, localBinding: cfg["local_binding"] as? Bool ?? false,
+                   checkPorts: def(n)["check_ports"] as? [Int] ?? [])
+    }
+    // 판정이 모델이 쓴 코드를 불러도 모델 세션보다 넓게 쓰거나 읽지 않게(규칙 apJudgeProfile). plain: 판정 미리 돌리기(출발 전, 가지 보호 자리 없음)
+    func judgeSandbox(_ n: Int, evidence: String, tmp: String, browser: Bool, plain: Bool) -> APJudgeSandbox {
+        let c = cwd(n)
+        var write = [c] + writeRoots + [tmp]
+        var deny = [dir, autopilotRoot(dev: false), autopilotRoot(dev: true), home + "/.claude", home + "/.claude.json",
+                    home + "/Library/Keychains", home + "/Library/LaunchAgents"]
+        deny += harnessDeny([c] + writeRoots)
+        if !plain { deny += protectDeny() }
+        // 따로 작업 트리: 그 git 폴더(<원래>/.git/worktrees/<이름>)는 작업 폴더 밖이라 열되(색인 새로 쓰기 등), 그 설정 자리는 막는다
+        let gitDir = safeGit(["rev-parse", "--absolute-git-dir"], cwd: c).trimmingCharacters(in: .whitespacesAndNewlines)
+        if gitDir.hasPrefix("/"), isDir(gitDir), !realPathLoose(gitDir).hasPrefix(realPathLoose(c) + "/") {
+            write.append(gitDir)
+            deny += ["config.worktree", "commondir", "gitdir", "config", "hooks", "info"].map { gitDir + "/" + $0 }
+        }
+        deny += scenarioSources()   // 모든 단위의 시나리오 원본(작업 폴더 쪽)도 판정이 고치지 않게
+        let readDeny = engineDeny + readDenyPaths + modelReadDeny
+        deny += readDeny
+        let rp = { (a: [String]) in a.map(realPathLoose) }
+        return APJudgeSandbox(write: rp(write), denyWrite: rp(deny), evidence: realPathLoose(evidence), denyRead: rp(readDeny),
+                              socketDirs: rp([tmp, evidence]), unixSockets: cfg["check_unix_sockets"] as? [String] ?? [],
+                              network: judgeNet(n), browser: browser)
+    }
+
+    // 판정 차례(규칙 apJudgeSteps): 고정한 시나리오(pinned·sha256 이 고정 설정에 있음) → 판정 명령
+    func judgeSteps(_ n: Int, pinned: [[String: Any]]? = nil) -> [APJudgeStep] {
+        let scs = (pinned ?? def(n)["scenarios"] as? [[String: Any]] ?? []).compactMap { o -> APPinnedScenario? in
+            guard let p = o["pinned"] as? String else { return nil }
+            let sc = scenarioOf(o)
+            return APPinnedScenario(scenario: sc, run: apScenarioRun(sc, head: scenarioHead(fm.contents(atPath: p) ?? Data())), pinned: p, sha256: o["sha256"] as? String)
+        }
+        return apJudgeSteps(check: def(n)["check"] as? String, shell: shell, scenarios: scs)
+    }
+    func judgeLabel(_ n: Int) -> String {
+        APJudgeOutcome(steps: judgeSteps(n), results: []).describe(check: def(n)["check"] as? String)
+    }
+
+    // 판정 걸음 하나(진짜 어댑터의 몸): 로그인 환경 + 증거 폴더·고정본·임시 폴더, 판정 샌드박스면 sandbox-exec 로 감싼다.
+    // plain 이 아니면 일시정지·중단·단위 시간 상한을 받는다(judgeInterrupt 에 남김)
+    var judgeInterrupt: CheckEnd?
+    func judgeStep(_ n: Int, _ u: inout [String: Any], _ s: APJudgeStep, root ev: String, limit: Double, plain: Bool, tmp: String, checksDir: String?) -> APStepResult {
+        let sev = s.evidence.isEmpty ? ev : ev + "/" + s.evidence
+        try? fm.createDirectory(atPath: sev, withIntermediateDirectories: true)
+        let log = sev + "/output.log"
+        try? fm.removeItem(atPath: log)
+        func refuse(_ why: String) -> APStepResult {
+            try? Data((why + "\n").utf8).write(to: URL(fileURLWithPath: log))
+            return APStepResult(code: -1, tail: why, note: why)
+        }
+        // 판정은 작업 폴더에서 돈다 — 그 자리의 git 이 바꿔치기된 git 폴더로 풀리면 돌리지 않는다(5-4 보안, 실패로 넘김)
+        if !plain, !unitGitOK(n) { return refuse("보안: 작업 폴더의 git 폴더가 출발 때와 달라져 엔진이 이 명령을 돌리지 않았습니다") }
+        let on = judgeSandboxOn(n)
+        var env = commandEnv(n)
+        env["CLAUDE_BOARD_EVIDENCE_DIR"] = sev
+        if let d = checksDir, isDir(d) { env["CLAUDE_BOARD_CHECKS_DIR"] = d }
+        if let p = s.pinned { env["CLAUDE_BOARD_SCENARIO"] = p }
+        if let c = s.criterion { env["CLAUDE_BOARD_CRITERION"] = c }
+        if s.kind == "browser" {
+            let probe = EngineToolProbe(path: env["PATH"] ?? loginPath(), browserPath: cfg["browser_path"] as? String)
+            if let b = probe.browser() { env["CLAUDE_BOARD_BROWSER"] = b; env["CLAUDE_BOARD_BROWSER_FLAGS"] = judgeBrowserFlags(tmp) }
+        }
+        var argv = s.argv
+        var profile: String?
+        if on {
+            guard sandboxExecOK() else { return refuse("판정 샌드박스(sandbox-exec)를 걸 수 없어 판정을 돌리지 않았습니다") }
+            // 판정이 스스로 띄울 포트를 다른 프로그램이 이미 듣고 있으면 돌리지 않는다(그 서비스에 닿지 않게, 보안 검토 2)
+            if case .ports(_, let bind) = judgeNet(n), let busy = bind.first(where: { portListening($0) }) {
+                return refuse("판정이 띄울 포트 \(busy) 를 다른 프로그램이 이미 쓰고 있어 판정을 돌리지 않았습니다(check_ports). 그 프로그램을 끄거나 포트를 바꿉니다")
+            }
+            env["CLAUDE_BOARD_PRIVATE_DIR"] = nil   // 엔진 전용 폴더는 판정 샌드박스가 읽지 못한다
+            env["TMPDIR"] = tmp + "/"; env["MAC_CHROMIUM_TMPDIR"] = tmp
+            let (text, skipped) = apJudgeProfile(judgeSandbox(n, evidence: sev, tmp: tmp, browser: s.kind == "browser", plain: plain))
+            if !skipped.isEmpty, !plain { event("engine", "판정 샌드박스에 나타낼 수 없는 경로 \(skipped.count)곳을 뺐습니다(\(skipped.prefix(2).joined(separator: ", ")))") }
+            let pf = sev + "/sandbox.sb"
+            try? fm.removeItem(atPath: pf)
+            guard (try? Data(text.utf8).write(to: URL(fileURLWithPath: pf))) != nil else { return refuse("판정 샌드박스 프로필을 쓰지 못해 판정을 돌리지 않았습니다") }
+            profile = text
+            argv = ["/usr/bin/sandbox-exec", "-f", pf] + argv
+        }
+        guard let first = argv.first, let c = Child(first, Array(argv.dropFirst()), env: env, cwd: cwd(n), outFile: log, newGroup: true) else {
+            return refuse("판정을 띄우지 못했습니다")
+        }
+        let start = now()
+        var interrupt: CheckEnd?, timedOut = false
+        if plain {
+            timedOut = !c.wait(limit)
+        } else {
+            u["procs"] = ["groups": [["pgid": Int(c.pid), "cmd": argv.joined(separator: " ")]]]
+            saveUnit(n, u)
+            let cap = (caps(n)["minutes"] ?? 120) * 60
+            var tick = start
+            while c.poll() == nil {
+                let x = now()
+                u["active_sec"] = r3((num(u["active_sec"]) ?? 0) + min(max(x - tick, 0), 5)); tick = x
+                if let st = pollControl(), st != .restart { interrupt = st == .pause ? .paused : .stopped; break }
+                if (num(u["active_sec"]) ?? 0) >= cap { interrupt = .capped("minutes"); break }
+                if x - start >= limit { timedOut = true; break }
+                usleep(500_000)
+            }
+        }
+        killGroup(c.pid)   // 끝났어도 판정이 뒤에 남긴 프로세스(띄운 서버 등)까지 치운다
+        _ = c.wait(3)
+        if !plain { u["procs"] = [:] as [String: Any] }
+        var tail = apOutputTail(fm.contents(atPath: log) ?? Data())
+        if timedOut { tail += "\n(시간 상한 \(dur(limit))에 닿아 엔진이 멈췄습니다)" }
+        if let profile { try? fm.removeItem(atPath: sev + "/sandbox.sb"); try? Data(profile.utf8).write(to: URL(fileURLWithPath: sev + "/sandbox.sb")) }   // 판정이 고쳤어도 쓴 것으로
+        let skip: Set<String> = ["sandbox.sb", "summary.json"]
+        let files = ((fm.enumerator(atPath: sev)?.allObjects as? [String]) ?? []).filter { rel in
+            !isDir(sev + "/" + rel) && !skip.contains(rel) && !(s.evidence.isEmpty && rel.hasPrefix("scenario-"))
+        }.sorted()
+        if let i = interrupt { judgeInterrupt = i }
+        let code: Int32 = interrupt != nil || timedOut ? -1 : (c.code ?? -1)
+        if !plain { saveUnit(n, u) }
+        return APStepResult(code: code, sec: now() - start, timedOut: timedOut, interrupted: interrupt != nil, tail: tail, files: files)
+    }
+
+    // 판정 한 번(규칙 apRunJudge): 증거 폴더를 새로 만들고 판정 임시 폴더를 둔 뒤 차례대로. 끝나면 요약(summary.json)을 쓰고 파일을 읽기 전용으로
+    final class JudgeRunner: APJudgeRunner {
+        let e: Engine, n: Int, ev: String, limit: Double, plain: Bool, tmp: String, checksDir: String?
+        var u: [String: Any]
+        init(_ e: Engine, _ n: Int, _ u: [String: Any], ev: String, limit: Double, plain: Bool, tmp: String, checksDir: String?) {
+            self.e = e; self.n = n; self.u = u; self.ev = ev; self.limit = limit; self.plain = plain; self.tmp = tmp; self.checksDir = checksDir
+        }
+        func digest(_ path: String) -> String? { plainFile(path).map { sha256($0) } }
+        func run(_ step: APJudgeStep) -> APStepResult { e.judgeStep(n, &u, step, root: ev, limit: limit, plain: plain, tmp: tmp, checksDir: checksDir) }
+    }
+    func runJudge(_ n: Int, _ u: inout [String: Any], _ steps: [APJudgeStep], ev: String, limit: Double, plain: Bool, checksDir: String?) -> APJudgeOutcome {
+        try? fm.removeItem(atPath: ev)
+        try? fm.createDirectory(atPath: ev, withIntermediateDirectories: true)
+        let tbase = realPathLoose((loginEnv["TMPDIR"] ?? NSTemporaryDirectory()))
+        let tmp = tbase + "/claude-board-judge-\(id)-\(plain ? "prerun-" : "")\(n)"
+        try? fm.removeItem(atPath: tmp)
+        mkdirPrivate(tmp)
+        judgeInterrupt = nil
+        let r = JudgeRunner(self, n, u, ev: ev, limit: limit, plain: plain, tmp: tmp, checksDir: checksDir)
+        let o = apRunJudge(steps, runner: r)
+        u = r.u
+        try? fm.removeItem(atPath: tmp)
+        let note = apJudgeSandboxNote(on: judgeSandboxOn(n), network: judgeNet(n))
+        writeJSON(ev + "/summary.json", apJudgeSummary(o, sandbox: note, at: now()))
+        lockEvidence(ev)
+        return o
+    }
+
     func check(_ n: Int, _ u: inout [String: Any]) -> CheckEnd {
         let k = Int(num(u["try"]) ?? 0)
-        let cmd = def(n)["check"] as? String ?? "false"
-        // 증거 폴더: 판정 출력(output.log)과, 판정 명령이 $CLAUDE_BOARD_EVIDENCE_DIR 에 남긴 파일. 엔진만 쓴다(모델은 샌드박스·거부 규칙으로 못 씀)
+        // 증거 폴더: 판정 출력(output.log)과, 판정이 $CLAUDE_BOARD_EVIDENCE_DIR 에 남긴 파일, 시나리오마다 scenario-<i>/, 요약 summary.json·샌드박스 프로필 sandbox.sb.
+        // 엔진만 쓴다(모델은 샌드박스·거부 규칙으로 못 씀, 끝나면 파일 0444)
         let ev = unitDir(n) + "/evidence/check-\(k)"
-        event("board", "판정 명령을 돌립니다\(k == 0 ? "" : "(다시 \(k)번째)").")
+        let steps = judgeSteps(n)
+        let scen = steps.filter { $0.kind != "check" }.count
+        event("board", (scen == 0 ? "판정 명령을 돌립니다" : "판정을 돌립니다(\(judgeLabel(n)), 고정본으로)") + "\(k == 0 ? "" : "(다시 \(k)번째)").")
         let limit = (num(def(n)["check_timeout_min"]) ?? num(cfg["check_timeout_min"]) ?? 10) * 60
-        let r = fixedCommand(n, &u, cmd, ev: ev, limit: limit)
+        let o = runJudge(n, &u, steps, ev: ev, limit: limit, plain: false, checksDir: dir + "/pinned/checks/scenarios/\(n)")
+        let sec = o.results.reduce(0) { $0 + $1.sec }
+        let checkFiles = zip(o.steps, o.results).first { $0.0.kind == "check" }?.1.files ?? []
         // timed_out: 시간 상한에 닿아 엔진이 멈췄다(⑦, prerun.json 의 timed_out 과 같은 칸) — 종료 코드 -1 만으로는 실패와 갈리지 않는다
-        u["checks"] = (u["checks"] as? [Any] ?? []) + [["try": k, "exit": Int(r.code), "sec": r3(r.sec), "tail": r.tail, "at": r3(now()),
-                                                        "interrupted": r.interrupt != nil, "timed_out": r.timedOut, "evidence": "evidence/check-\(k)", "files": r.files]]
+        var entry: [String: Any] = ["try": k, "exit": Int(o.code), "sec": r3(sec), "tail": o.tail, "at": r3(now()),
+                                    "interrupted": o.interrupted, "timed_out": o.timedOut, "evidence": "evidence/check-\(k)", "files": checkFiles,
+                                    "sandbox": judgeSandboxOn(n)]
+        if scen > 0 { entry["parts"] = apJudgeSummary(o, sandbox: "", at: now())["parts"] }
+        u["checks"] = (u["checks"] as? [Any] ?? []) + [entry]
         saveUnit(n, u)
-        if let interrupt = r.interrupt { return interrupt }
-        if r.code == 0 { event("board", "판정 통과(\(dur(r.sec)))."); return .passed }
-        return .failed(r.code, r.tail, timedOut: r.timedOut ? limit : nil)
+        if o.interrupted { return judgeInterrupt ?? .stopped }
+        if o.passed { event("board", "판정 통과(\(dur(sec)))."); return .passed }
+        return .failed(o.code, o.tail, timedOut: o.timedOut ? limit : nil)
     }
 }
 
@@ -3568,6 +3861,10 @@ func badRoot(_ p: String, runDir: String) -> String? {
 
 // 출발 전 확인과 고정: run.json·queue.json 에서 보안에 걸리는 값(모델, 도구 목록, 쓰기 범위, 네트워크, 환경 변수,
 // 단위의 prompt·check·precheck·cwd·상한)을 골라 고정 설정으로 만든다. 문제가 있으면 problems 에 쉬운 말로
+// prepare 가 남기는 시험 실행기 결과(status --json·prerun.json 이 내놓음): 시나리오마다 환경 확인 줄, 실행 파일이 없는 수용 기준(출발 카드 감)
+var prepareEnvRows: [[String: Any]] = []
+var prepareGaps: [[String: Any]] = []
+
 func prepare(_ dir: String, dev: Bool) -> (problems: [String], frozen: [String: Any], queue: [[String: Any]]) {
     var problems: [String] = []
     let id = (dir as NSString).lastPathComponent
@@ -3649,10 +3946,26 @@ func prepare(_ dir: String, dev: Bool) -> (problems: [String], frozen: [String: 
         if let s = pr as? String, s.hasPrefix("/"), isDir(s) { f["project_root"] = canonical(s) }
         else { problems.append("run.json 의 project_root 는 있는 폴더의 절대 경로여야 합니다") }
     }
+    // 시험 실행기(5단계 ⑪-1): 판정 샌드박스(기본 켬, 사람이 끈 실행·단위만 밖), 사람이 정한 unix socket, 시험 빌드의 브라우저 자리
+    if let v = run["check_sandbox"] { if v is Bool { f["check_sandbox"] = v } else { problems.append("run.json 의 check_sandbox 는 true/false 입니다") } }
+    if let v = run["check_unix_sockets"] {
+        if let a = v as? [String], a.allSatisfy({ $0.hasPrefix("/") }) { f["check_unix_sockets"] = a } else { problems.append("run.json 의 check_unix_sockets 는 절대 경로 배열입니다") }
+    }
+    if let v = run["browser_path"] {
+        if !dev { problems.append("browser_path 는 시험용 칸이라 --dev 출발에서만 씁니다") }
+        else if let b = v as? String, b.hasPrefix("/") { f["browser_path"] = b } else { problems.append("run.json 의 browser_path 는 절대 경로입니다") }
+    }
+    let answers = readJSON(dir + "/answers.json") as? [String: Any] ?? [:]
+    prepareEnvRows = []; prepareGaps = []
     var units: [[String: Any]] = []
     for (i, q) in queue.enumerated() {
         let n = i + 1
-        for k in ["title", "prompt", "check", "cwd"] where (q[k] as? String ?? "").isEmpty { problems.append("단위 \(n) 에 \(k) 가 없습니다") }
+        // 판정 시나리오(scenarios)가 있으면 판정 명령(check)은 없어도 된다(둘 다 있으면 둘 다 통과해야 통과)
+        let (scs, scProblems) = apParseScenarios(q["scenarios"], unit: n)
+        let (crs, crProblems) = apParseCriteria(q["criteria"], unit: n)
+        problems += scProblems + crProblems + apScenarioCriterionProblems(scs, crs, unit: n)
+        for k in ["title", "prompt", "cwd"] where (q[k] as? String ?? "").isEmpty { problems.append("단위 \(n) 에 \(k) 가 없습니다") }
+        if (q["check"] as? String ?? "").isEmpty, scs.isEmpty, q["scenarios"] == nil { problems.append("단위 \(n) 에 check 가 없습니다(판정 명령이나 판정 시나리오 scenarios 가 있어야 합니다)") }
         var d: [String: Any] = ["id": q["id"] as? String ?? "u\(n)", "title": q["title"] ?? "", "prompt": q["prompt"] ?? "", "check": q["check"] ?? "",
                                 "tickets": q["tickets"] ?? [] as [Any], "review": q["review"] ?? false]
         if let c = q["cwd"] as? String, c.hasPrefix("/"), isDir(c) {
@@ -3703,10 +4016,50 @@ func prepare(_ dir: String, dev: Bool) -> (problems: [String], frozen: [String: 
             } else { problems.append("단위 \(n) 의 depends 는 앞선 단위 id 의 배열이어야 합니다") }
         }
         if let v = q["prerun"] { if v is Bool { d["prerun"] = v } else { problems.append("단위 \(n) 의 prerun 은 true/false 입니다") } }
+        if let v = q["check_sandbox"] { if v is Bool { d["check_sandbox"] = v } else { problems.append("단위 \(n) 의 check_sandbox 는 true/false 입니다") } }
+        if let v = q["check_ports"] {
+            if let a = v as? [Int], a.allSatisfy({ (1024...65535).contains($0) }), a.count <= 8 { d["check_ports"] = a }
+            else { problems.append("단위 \(n) 의 check_ports 는 판정이 스스로 띄우는 1024~65535 포트 배열(8개까지)입니다") }
+        }
+        // 시나리오 파일: 작업 폴더 안의 보통 파일, 돌리는 법·필요한 도구(환경 확인). 고정본은 출발 때 뜬다(start)
+        if !scs.isEmpty, let c = d["cwd"] as? String {
+            let probe = EngineToolProbe(path: loginPath(), browserPath: f["browser_path"] as? String)
+            var out: [[String: Any]] = []
+            for sc in scs {
+                let (data, why) = scenarioSource(c, sc.file)
+                if let why { problems.append("단위 \(n) 의 시나리오 \(sc.file) 를 쓸 수 없습니다: \(why)"); continue }
+                let plan = apScenarioRun(sc, head: scenarioHead(data ?? Data()))
+                let row = apEnvCheck(unit: n, scenario: sc, run: plan, cwd: c, probe: probe)
+                prepareEnvRows.append(apEnvRowJSON(row))
+                if let why = apEnvProblem(row) { problems.append(why) }
+                var o = apScenarioJSON(sc); o["sha256"] = sha256(data ?? Data())
+                out.append(o)
+            }
+            d["scenarios"] = out
+        }
+        // 수용 기준: 시나리오가 짝지어지지 않은 기준은 출발 카드 답(answers.json 의 criterion-<단위>-<기준>)대로 고정한다. 답이 없으면 추천(범위에서 빼기)
+        if !crs.isEmpty {
+            let uid = d["id"] as? String ?? "u\(n)"
+            d["criteria"] = crs.map { c -> [String: Any] in
+                let (a, defaulted) = apCriterionAnswer(c, scenarios: scs, answer: answers[apCriterionCardId(unit: uid, criterion: c.id)] as? String)
+                var o = apCriterionJSON(c); o["answer"] = a
+                if defaulted { o["defaulted"] = true }
+                return o
+            }
+            for c in apCriteriaGaps(crs, scs) {
+                let t = apCriterionCard(unitTitle: d["title"] as? String ?? "", criterion: c)
+                prepareGaps.append(["unit": n, "unit_id": uid, "id": c.id, "text": c.text, "card": apCriterionCardId(unit: uid, criterion: c.id),
+                                    "title": t.title, "why": t.why, "recommended": t.recommended,
+                                    "options": t.options.map { ["key": $0.key, "label": $0.label, "note": $0.note] }])
+            }
+        }
         if d["branch"] != nil, d["story"] == nil { problems.append("단위 \(n) 의 branch 는 story 와 함께 씁니다(Jira 연결 프로젝트의 작업 가지)") }
         units.append(d)
         queue[i]["id"] = d["id"]; queue[i]["tickets"] = d["tickets"]; queue[i]["status"] = "pending"
     }
+    // 판정 샌드박스(⑪-1): 켠 단위가 하나라도 있으면 sandbox-exec 로 걸 수 있어야 한다(못 걸면 판정을 밖에서 돌리지 않고 출발하지 않음)
+    let anySandboxed = units.contains { ($0["check_sandbox"] as? Bool ?? f["check_sandbox"] as? Bool ?? true) }
+    if anySandboxed, !sandboxExecOK() { problems.append("판정 샌드박스(/usr/bin/sandbox-exec)를 걸 수 없습니다. 판정을 샌드박스 밖에서 돌리지 않으므로 출발하지 않습니다") }
     // 가지(설계 2장 끝): 단위 작업 폴더·쓰기 범위가 든 저장소마다 출발 가지에서 autopilot/<실행 id> 를 만든다. 출발 가지는 run.json base_branch
     // (가지 이름 하나 또는 {저장소 경로: 가지}), 없으면 지금 걸린 가지
     let repos = gitRepos(units.compactMap { $0["cwd"] as? String } + roots)
@@ -3953,6 +4306,29 @@ func cmdStart(_ args: [String]) -> Never {
     } else {
         inPlace(fz["worktree_reason"] as? String ?? "원래 작업 트리에서 돕니다")
     }
+    // 판정 시나리오 고정본(5단계 ⑪-1, 설계 2장 "판정 시나리오 잠금"): 작업 폴더(따로 작업 트리면 작업 트리, 원래 작업 트리면 자율주행 가지로 바꾼 뒤)의
+    // 시나리오를 pinned/checks/scenarios/<단위>/<차례>/<이름> 에 복사하고(파일 0444, 모델 쓰기 금지 자리) 고정 설정에 그 자리와 sha256 을 넣는다.
+    // 판정은 늘 이 고정본으로 하고, 돌리기 전에 지문을 견준다(작업 가지의 시나리오가 바뀌어도, 고정본이 바뀌면 돌리지 않음)
+    try? fm.removeItem(atPath: dir + "/pinned/checks/scenarios")
+    if var us = fz["units"] as? [[String: Any]] {
+        for i in us.indices {
+            guard var scs = us[i]["scenarios"] as? [[String: Any]], !scs.isEmpty, let c = us[i]["cwd"] as? String else { continue }
+            for k in scs.indices {
+                let file = scs[k]["file"] as? String ?? ""
+                let (data, why) = scenarioSource(c, file)
+                guard let data else { rollbackBranches(branches); fail("단위 \(i + 1) 의 시나리오 \(file) 를 고정하지 못했습니다: \(why ?? "?")") }
+                let d = dir + "/pinned/checks/scenarios/\(i + 1)/\(k + 1)"
+                mkdirPrivate(dir + "/pinned/checks"); mkdirPrivate(dir + "/pinned/checks/scenarios"); mkdirPrivate(dir + "/pinned/checks/scenarios/\(i + 1)"); mkdirPrivate(d)
+                let dst = d + "/" + (file as NSString).lastPathComponent
+                guard fm.createFile(atPath: dst, contents: data, attributes: [.posixPermissions: 0o444]) else {
+                    rollbackBranches(branches); fail("단위 \(i + 1) 의 시나리오 \(file) 고정본을 쓰지 못했습니다")
+                }
+                scs[k]["pinned"] = dst; scs[k]["sha256"] = sha256(data)
+            }
+            us[i]["scenarios"] = scs
+        }
+        fz["units"] = us
+    }
     let frozenData = Data(jsonText(fz, pretty: true).utf8)
     guard writePrivate(dir + "/pinned/frozen.json", frozenData) else { rollbackBranches(branches); fail("고정 설정을 쓰지 못했습니다") }
     // 근거 묶음도 출발 때 사본을 떠 둔다(출발 뒤에 원본이 바뀌어도 단위가 받는 묶음은 같다). 단위를 시작할 때 units/<n>/context/ 로 넘긴다. context 는 바꾸지 않는다
@@ -4049,11 +4425,18 @@ func statusBeforeStart(_ dir: String, _ run: [String: Any], dev devFlag: Bool, j
     if json {
         let units = (f["units"] as? [[String: Any]] ?? []).enumerated().map { i, d -> [String: Any] in
             var o: [String: Any] = ["n": i + 1]
-            for k in ["id", "story", "branch", "story_branch"] { if let v = d[k] { o[k] = v } }
+            for k in ["id", "story", "branch", "story_branch", "scenarios", "criteria", "check_ports"] { if let v = d[k] { o[k] = v } }
+            let on = d["check_sandbox"] as? Bool ?? f["check_sandbox"] as? Bool ?? true
+            o["check_sandbox"] = on
+            o["judge_sandbox"] = apJudgeSandboxNote(on: on, network: apJudgeNet(networkAllow: f["network_allow"] as? [String] ?? defaultNetwork,
+                                                                             localBinding: f["local_binding"] as? Bool ?? false, checkPorts: d["check_ports"] as? [Int] ?? []))
             return o
         }
+        // 시험 실행기(⑪-1): 시나리오마다 환경 확인 줄(없으면 실패 줄과 까닭), 실행 파일이 없는 수용 기준(출발 카드 감), 판정 샌드박스(단위마다 한 줄, 맨 위는 켠 단위가 있는지)
+        let anyOn = units.contains { $0["check_sandbox"] as? Bool ?? true }
         print(jsonText(["problems": problems, "worktree_mode": f["worktree_mode"] ?? NSNull(), "worktree_reason": f["worktree_reason"] ?? NSNull(),
-                        "repos": f["repos"] ?? [] as [Any], "units": units, "set": setSummary(f)], pretty: true))
+                        "repos": f["repos"] ?? [] as [Any], "units": units, "set": setSummary(f),
+                        "env": prepareEnvRows, "criteria_gaps": prepareGaps, "judge_sandbox": anyOn], pretty: true))
         exit(problems.isEmpty ? 0 : 1)
     }
     var out = "실행 \((dir as NSString).lastPathComponent) · 출발 전\(run["title"].map { " · \($0)" } ?? "")\n"
@@ -4109,7 +4492,16 @@ func statusBeforeStart(_ dir: String, _ run: [String: Any], dev devFlag: Bool, j
             let k = (fm.enumerator(atPath: p)?.allObjects as? [String] ?? []).filter { !isDir(p + "/" + $0) }.count
             out += "     근거 묶음(읽기 전용으로 넘김): \(p) (파일 \(k)개)\n"
         }
-        out += "     판정: \(short(d["check"] as? String ?? "", 160))" + ((d["check_timeout_min"]).map { apCheckLimitNote(minutes: num($0)) } ?? "") + "\n"
+        out += "     판정: \(short((d["check"] as? String ?? "").ifEmpty("(판정 명령 없음, 시나리오만)"), 160))" + ((d["check_timeout_min"]).map { apCheckLimitNote(minutes: num($0)) } ?? "") + "\n"
+        for o in d["scenarios"] as? [[String: Any]] ?? [] {
+            let row = prepareEnvRows.first { inum($0["unit"]) == i + 1 && $0["file"] as? String == o["file"] as? String }
+            let ok = row?["ok"] as? Bool ?? false
+            out += "     판정 시나리오: \(o["file"] ?? "")(\(apKindLabel(APScenarioKind(rawValue: o["kind"] as? String ?? "") ?? .shell))\((o["criterion"] as? String).map { " · 수용 기준 \($0)" } ?? "")) · 환경 \(ok ? "있음" : "없음") · 출발 때 고정본으로\n"
+        }
+        for c in d["criteria"] as? [[String: Any]] ?? [] where c["answer"] as? String != "scenario" {
+            out += "     수용 기준 \(c["id"] ?? "") 실행 파일 없음: \(c["answer"] as? String == apCriterionModelJudge ? "모델 판정으로 둠" : "범위에서 뺌")\(c["defaulted"] as? Bool == true ? "(출발 카드 답이 없어 추천대로)" : "")\n"
+        }
+        out += "     \(apJudgeSandboxNote(on: d["check_sandbox"] as? Bool ?? f["check_sandbox"] as? Bool ?? true, network: apJudgeNet(networkAllow: f["network_allow"] as? [String] ?? defaultNetwork, localBinding: f["local_binding"] as? Bool ?? false, checkPorts: d["check_ports"] as? [Int] ?? [])))\n"
         if let k = d["story"] as? String { out += "     스토리 \(k): 작업 가지 \(d["branch"] ?? "?") ← 스토리 가지 \(d["story_branch"] ?? "?")\n" }
         if let a = d["depends"] as? [String], !a.isEmpty { out += "     기대는 앞 단위: \(a.joined(separator: ", ")) (통과하지 않으면 건너뜀)\n" }
         if d["prerun"] as? Bool == false { out += "     판정 미리 돌리기: 넣지 않음(prerun: false)\n" }
@@ -4369,23 +4761,55 @@ func cmdPrerun(_ args: [String]) -> Never {
             }
         }
         let limit = (num(d["check_timeout_min"]) ?? num(f["check_timeout_min"]) ?? 10) * 60
-        let r = e.plainCommand(n, d["check"] as? String ?? "false", ev: ev, limit: limit)
-        o["ran"] = true; o["exit"] = Int(r.code); o["sec"] = r3(r.sec); o["tail"] = r.tail; o["passed"] = r.code == 0; o["evidence"] = "prerun/\(n)"
+        // 시험 실행기(⑪-1): 시나리오를 그 자리(따로 작업 트리면 임시 작업 트리)에서 prerun/<n>/pinned/ 로 복사해 그 사본으로, 출발 뒤와 같은 판정 샌드박스 안에서
+        var pins: [[String: Any]] = []
+        let pinDir = ev + ".pinned"
+        try? fm.removeItem(atPath: pinDir)
+        for (k, sc) in (d["scenarios"] as? [[String: Any]] ?? []).enumerated() {
+            let file = sc["file"] as? String ?? ""
+            var x = sc
+            if let data = scenarioSource(d["cwd"] as? String ?? "", file).data {
+                let pd = pinDir + "/\(k + 1)"
+                try? fm.createDirectory(atPath: pd, withIntermediateDirectories: true)
+                let dst = pd + "/" + (file as NSString).lastPathComponent
+                _ = fm.createFile(atPath: dst, contents: data, attributes: [.posixPermissions: 0o444])
+                x["pinned"] = dst; x["sha256"] = sha256(data)
+            } else { x["pinned"] = pinDir + "/\(k + 1)/(없음)" }   // 없어졌으면 지문이 맞지 않아 실패로 남는다
+            pins.append(x)
+        }
+        var dummy: [String: Any] = [:]
+        let steps = e.judgeSteps(n, pinned: pins)
+        let r = e.runJudge(n, &dummy, steps, ev: ev, limit: limit, plain: true, checksDir: pinDir)
+        let sec = r.results.reduce(0) { $0 + $1.sec }
+        o["ran"] = true; o["exit"] = Int(r.code); o["sec"] = r3(sec); o["tail"] = r.tail; o["passed"] = r.passed; o["evidence"] = "prerun/\(n)"
+        o["sandbox"] = apJudgeSandboxNote(on: e.judgeSandboxOn(n), network: e.judgeNet(n))
         if r.timedOut { o["timed_out"] = true }
+        if !pins.isEmpty {
+            let parts = apJudgeSummary(r, sandbox: "", at: now())["parts"] as? [[String: Any]] ?? []
+            o["scenarios"] = parts.filter { $0["kind"] as? String != "check" }
+            o["already"] = parts.filter { $0["kind"] as? String != "check" && $0["passed"] as? Bool == true }.compactMap { $0["file"] as? String }
+        }
         units.append(o)
-        if r.code == 0 {
+        if r.passed {
             passing.append(n)
             cards.append(apPrerunCard(n: n, id: d["id"] as? String ?? "u\(n)", title: t))   // 규칙 apPrerunCard
-            say("일하기 전부터 통과합니다(\(dur(r.sec))). 출발 카드 감: 빼기(추천) · 판정 고치기 · 그대로")
+            say("일하기 전부터 통과합니다(\(dur(sec))). 출발 카드 감: 빼기(추천) · 판정 고치기 · 그대로")
         } else {
-            say("실패(종료 코드 \(r.code)\(r.timedOut ? ", 시간 상한" : ""), \(dur(r.sec))). 일하기 전이라 맞습니다")
+            say("실패(종료 코드 \(r.code)\(r.timedOut ? ", 시간 상한" : ""), \(dur(sec))). 일하기 전이라 맞습니다")
+            // 단위는 실패했지만 일하기 전부터 통과한 시나리오(이미 통과): 시나리오마다 출발 카드 감(판정 고치기 추천)
+            for (st, res) in zip(r.steps, r.results) where st.kind != "check" && res.code == 0 && !res.timedOut {
+                cards.append(apPrerunScenarioCard(n: n, id: d["id"] as? String ?? "u\(n)", title: t, file: st.file ?? "", criterion: st.criterion))
+                say("  시나리오 \(st.file ?? "") 는 이미 통과합니다(일하기 전부터). 출발 카드 감: 판정 고치기(추천) · 그대로 · 빼기")
+            }
         }
     }
     if let tw = tempWt {   // 임시 작업 트리를 지운다
         _ = gitRun(["worktree", "remove", "--force", tw.path], cwd: tw.repo)
         _ = gitRun(["worktree", "prune"], cwd: tw.repo); try? fm.removeItem(atPath: tw.path)
     }
-    writeJSON(dir + "/prerun.json", ["at": r3(now()), "where": whereNotes, "units": units, "already_passing": passing, "cards": cards])
+    writeJSON(dir + "/prerun.json", ["at": r3(now()), "where": whereNotes, "units": units, "already_passing": passing, "cards": cards,
+                                     "env": prepareEnvRows, "criteria_gaps": prepareGaps,
+                                     "judge_sandbox": e.defs.indices.contains { e.judgeSandboxOn($0 + 1) }])
     print("결과: \(dir)/prerun.json (일하기 전부터 통과 \(passing.count)개)")
     exit(0)
 }

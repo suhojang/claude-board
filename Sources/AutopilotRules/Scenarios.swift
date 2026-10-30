@@ -346,6 +346,7 @@ public struct APStepResult: Equatable, Sendable {
 public struct APJudgeOutcome: Equatable, Sendable {
     public var steps: [APJudgeStep]
     public var results: [APStepResult]
+    public init(steps: [APJudgeStep], results: [APStepResult]) { self.steps = steps; self.results = results }
     public var passed: Bool { !interrupted && !results.isEmpty && results.count == steps.count && results.allSatisfy { $0.code == 0 && !$0.timedOut } }
     public var interrupted: Bool { results.contains { $0.interrupted } }
     public var timedOut: Bool { results.contains { $0.timedOut } }
