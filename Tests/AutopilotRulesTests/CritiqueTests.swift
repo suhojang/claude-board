@@ -418,6 +418,9 @@ private let caseFiles: [String: String] = ["findings.json": findingsJSON, "cases
         #expect(c == [APJudgeChange(unit: "u1", title: "안내", field: "check", old: "grep -q a N.md", new: "test x"),
                       APJudgeChange(unit: "u2", title: "목록", field: "scenarios", old: "s.sh(AC-1)", new: "s2.sh(AC-1)")])
         #expect(apJudgeChanges(old: old, new: old).isEmpty)
+        #expect(apLineChange(old: "a\nb\nc", new: "a\nc\nd\ne") == (2, 1))
+        let tc = apScenarioTextChanges(old: ["u1/list.sh": "a\nb", "u1/gone.sh": "x"], new: ["u1/list.sh": "a\nc", "u1/new.sh": "y"], titles: ["u1": "할 일"])
+        #expect(tc == [APJudgeChange(unit: "u1", title: "할 일", field: "scenario:list.sh", old: "1줄 뺌", new: "1줄 더함")])
     }
 }
 

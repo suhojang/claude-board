@@ -6576,6 +6576,20 @@ func fixItems(_ dir: String, cards: [String], into fixIn: String) -> [APFixItem]
     return out
 }
 
+// 판정 고치기 앞뒤 초안의 시나리오 글 차이(규칙 apScenarioTextChanges) — 출발 확인의 판정 차이에 보인다
+func scenarioChanges(_ oldDir: String, _ newDir: String, units: [APDraftedUnit]) -> [[String: Any]] {
+    var o: [String: String] = [:], n: [String: String] = [:], titles: [String: String] = [:]
+    let of = EngineDraftFiles(root: oldDir), nf = EngineDraftFiles(root: newDir)
+    for u in units {
+        titles[u.id] = u.title
+        for sc in u.scenarios {
+            if let d = of.read("scenarios/\(u.id)/\(sc.file)") { o["\(u.id)/\(sc.file)"] = String(decoding: d, as: UTF8.self) }
+            if let d = nf.read("scenarios/\(u.id)/\(sc.file)") { n["\(u.id)/\(sc.file)"] = String(decoding: d, as: UTF8.self) }
+        }
+    }
+    return apScenarioTextChanges(old: o, new: n, titles: titles).map { ["unit": $0.unit, "title": $0.title, "field": $0.field, "old": $0.old, "new": $0.new] }
+}
+
 func swapFix(_ x: TopicPrep, round: Int) -> Bool {
     let prev = x.dir + "/draft-r\(round - 1)"
     try? fm.removeItem(atPath: prev)
@@ -6605,8 +6619,9 @@ func cmdDraft(_ args: [String]) {
             reply(["ok": false, "problems": ["받을 판정 고치기 \(k)차 결과가 없습니다"]], false)
         }
         guard swapFix(x, round: k) else { reply(["ok": false, "problems": ["고친 초안으로 바꿔 끼우지 못했습니다"]], false) }
-        var (o, ok, _) = draftReport(x, folder: x.dir + "/draft", note: "", cost: 0, sec: 0, model: model)
+        var (o, ok, chk) = draftReport(x, folder: x.dir + "/draft", note: "", cost: 0, sec: 0, model: model)
         o["fix_round"] = k; o["accepted_weak"] = weak["reasons"] ?? []
+        o["scenario_changes"] = scenarioChanges(x.dir + "/draft-r\(k - 1)", x.dir + "/draft", units: chk.units)
         reply(o, ok)
     }
     let fixing = fixRound != nil
@@ -6669,6 +6684,7 @@ func cmdDraft(_ args: [String]) {
     guard swapFix(x, round: k) else { o["ok"] = false; o["note"] = "고친 초안으로 바꿔 끼우지 못했습니다"; reply(o, false) }
     var o2 = draftReport(x, folder: x.dir + "/draft", note: "", cost: sr.cost, sec: sr.sec, model: model).o
     o2["fix_round"] = k; o2["fix_items"] = o["fix_items"]
+    o2["scenario_changes"] = scenarioChanges(x.dir + "/draft-r\(k - 1)", x.dir + "/draft", units: chk.units)
     reply(o2, true)
 }
 

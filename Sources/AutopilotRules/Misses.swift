@@ -311,3 +311,24 @@ public func apJudgeChanges(old: [[String: Any]], new: [[String: Any]]) -> [APJud
     }
     return out
 }
+
+// 시나리오 글이 바뀐 것(판정 고치기 차례: 앞 초안과 지금 초안의 같은 시나리오 파일). 줄 단위로 더한 줄·뺀 줄 수(같은 줄은 짝지어 뺌)
+public func apLineChange(old: String, new: String) -> (add: Int, del: Int) {
+    var pool: [String: Int] = [:]
+    for l in old.components(separatedBy: "\n") { pool[l, default: 0] += 1 }
+    var add = 0
+    for l in new.components(separatedBy: "\n") {
+        if let c = pool[l], c > 0 { pool[l] = c - 1 } else { add += 1 }
+    }
+    return (add, pool.values.reduce(0, +))
+}
+// 키 "<단위 id>/<파일>" → 글. 두 쪽에 다 있고 글이 다른 것만(없어진 시나리오는 apJudgeChanges 의 시나리오 목록·약해짐 검사가 본다)
+public func apScenarioTextChanges(old: [String: String], new: [String: String], titles: [String: String]) -> [APJudgeChange] {
+    new.keys.sorted().compactMap { k in
+        guard let o = old[k], let n = new[k], o != n else { return nil }
+        let unit = String(k.split(separator: "/").first ?? "")
+        let c = apLineChange(old: o, new: n)
+        return APJudgeChange(unit: unit, title: titles[unit] ?? unit, field: "scenario:" + String(k.dropFirst(unit.count + 1)),
+                             old: "\(c.del)줄 뺌", new: "\(c.add)줄 더함")
+    }
+}
