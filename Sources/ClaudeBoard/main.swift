@@ -18,7 +18,8 @@ _ = mdRenderDir
 // 시험 빌드(build-board.sh --dev, 번들 id com.claude.board.dev)는 설치된 보드와 함께 떠야 하므로 잠금 파일·분산 알림 이름을 따로 쓴다
 let instanceName = Bundle.main.bundleIdentifier == "com.claude.board.dev" ? "claude-board-dev" : "claude-board"
 
-// 명령줄 동작: claude-board --action pause|resume|stop|reopen|focus <세션 id>, --action quit -(설치 스크립트가 청하는 정상 종료)
+// 명령줄 동작: claude-board --action pause|resume|stop|reopen|focus <세션 id>, --action quit -(설치 스크립트가 청하는 정상 종료),
+// --action autopilot-open|autopilot-merge <자율주행 실행 id>(끝 알림을 누른 것과 같음)
 // 떠 있는 보드에 알림으로 넘긴다 — Ghostty 제어 권한을 가진 그 보드가 실행한다
 if let i = CommandLine.arguments.firstIndex(of: "--action"), i + 2 < CommandLine.arguments.count {
     DistributedNotificationCenter.default().postNotificationName(
@@ -30,6 +31,9 @@ if let i = CommandLine.arguments.firstIndex(of: "--action"), i + 2 < CommandLine
 @MainActor func performAction(_ action: String, _ id: String) {
     // 보드 밖에서 업데이트하는 install.sh 가 청하는 정상 종료 — 세션 id 는 보지 않는다. 이 동작을 모르는 옛 보드는 아래 세션 찾기에서 그냥 돌아간다
     if action == "quit" { (NSApp.delegate as? AppDelegate)?.requestQuit(); return }
+    // 자율주행 끝 알림을 누른 것과 같은 길(4단계 ⑩-3) — id 는 실행 id. 올릴 글이 있으면 검수, 없고 합치기가 남았으면 합치기·승격
+    if action == "autopilot-open", apRunIDOK(id) { APNotices.shared.open(id); return }
+    if action == "autopilot-merge", apRunIDOK(id) { APNotices.shared.openMerge(id); return }
     // 떠 있는 보드의 Store 를 쓴다 — 새로 만들면 매번 1초 타이머와 알림 관찰자가 남아 계속 돈다
     guard let s = (NSApp.delegate as? AppDelegate)?.store.groups.flatMap(\.sessions).first(where: { $0.id == id }) else { return }
     switch action {

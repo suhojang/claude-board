@@ -15,7 +15,10 @@
 #              PUT /wiki/rest/api/content/<id>/child/attachment(multipart, X-Atlassian-Token: no-check)
 #   Notion     GET /v1/users/me · POST /v1/pages · PATCH /v1/blocks/<id>/children(Notion-Version 머리, 한 번에 100블록·글 한 칸 2,000자 확인)
 #   Figma      GET /v1/me(X-Figma-Token)
-#   webhook    POST /hook/<아무것>
+#   webhook    POST /hook/<아무것> — 받은 본문(JSON)을 기록의 body 칸에 남긴다(⑩-3: 글 꼴·이스케이프·멘션 무력화를 보려고)
+#   티켓(⑩-3): GET /rest/api/3/project/<키>(issueTypes: Epic 1·Story 0·Task 0·Subtask -1) · POST /rest/api/3/issue(fields 확인 뒤 <프로젝트>-101 부터 키,
+#              만든 이슈는 GET 으로도 읽힘) · PUT /rest/api/3/issue/<키>(부모 바꾸기, 204)
+#   --fail-create 2,4  만들기 요청 차례 2·4 번째에 400(실패 줄·다시 누르면 남은 것만을 보려고)
 #   읽기(⑩-2): Jira GET /rest/api/3/issue/<키>(SHOP-10 에픽·SHOP-7 스토리·TODO-41 설명 든 스토리, 나머지 404)
 #              Confluence GET /wiki/rest/api/content/<id>(48213 정책 페이지, 48666 악성 견본: script·지시 주입·가짜 토큰, 403 은 권한 없음, 나머지 404)
 #              Notion GET /v1/pages/<id> · GET /v1/blocks/<id>/children(두 쪽, start_cursor)
@@ -37,13 +40,15 @@ ap.add_argument("--expired", action="store_true")
 ap.add_argument("--redirect")
 ap.add_argument("--name", default="fake")
 ap.add_argument("--image-base")
+ap.add_argument("--fail-create", default="")
 A = ap.parse_args()
+FAIL_CREATE = {int(x) for x in A.fail_create.split(",") if x.strip().isdigit()}
 TOKEN = os.environ.get("FAKE_TOKEN", "")
 if not TOKEN.startswith("fake-"):
     sys.exit("FAKE_TOKEN 은 fake- 로 시작하는 가짜 값만 받습니다")
 
 lock = threading.RLock()   # reply 안의 log 도 같은 잠금을 잡는다(429 갈래는 잠금 안에서 reply)
-state = {"n": 1000, "left429": A.fail429, "titles": set(), "comments": {}, "pages": {}, "attach": {}}
+state = {"n": 1000, "left429": A.fail429, "titles": set(), "comments": {}, "pages": {}, "attach": {}, "keys": {}, "creates": 0}
 
 
 # 읽기 견본 — 장난감 값. 토큰 꼴 글자는 파일에 글자 그대로 두지 않고 이어 붙여 만든다(공개 저장소의 비밀 찾기에 걸리지 않게)
@@ -77,6 +82,8 @@ def head(level, t):
 JIRA = {
     "SHOP-10": {"summary": "장바구니 쿠폰 개편", "status": {"name": "진행 중"}, "issuetype": {"name": "Epic", "hierarchyLevel": 1}},
     "SHOP-7": {"summary": "쿠폰 적용 순서", "status": {"name": "할 일"}, "issuetype": {"name": "스토리", "hierarchyLevel": 0}},
+    "SHOP-12": {"summary": "장바구니 합계", "status": {"name": "진행 중"}, "issuetype": {"name": "Story", "hierarchyLevel": 0}, "parent": {"key": "SHOP-10"}},
+    "SHOP-13": {"summary": "합계 반올림", "status": {"name": "할 일"}, "issuetype": {"name": "Subtask", "hierarchyLevel": -1, "subtask": True}, "parent": {"key": "SHOP-12"}},
     "TODO-41": {"summary": "회의실 예약 겹침 막기", "status": {"name": "진행 중"}, "issuetype": {"name": "스토리", "hierarchyLevel": 0},
                 "assignee": {"displayName": "김개발"}, "reporter": {"displayName": "박기획"}, "priority": {"name": "높음"},
                 "updated": "2026-10-29T10:00:00.000+0900", "labels": ["예약"],
@@ -250,6 +257,55 @@ class H(BaseHTTPRequestHandler):
         with lock:
             state["n"] += 1
             nid = str(state["n"])
+        # 티켓(⑩-3)
+        m = re.fullmatch(r"/rest/api/3/project/([A-Z][A-Z0-9_]*)", path)
+        if m and method == "GET":
+            return self.reply(200, {"key": m.group(1), "issueTypes": [
+                {"id": "10000", "name": "Epic", "subtask": False, "hierarchyLevel": 1},
+                {"id": "10001", "name": "Story", "subtask": False, "hierarchyLevel": 0},
+                {"id": "10002", "name": "Task", "subtask": False, "hierarchyLevel": 0},
+                {"id": "10003", "name": "Subtask", "subtask": True, "hierarchyLevel": -1}]}, None, e)
+        if path == "/rest/api/3/issue" and method == "POST":
+            f = (body or {}).get("fields") or {}
+            proj = (f.get("project") or {}).get("key", "")
+            tid = (f.get("issuetype") or {}).get("id", "")
+            parent = (f.get("parent") or {}).get("key", "")
+            summary = f.get("summary", "")
+            e["checks"] += adf_checks(f.get("description"))
+            if len(summary) > 255:
+                e["checks"].append("요약 255자 넘음")
+            with lock:
+                state["creates"] += 1
+                nth = state["creates"]
+            if nth in FAIL_CREATE:
+                e["checks"].append(f"--fail-create 차례 {nth}")
+                return self.reply(400, {"errorMessages": [], "errors": {"summary": "가짜 실패"}}, None, e)
+            if tid not in ("10001", "10003") or not proj or not summary:
+                return self.reply(400, {"errors": {"issuetype": "가짜 서버가 모르는 종류"}}, None, e)
+            known = parent in JIRA or parent in state["keys"].values()
+            if not known:
+                return self.reply(400, {"errors": {"parent": "없는 부모 " + parent}}, None, e)
+            with lock:
+                k = state["keys"].get(proj, 100) + 1
+                state["keys"][proj] = k
+                key = f"{proj}-{k}"
+                state["keys"]["_" + key] = key
+                JIRA[key] = {"summary": summary, "status": {"name": "할 일"}, "parent": {"key": parent},
+                             "issuetype": {"name": "Story" if tid == "10001" else "Subtask", "hierarchyLevel": 0 if tid == "10001" else -1}}
+            e["created"] = {"kind": "jira-issue", "key": key, "type": tid, "parent": parent, "summary": summary}
+            return self.reply(201, {"id": nid, "key": key, "self": f"http://127.0.0.1/rest/api/3/issue/{nid}"}, None, e)
+        m = re.fullmatch(r"/rest/api/3/issue/([A-Z][A-Z0-9_]*-[0-9]+)", path)
+        if m and method == "PUT":
+            parent = (((body or {}).get("fields") or {}).get("parent") or {}).get("key", "")
+            if m.group(1) not in JIRA:
+                return self.reply(404, {"errorMessages": ["Issue does not exist"]}, None, e)
+            JIRA[m.group(1)]["parent"] = {"key": parent}
+            e["created"] = {"kind": "jira-parent", "key": m.group(1), "parent": parent}
+            self.send_response(204)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            e["status"] = 204
+            return log(e)
         # 읽기(⑩-2)
         m = re.fullmatch(r"/rest/api/3/issue/([A-Z][A-Z0-9_]*-[0-9]+)", path)
         if m and method == "GET":
@@ -353,6 +409,7 @@ class H(BaseHTTPRequestHandler):
         # webhook(⑩-3 알림 흉내)
         if method == "POST" and path.startswith("/hook/"):
             e["created"] = {"kind": "webhook"}
+            e["body"] = body if body is not None else raw.decode("utf-8", "replace")[:4000]
             return self.reply(200, {"ok": True}, None, e)
         return self.reply(404, {"message": "not found"}, None, e)
 

@@ -18,7 +18,7 @@ public enum APService: String, CaseIterable, Equatable, Sendable {
     // 설정 화면에 보일 범위(쓰임) — 읽기는 ⑩-2 에서 쓴다. 값은 connections.json 의 scopes 에 그대로 남는다
     public var scopeChoices: [(key: String, label: String)] {
         switch self {
-        case .atlassian: [("jira", "Jira 쓰기(티켓 댓글)"), ("confluence", "Confluence 쓰기(보고서)"), ("read", "읽기")]
+        case .atlassian: [("jira", "Jira 쓰기(티켓 만들기·댓글)"), ("confluence", "Confluence 쓰기(보고서)"), ("read", "읽기")]
         case .notion: [("write", "Notion 쓰기(보고서)"), ("read", "읽기")]
         case .figma: [("read", "읽기")]
         case .webhook: [("notify", "알림")]
@@ -46,10 +46,11 @@ public struct APConnection: Equatable, Sendable {
     public var scopes: [String] = []
     public var expires = ""       // 토큰 만료일 yyyy-MM-dd(사람이 넣음, 없으면 빈 글자)
     public var checked: APCheckRecord?
+    public var format = APNotifyFormat.json   // webhook 글 꼴(4단계 ⑩-3) — 받는 쪽마다 정한다. 다른 서비스는 쓰지 않는다
     public init(id: String = "", service: APService = .atlassian, site: String = "", account: String = "", name: String = "", host: String = "",
-                scopes: [String] = [], expires: String = "", checked: APCheckRecord? = nil) {
+                scopes: [String] = [], expires: String = "", checked: APCheckRecord? = nil, format: APNotifyFormat = .json) {
         self.id = id; self.service = service; self.site = site; self.account = account; self.name = name; self.host = host
-        self.scopes = scopes; self.expires = expires; self.checked = checked
+        self.scopes = scopes; self.expires = expires; self.checked = checked; self.format = format
     }
 }
 
@@ -97,6 +98,7 @@ public func apParseConnections(_ data: Data?) -> [APConnection] {
             c.checked = APCheckRecord(at: (k["at"] as? NSNumber)?.doubleValue ?? 0, ok: k["ok"] as? Bool ?? false,
                                       who: clean(k["who"], 120), note: clean(k["note"], 300))
         }
+        if s == .webhook { c.format = APNotifyFormat(rawValue: e["format"] as? String ?? "") ?? .json }
         out.append(c)
     }
     return out
@@ -111,6 +113,7 @@ public func apConnectionsJSON(_ list: [APConnection]) -> [String: Any] {
         if !c.host.isEmpty { d["host"] = c.host }
         if !c.expires.isEmpty { d["expires"] = c.expires }
         if let k = c.checked { d["checked"] = ["at": k.at, "ok": k.ok, "who": k.who, "note": k.note] }
+        if c.service == .webhook { d["format"] = c.format.rawValue }
         return d
     }]
 }
@@ -343,7 +346,7 @@ public func apCheckOutcome(_ c: APConnection, _ r: APHTTPResponse) -> APCheckOut
 public func apCheckConnection(_ c: APConnection, dev: Bool, secrets: APSecrets, http: APHTTP) -> APCheckOutcome {
     if c.service == .webhook {
         guard secrets.exists(c.id) else { return .local("webhook 주소가 키체인에 없습니다") }
-        return .local("webhook 은 읽는 요청이 없어 주소 꼴만 봤습니다(시험 글 보내기는 알림과 함께 만듭니다)")
+        return .local("webhook 은 읽는 요청이 없어 주소 꼴만 봤습니다. 대화방에 닿는지는 '시험 글 보내기'로 봅니다")
     }
     guard let req = apCheckRequest(c, dev: dev), let base = apServiceBase(c, dev: dev), apSameSite(req.url, base: base) else {
         return .local("사이트 주소가 규칙에 맞지 않아 요청하지 않았습니다")

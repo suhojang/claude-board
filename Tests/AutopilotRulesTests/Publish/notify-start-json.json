@@ -1,0 +1,20 @@
+{
+  "event" : "start",
+  "id" : "start",
+  "lines" : [
+    "단위 2개를 차례로 합니다 · 모델 haiku",
+    "실행 20261030-1500-zz"
+  ],
+  "marker" : "오토파일럿 작성",
+  "name" : "zz ＜!channel＞ ＠here 팀",
+  "outbox_waiting" : "0",
+  "run" : "20261030-1500-zz",
+  "source" : "claude-board-autopilot",
+  "state" : "running",
+  "text" : "오토파일럿 작성\n[자율주행] zz ＜!channel＞ ＠here 팀 출발했습니다\n- 단위 2개를 차례로 합니다 · 모델 haiku\n- 실행 20261030-1500-zz",
+  "title" : "[자율주행] zz ＜!channel＞ ＠here 팀 출발했습니다",
+  "units_capped" : "0",
+  "units_done" : "1",
+  "units_failed" : "0",
+  "units_total" : "2"
+}

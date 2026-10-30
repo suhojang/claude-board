@@ -19,6 +19,7 @@
 #                                        · result(init 뒤 is_error result, 입력이 닫히면 끝) · preinit:<코드>(init 도 내지 않고 끝남)
 #       FAKE IGNORE_INT / FAKE IGNORE_TERM   그 신호를 무시한다(엔진의 SIGTERM·SIGKILL 단계를 보려고)
 #       FAKE NEXT <제목>|<까닭> · FAKE NEW <제목>|<까닭>   결과 기록의 next_start·new_work
+#       FAKE TICKET <임시 번호>|<제목>|<까닭>   결과 기록의 new_tickets(⑩-3 실행 중에 새로 필요해진 티켓, 임시 번호는 TMP-<단위>-<차례>)
 #       FAKE RESULT <JSON 파일 절대 경로>    결과 기록을 그 파일의 객체로(견본 기록, 보고서 시험. NEXT·NEW 는 쓰지 않음)
 #     SIGINT(엔진의 멈춤)를 받으면 진짜 claude 처럼(2026-10-20 실측) result subtype error_during_execution·is_error true·
 #     terminal_reason aborted_tools 를 내고 종료 코드 0 으로 끝난다.
@@ -226,6 +227,7 @@ if error and runs <= int(error[0]):
 
 out({"type": "system", "subtype": "init", "session_id": sid, "cwd": os.getcwd(), "model": "fake"})
 written, nexts, news, cost = [], [], [], 0.0
+tickets = []   # FAKE TICKET(⑩-3)
 custom = None   # FAKE RESULT 로 받은 결과 기록(견본)
 
 def interrupted():
@@ -282,9 +284,14 @@ for k, l in todo:
         t, _, w = rest.partition("|"); nexts.append({"title": t.strip(), "why": w.strip()})
     elif verb == "NEW":
         t, _, w = rest.partition("|"); news.append({"title": t.strip(), "why": w.strip()})
+    elif verb == "TICKET":
+        a = rest.split("|")
+        tickets.append({"temp": a[0].strip(), "title": (a[1] if len(a) > 1 else "").strip(), "why": (a[2] if len(a) > 2 else "").strip()})
 if stop.is_set(): interrupted()
 res = {"unit": {"title": "가짜 단위"}, "outcome": "done", "headline": "가짜 claude 가 줄대로 했습니다.", "summary": ["줄 %d개" % len(todo)],
        "next_start": nexts, "new_work": news}
+if tickets:
+    res["new_tickets"] = tickets
 if custom is None and os.path.exists(os.path.join(UNIT, "fake-result.txt")):
     try:
         custom = json.load(open(open(os.path.join(UNIT, "fake-result.txt")).read().strip()))
