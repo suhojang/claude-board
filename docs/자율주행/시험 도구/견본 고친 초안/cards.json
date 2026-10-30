@@ -1,0 +1,6 @@
+[
+ {"id": "c1", "title": "할 일 목록은 어떤 차례로 보일까요", "why": "주제 글과 자료에 차례가 없습니다.",
+  "options": [{"key": "new", "label": "새것 먼저"}, {"key": "old", "label": "오래된 것 먼저"}], "recommended": "new", "units": ["u1"]},
+ {"id": "c2", "criterion": "u2/AC-3", "title": "README 가 쉽게 읽히는지는 실행 파일로 못 봅니다", "why": "읽기 쉬운지는 사람이 봐야 합니다.",
+  "options": [{"key": "drop_criterion", "label": "범위에서 빼기"}, {"key": "model_judge", "label": "모델 판정으로 두기"}], "recommended": "drop_criterion"}
+]
