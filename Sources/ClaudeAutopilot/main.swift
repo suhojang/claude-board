@@ -535,6 +535,31 @@ let harnessWalkSkip: Set<String> = [".git", "node_modules", "build", ".gradle", 
 let harnessFileCap = 1 << 20        // 파일 하나 1 MiB
 let harnessTotalCap = 32 << 20      // 한 번 훑을 때 합계 32 MiB
 enum HarnessRead { case data(Data), large(Int), other(String) }   // other: 종류(link:<대상>·fifo·socket·device·dir·other)
+// 모델이 쓸 수 있는 자리의 기록 파일(claude 의 stderr.log 등)에서 offset 뒤에 붙은 글의 끝 max 바이트 — readHarnessFile 처럼 보통 파일만,
+// O_NOFOLLOW|O_NONBLOCK 으로 연다(FIFO·링크에서 멈추지 않게). 없거나 보통 파일이 아니면 빈 글(⑦: claude 오류 글에 앞선 띄우기의 stderr 가 섞이던 것)
+func fileTail(_ p: String, from offset: Int, max: Int = 4096) -> String {
+    var st = stat()
+    guard lstat(p, &st) == 0, st.st_mode & S_IFMT == S_IFREG else { return "" }
+    let fd = open(p, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
+    guard fd >= 0 else { return "" }
+    defer { close(fd) }
+    guard fstat(fd, &st) == 0, st.st_mode & S_IFMT == S_IFREG else { return "" }
+    let start = Swift.max(offset, Int(st.st_size) - max)
+    guard start < Int(st.st_size), lseek(fd, off_t(start), SEEK_SET) >= 0 else { return "" }
+    var d = Data(), buf = [UInt8](repeating: 0, count: 4096)
+    while d.count < max {
+        let n = read(fd, &buf, Swift.min(buf.count, max - d.count))
+        if n < 0, errno == EINTR { continue }
+        if n <= 0 { break }
+        d.append(contentsOf: buf[0..<n])
+    }
+    return String(decoding: d, as: UTF8.self)
+}
+func fileSize(_ p: String) -> Int {
+    var st = stat()
+    return lstat(p, &st) == 0 && st.st_mode & S_IFMT == S_IFREG ? Int(st.st_size) : 0
+}
+
 func readHarnessFile(_ p: String, budget: Int) -> HarnessRead? {
     var st = stat()
     guard lstat(p, &st) == 0 else { return nil }
@@ -1486,7 +1511,7 @@ extension RecordsDB {
 
 enum Stop { case pause, stop, restart }   // restart: 멈추고 다시 출발을 받았고 도는 단위가 없어 바로 멈춘다(5-4)
 enum TurnEnd { case finished, limit(Double?), capped(String), paused, stopped, failed(String) }
-enum CheckEnd { case passed, failed(Int32, String), capped(String), paused, stopped }
+enum CheckEnd { case passed, failed(Int32, String, timedOut: Double?), capped(String), paused, stopped }   // timedOut: 시간 상한에 닿아 엔진이 멈춘 판정이면 그 상한(초)
 enum WaitEnd { case elapsed, paused, stopped, restart }
 
 let stateLabel = ["starting": "준비 중", "running": "진행 중", "waiting_limit": "한도 대기", "waiting_stopline": "멈출 선 대기",
@@ -2741,17 +2766,17 @@ final class Engine {
                         why += m["state"] as? String == "merged" ? " 스토리 가지에 합쳤습니다." : m["state"] as? String == "nothing" ? " 합칠 커밋이 없었습니다." : " 스토리 가지에는 합치지 않았습니다."
                     }
                     endUnit(n, "done", why); return
-                case .failed(let code, let tail):
+                case .failed(let code, let tail, let timedOut):
                     let k = Int(num(u["try"]) ?? 0)
                     if apAfterCheck(passed: false, tries: k, retries: retries, waitingNow: waitingNow) == .fail {
-                        endUnit(n, "failed", apCheckFailReason(tries: k))
+                        endUnit(n, "failed", apCheckFailReason(tries: k, timedOut: timedOut))
                         return
                     }
                     u["try"] = k + 1; u["phase"] = "model"
                     // 글은 규칙 apCheckFailMessage·apCheckFailEvent(AutopilotRules/Checks.swift)
-                    u["next_message"] = apCheckFailMessage(code: code, check: def(n)["check"] as? String ?? "", tail: tail)
+                    u["next_message"] = apCheckFailMessage(code: code, check: def(n)["check"] as? String ?? "", tail: tail, timedOut: timedOut)
                     saveUnit(n, u)
-                    event("board", apCheckFailEvent(code: code, tries: k, retries: retries))
+                    event("board", apCheckFailEvent(code: code, tries: k, retries: retries, timedOut: timedOut))
                 case .capped(let kind):
                     endUnit(n, "capped", "\(capLabel[kind] ?? kind) 상한에 닿아 멈췄습니다. 바뀐 파일 목록을 남기고 다음 단위로 갑니다.")
                     return
@@ -2962,8 +2987,10 @@ final class Engine {
             event("board", "사람이 보낸 말 \(now_.count)개를 단위 \(n) 의 세션에 넘겼습니다(\(resumed ? "이어 가는 입력" : "첫 입력")에 붙임).")
         }
         saveUnit(n, u)
+        // stderr.log 는 띄울 때마다 뒤에 붙는다 — 오류 글에는 이번 띄우기가 쓴 것만 넣는다(⑦: 앞 띄우기의 글이 보였다)
+        let errPath = unitDir(n) + "/stderr.log", errStart = fileSize(errPath)
         guard let c = Child(claude, args, env: claudeEnv(n), cwd: cwd(n), stdinPipe: true, stdoutPipe: true,
-                            errFile: unitDir(n) + "/stderr.log") else {
+                            errFile: errPath) else {
             return .failed("claude 를 띄우지 못했습니다")
         }
         u["procs"] = ["claude_pid": Int(c.pid), "groups": [] as [Any]]
@@ -2983,13 +3010,18 @@ final class Engine {
         }
         func stopClaude() -> Void {
             event("board", "claude 를 멈춥니다(SIGINT).")
+            // 끝낼 도구 명령 group: 5초마다 적어 둔 것에 더해 신호를 보내기 직전과 SIGTERM·SIGKILL 로 올릴 때 다시 훑는다(⑦ 시험: 마지막 훑기 뒤에
+            // 띄운 도구 명령이 claude 가 SIGKILL 로 끝난 뒤 고아로 남았다). claude 가 살아 있는 동안이라야 부모를 따라 찾을 수 있다
+            var groups = Set(((u["procs"] as? [String: Any])?["groups"] as? [[String: Any]] ?? []).compactMap { num($0["pgid"]).map { pid_t($0) } })
+            groups.formUnion(toolGroups(c.pid).keys)
             c.signal(SIGINT)
-            if !c.wait(20, tick: handleAll) { c.signal(SIGTERM); if !c.wait(5, tick: handleAll) { c.signal(SIGKILL); _ = c.wait(2) } }
+            if !c.wait(20, tick: handleAll) {
+                groups.formUnion(toolGroups(c.pid).keys); c.signal(SIGTERM)
+                if !c.wait(5, tick: handleAll) { groups.formUnion(toolGroups(c.pid).keys); c.signal(SIGKILL); _ = c.wait(2) }
+            }
             c.closeInput()
             handleAll()
-            for g in (u["procs"] as? [String: Any])?["groups"] as? [[String: Any]] ?? [] {
-                if let pg = num(g["pgid"]) { killGroup(pid_t(pg)) }
-            }
+            for pg in groups.sorted() { killGroup(pg) }
         }
         func endProcess() {
             u["cost_done"] = r3((num(u["cost_done"]) ?? 0) + t.cost); t.cost = 0
@@ -3062,7 +3094,7 @@ final class Engine {
         if t.limit { return .limit(t.limitResets) }
         if t.budget { return .capped("usd") }
         if !t.resultSeen {
-            let err = (try? String(contentsOfFile: unitDir(n) + "/stderr.log", encoding: .utf8)) ?? ""
+            let err = fileTail(errPath, from: errStart).trimmingCharacters(in: .whitespacesAndNewlines)
             return .failed("결과 없이 끝남, 종료 코드 \(c.code ?? -1)\(err.isEmpty ? "" : ": " + short(String(err.suffix(300)), 120))")
         }
         if t.lastError { return .failed(t.errText.isEmpty ? "claude 오류" : t.errText) }
@@ -3300,12 +3332,13 @@ final class Engine {
         event("board", "판정 명령을 돌립니다\(k == 0 ? "" : "(다시 \(k)번째)").")
         let limit = (num(def(n)["check_timeout_min"]) ?? num(cfg["check_timeout_min"]) ?? 10) * 60
         let r = fixedCommand(n, &u, cmd, ev: ev, limit: limit)
+        // timed_out: 시간 상한에 닿아 엔진이 멈췄다(⑦, prerun.json 의 timed_out 과 같은 칸) — 종료 코드 -1 만으로는 실패와 갈리지 않는다
         u["checks"] = (u["checks"] as? [Any] ?? []) + [["try": k, "exit": Int(r.code), "sec": r3(r.sec), "tail": r.tail, "at": r3(now()),
-                                                        "interrupted": r.interrupt != nil, "evidence": "evidence/check-\(k)", "files": r.files]]
+                                                        "interrupted": r.interrupt != nil, "timed_out": r.timedOut, "evidence": "evidence/check-\(k)", "files": r.files]]
         saveUnit(n, u)
         if let interrupt = r.interrupt { return interrupt }
         if r.code == 0 { event("board", "판정 통과(\(dur(r.sec)))."); return .passed }
-        return .failed(r.code, r.tail)
+        return .failed(r.code, r.tail, timedOut: r.timedOut ? limit : nil)
     }
 }
 
@@ -3367,6 +3400,8 @@ func prepare(_ dir: String, dev: Bool) -> (problems: [String], frozen: [String: 
     if let m = run["model"] as? String, !m.isEmpty { f["model"] = m } else { problems.append("run.json 에 model 이 없습니다") }
     // title 도 고정한다 — 엔진이 다시 뜰 때 run.json 설정 칸을 고정 값으로 되돌려 쓰므로, 빠지면 실행 제목이 지워졌다(엔진 고침 1차에서 찾음)
     for k in ["title", "effort", "stopline", "caps", "check_timeout_min", "check_retries", "precheck_retry_min", "background_quiet_sec"] where run[k] != nil { f[k] = run[k] }
+    // 실행 판정 상한도 단위 칸과 같은 확인(0 보다 큰 수, ⑦: 0·음수면 판정마다 바로 상한에 닿고 수가 아니면 말없이 10분이 됐다)
+    if let t = run["check_timeout_min"], (num(t) ?? 0) <= 0 { problems.append("run.json 의 check_timeout_min 은 0 보다 큰 수여야 합니다") }
     func strings(_ k: String) -> [String]? {
         guard let v = run[k] else { return nil }
         guard let a = v as? [String] else { problems.append("run.json 의 \(k) 는 글자 배열이어야 합니다"); return nil }
