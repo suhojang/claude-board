@@ -236,19 +236,41 @@ private let interpreterRows: [InterpreterRow] = [
         #expect(apSBPLFilter("relative") == nil && apSBPLFilter("/a\"b") == nil && apSBPLFilter("/a\nb") == nil)
     }
 
-    @Test("프로필 골든: 차례(모두 막기 → 열기 → 다시 막기 → 증거 폴더) · 읽기 금지 · 127.0.0.1 만 · socket")
+    @Test("프로필 골든: IPC 막기 · 쓰기 차례(모두 막기 → 열기 → 다시 막기 → 증거 폴더) · 읽기 금지 · 정한 포트만 · socket")
     func 골든() {
         let s = APJudgeSandbox(write: ["/W/repo", "/Users/a/.gradle", "/private/var/folders/x/T/claude-board-judge-r-1"],
                                denyWrite: ["/Users/a/Library/Application Support/Claude Board Dev/autopilot", "/Users/a/.claude", "/W/repo/.git/hooks", "/W/repo/s/a.sh", "bad"],
                                evidence: "/Users/a/Library/Application Support/Claude Board Dev/autopilot/runs/r/units/1/evidence/check-0",
                                denyRead: ["/Users/a/Library/Keychains", "/R/runs/*/engine"],
-                               socketDirs: ["/private/var/folders/x/T/claude-board-judge-r-1"], unixSockets: ["/var/run/docker.sock"])
+                               socketDirs: ["/private/var/folders/x/T/claude-board-judge-r-1"], unixSockets: ["/var/run/docker.sock"],
+                               network: .ports(out: [5173, 18431], bind: [18431]))
         let (text, skipped) = apJudgeProfile(s)
         #expect(skipped == ["bad"])
         #expect(text == """
         ;; Claude Board 자율주행 판정 샌드박스(엔진이 만든다, 고치지 않는다)
         (version 1)
         (allow default)
+        ;; IPC: 앱 열기·AppleEvent 는 막고, mach 서비스는 기본으로 막은 뒤 필요한 것만
+        (deny lsopen)
+        (deny appleevent-send)
+        (deny mach-lookup)
+        (allow mach-lookup
+          (global-name "com.apple.system.opendirectoryd.libinfo")
+          (global-name "com.apple.system.opendirectoryd.membership")
+          (global-name "com.apple.bsd.dirhelper")
+          (global-name "com.apple.system.notification_center")
+          (global-name "com.apple.system.logger")
+          (global-name "com.apple.logd")
+          (global-name "com.apple.diagnosticd")
+          (global-name "com.apple.cfprefsd.daemon")
+          (global-name "com.apple.cfprefsd.agent")
+          (global-name "com.apple.SystemConfiguration.configd")
+          (global-name "com.apple.SystemConfiguration.DNSConfiguration")
+          (global-name "com.apple.trustd")
+          (global-name "com.apple.trustd.agent")
+          (global-name "com.apple.timed.xpc")
+          (global-name "com.apple.fonts")
+          (global-name "com.apple.FontObjectsServer"))
         ;; 쓰기: 모두 막고 정한 곳만 연다
         (deny file-write* (subpath "/"))
         (allow file-write*
@@ -279,10 +301,13 @@ private let interpreterRows: [InterpreterRow] = [
         (deny file-read*
           (subpath "/Users/a/Library/Keychains")
           (regex #"^/R/runs/[^/]+/engine(/|$)"))
-        ;; 네트워크: 127.0.0.1(localhost)만
+        ;; 네트워크: localhost 의 정한 포트만(나가기 5173,18431, 묶기·받기 18431)
         (deny network*)
-        (allow network-outbound (remote ip "localhost:*"))
-        (allow network-bind network-inbound (local ip "localhost:*"))
+        (allow network-outbound
+          (remote ip "localhost:5173")
+          (remote ip "localhost:18431"))
+        (allow network-bind network-inbound
+          (local ip "localhost:18431"))
         ;; unix socket: 판정 임시 폴더·증거 폴더 안만(브라우저의 SingletonSocket 등)
         (allow network-bind network-outbound network-inbound
           (local unix-socket (subpath "/private/var/folders/x/T/claude-board-judge-r-1"))
@@ -302,5 +327,29 @@ private let interpreterRows: [InterpreterRow] = [
         #expect(deny < ev)
         #expect(!t.contains("unix-socket"))
         #expect(!apJudgeSandboxNote(on: true).contains("—") && !apJudgeSandboxNote(on: false).contains("—"))
+    }
+
+    @Test("⑪-1 보안 검토 2: 판정 네트워크는 실행 설정에서(기본 없음), localhost 를 통째로 열지 않음")
+    func 네트워크() {
+        #expect(apJudgeNet(networkAllow: ["repo.maven.apache.org", "services.gradle.org"], localBinding: false, checkPorts: []) == .none)
+        #expect(apJudgeNet(networkAllow: ["localhost:5173", "127.0.0.1:8080", "[::1]:9", "localhost:x", "localhost:70000"], localBinding: false, checkPorts: [18431, 0])
+                == .ports(out: [9, 5173, 8080, 18431], bind: [18431]))
+        #expect(apJudgeNet(networkAllow: [], localBinding: true, checkPorts: [1]) == .allLocal)
+        let none = apJudgeProfile(APJudgeSandbox(write: ["/W"], denyWrite: [], evidence: "/E", denyRead: [], socketDirs: [])).text
+        #expect(none.contains(";; 네트워크: 없음") && none.contains("(deny network*)\n") && !none.contains("localhost"))
+        let all = apJudgeProfile(APJudgeSandbox(write: ["/W"], denyWrite: [], evidence: "/E", denyRead: [], socketDirs: [], network: .allLocal)).text
+        #expect(all.contains("(allow network-outbound (remote ip \"localhost:*\"))"))
+        #expect(apJudgeSandboxNote(on: true, network: .none).contains("네트워크: 없음"))
+    }
+
+    @Test("⑪-1 보안 검토 1: 앱 열기·AppleEvent 막기, mach 는 기본 막고 목록만, 브라우저 걸음만 조금 더")
+    func ipc() {
+        let shell = apJudgeProfile(APJudgeSandbox(write: ["/W"], denyWrite: [], evidence: "/E", denyRead: [], socketDirs: [])).text
+        for x in ["(deny lsopen)", "(deny appleevent-send)", "(deny mach-lookup)"] { #expect(shell.contains(x)) }
+        #expect(shell.range(of: "(deny mach-lookup)")!.lowerBound < shell.range(of: "(allow mach-lookup")!.lowerBound)
+        for x in ["launchservicesd", "lsd.", "SecurityServer", "securityd", "distributed_notifications", "pasteboard", "tccd", "windowserver"] { #expect(!shell.contains(x)) }
+        let br = apJudgeProfile(APJudgeSandbox(write: ["/W"], denyWrite: [], evidence: "/E", denyRead: [], socketDirs: [], browser: true)).text
+        #expect(br.contains("(global-name \"com.apple.coreservices.launchservicesd\")") && br.contains("(global-name-prefix \"com.google.Chrome.MachPortRendezvousServer.\")"))
+        #expect(br.contains("(deny lsopen)") && !br.contains("lsd.") && !br.contains("securityd"))
     }
 }
