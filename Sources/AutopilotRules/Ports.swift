@@ -160,6 +160,15 @@ public protocol APJudgeRunner {
 
 // MARK: - 주제로 시작의 초안 세션과 뼈대 (Draft.swift·Skeleton.swift, 5단계 ⑪-2)
 
+// 저장소 하네스 파일 읽기(7단계 ⑫-7b, 규칙 apHarnessTexts) — 진짜 어댑터는 엔진(저장소 뿌리 아래), 가짜는 시험에만
+public enum APWalkStep: Sendable { case next, skip, stop }
+public protocol APHarnessSource {
+    /// 뿌리 아래 이름을 차례로(상대 경로) 넘긴다. visit 이 .skip 이면 그 폴더 안으로 내려가지 않고, .stop 이면 멈춘다
+    func walk(_ visit: (String) -> APWalkStep)
+    /// 보통 파일이고 max 바이트 안일 때만 글(아니면 nil)
+    func read(_ relative: String, max: Int) -> Data?
+}
+
 // 초안 세션 결과 폴더 — 규칙이 고른 상대 경로만 읽는다(링크·폴더가 아닌 보통 파일, 크기 상한 아래일 때만. 어댑터 몫)
 public protocol APDraftFiles {
     func read(_ relative: String) -> Data?

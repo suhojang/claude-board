@@ -6491,22 +6491,26 @@ struct EngineDraftFiles: APDraftFiles {
     }
 }
 
-// 하네스 파일 글(출발 가지의 커밋된 판 = 임시 작업 트리) — 규칙 apHarnessFileWanted 가 고른 것만, 300개·파일마다 256 KB 까지
-func harnessTexts(_ root: String) -> [(path: String, text: String)] {
-    var out: [(path: String, text: String)] = []
-    guard let e = fm.enumerator(atPath: root) else { return out }
-    while let rel = e.nextObject() as? String {
-        let name = (rel as NSString).lastPathComponent
-        if [".git", "node_modules", "build", "dist", ".gradle", "target", ".venv", ".build"].contains(name) { e.skipDescendants(); continue }
-        guard apHarnessFileWanted(rel) else { continue }
-        var st = stat()
-        guard lstat(root + "/" + rel, &st) == 0, st.st_mode & S_IFMT == S_IFREG, st.st_size <= 256 << 10,
-              let d = fm.contents(atPath: root + "/" + rel) else { continue }
-        out.append((rel, String(decoding: d, as: UTF8.self)))
-        if out.count >= 300 { break }
+// 하네스 파일 글(출발 가지의 커밋된 판 = 임시 작업 트리) — 규칙 apHarnessTexts(파일 고르기·상한)에 저장소 뿌리 어댑터를 넘긴다(7단계 ⑫-7b 에서 옮김)
+struct EngineHarnessSource: APHarnessSource {
+    let root: String
+    func walk(_ visit: (String) -> APWalkStep) {
+        guard let e = fm.enumerator(atPath: root) else { return }
+        while let rel = e.nextObject() as? String {
+            switch visit(rel) {
+            case .next: continue
+            case .skip: e.skipDescendants()
+            case .stop: return
+            }
+        }
     }
-    return out
+    func read(_ relative: String, max: Int) -> Data? {
+        var st = stat()
+        guard lstat(root + "/" + relative, &st) == 0, st.st_mode & S_IFMT == S_IFREG, st.st_size <= off_t(max) else { return nil }
+        return fm.contents(atPath: root + "/" + relative)
+    }
 }
+func harnessTexts(_ root: String) -> [(path: String, text: String)] { apHarnessTexts(EngineHarnessSource(root: root)) }
 func harnessPointJSON(_ p: APHarnessPoint) -> [String: Any] { ["file": p.file, "line": p.line, "kind": p.kind, "text": p.text] }
 func harnessPointOf(_ o: [String: Any]) -> APHarnessPoint? {
     guard let f = o["file"] as? String, let l = inum(o["line"]) else { return nil }
