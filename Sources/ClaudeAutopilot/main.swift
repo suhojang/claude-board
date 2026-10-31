@@ -4,8 +4,10 @@
 //
 // 사용법: claude-autopilot start <실행 폴더> [--dev]                 run.json·queue.json 확인 → 고정 사본 → LaunchAgent 올리기
 //        claude-autopilot run <실행 폴더> <고정 설정 해시>            launchd 가 부르는 본체(해시는 start 가 LaunchAgent 인자로 넣는다)
-//        claude-autopilot control <실행 폴더> pause|resume|stop      control.json 쓰기(보드도 같은 파일을 쓴다)
+//        claude-autopilot control <실행 폴더> pause|resume|stop|restart_from_intake|takeover|giveback [--accept <카드 id,…>]
+//                                                                   control.json 쓰기(보드도 같은 파일을 쓴다. takeover·giveback 은 8단계 ⑫-8)
 //        claude-autopilot status <실행 폴더> [--dev] [--json]         사람이 읽는 한 화면 요약(출발 전 --json 은 보드가 읽는 확인 결과)
+//        claude-autopilot takeover-check <실행 폴더>                  이어받은 실행의 작업 트리 git 확인(보드가 이어받기 탭을 열기 직전, JSON {ok, why})
 //        claude-autopilot records import [--dev|--db <파일>] [--project <이름>] [--unit-key <칸 경로>] <원본…>
 //                                                                   실행 기록 저장소(SQLite)에 실행 폴더·일반 꼴 대기열을 옮겨 담기
 //        claude-autopilot prerun <실행 폴더> [--dev]                  출발 전 판정 미리 돌리기(prerun.json)
@@ -1711,7 +1713,8 @@ extension RecordsDB {
                                    story: d["story"] as? String, discardedSources: gone,
                                    result: resText[n].flatMap { (try? JSONSerialization.jsonObject(with: Data($0.utf8))) as? [String: Any] },
                                    denials: e["denials"] as? [[String: Any]] ?? [], judge: label.isEmpty ? nil : label,
-                                   judgeDigest: label.isEmpty ? nil : sha256(Data(label.utf8)), setId: setId, at: num(e["ended"]) ?? t)
+                                   judgeDigest: label.isEmpty ? nil : sha256(Data(label.utf8)), setId: setId, at: num(e["ended"]) ?? t,
+                                   takeovers: e["takeovers"] as? [[String: Any]] ?? [])
             }
             if r["state"] != nil {
                 ms += apPrepMisses(project: project, run: runId, prerun: readJSON(dir + "/prerun.json") as? [String: Any], critic: readJSON(dir + "/critic.json") as? [String: Any],
@@ -1840,7 +1843,7 @@ enum WaitEnd { case elapsed, paused, stopped, restart }
 
 let stateLabel = ["starting": "준비 중", "running": "진행 중", "waiting_limit": "한도 대기", "waiting_stopline": "멈출 선 대기",
                   "waiting_precheck": "시험 환경 대기",
-                  "paused": "일시정지", "stopped": "중단됨", "done": "끝남", "error": "엔진 오류로 멈춤"]
+                  "paused": "일시정지", "taken_over": "이어받음", "stopped": "중단됨", "done": "끝남", "error": "엔진 오류로 멈춤"]
 let unitLabel = ["pending": "대기", "running": "진행 중", "done": "통과", "failed": "미통과", "capped": "상한에서 멈춤", "stopped": "중단", "skipped": "건너뜀"]
 let capLabel = ["minutes": "시간", "usd": "비용", "weekly": "주간 사용률"]
 
@@ -1862,6 +1865,101 @@ struct EngineInboxFiles: APInboxFiles {
     }
 }
 struct EngineClock: APClock { var now: Date { Date() } }
+
+// 터미널로 이어받기·돌려주기(8단계 ⑫-8)의 진짜 어댑터 — 규칙 apTakeoverMark·apGivebackCheck(AutopilotRules/Takeover.swift)가 이 포트로만 본다.
+// git 은 출발 때 기록한 git 폴더로 박고(pin, 5-4 보안, git 폴더 확인을 지난 저장소만), 커밋 이름은 16진수만 넘긴다. 대화 기록은 Claude Code projects 의
+// <작업 경로 꼴>/<세션 id>.jsonl(없으면 projects 아래 한 단계에서 같은 이름), lstat 으로 보통 파일일 때 O_NOFOLLOW|O_NONBLOCK 으로 열어 상한까지.
+// 하네스는 엔진 하네스 지문(scanHarness)과 같은 자리, 시나리오는 원본 파일 지문(링크·큰 파일은 종류만), 프로세스는 프로세스 표(규칙 apClaudeHolds)
+struct EngineTakeoverWorld: APTakeoverWorld {
+    struct Place: Sendable { let wt: String; let pin: [String] }
+    let projects: [String]
+    let places: [String: Place]
+    let harnessFolders: [String]
+    let scenarioFiles: [String]
+    let me: pid_t
+    static func hex(_ s: String) -> Bool { s.range(of: "^[0-9a-f]{7,64}$", options: .regularExpression) != nil }
+
+    func transcript(session: String, cwd: String, from: Int, max: Int) -> APTranscriptRead {
+        guard apSessionIDOK(session) else { return .missing }
+        var cands: [String] = []
+        for root in projects {
+            if let p = apTranscriptPath(projects: root, cwd: cwd, session: session) { cands.append(p) }
+            for d in ((try? fm.contentsOfDirectory(atPath: root)) ?? []).sorted() where !d.hasPrefix(".") { cands.append(root + "/" + d + "/" + session + ".jsonl") }
+        }
+        for p in cands {
+            var st = stat()
+            guard lstat(p, &st) == 0 else { continue }
+            guard st.st_mode & S_IFMT == S_IFREG else { return .notFile("보통 파일이 아님") }
+            let fd = open(p, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
+            guard fd >= 0 else { return .notFile("열지 못함") }
+            defer { close(fd) }
+            guard fstat(fd, &st) == 0, st.st_mode & S_IFMT == S_IFREG else { return .notFile("보통 파일이 아님") }
+            let size = Int(st.st_size), start = min(Swift.max(from, 0), size)
+            var d = Data()
+            if max > 0, start < size, lseek(fd, off_t(start), SEEK_SET) == off_t(start) {
+                var buf = [UInt8](repeating: 0, count: 65536)
+                while d.count < max {
+                    let n = read(fd, &buf, min(buf.count, max - d.count))
+                    if n < 0, errno == EINTR { continue }
+                    if n <= 0 { break }
+                    d.append(contentsOf: buf[0..<n])
+                }
+            }
+            return .data(path: p, size: size, bytes: d)
+        }
+        return .missing
+    }
+    func repo(_ repo: String) -> APRepoNow? {
+        guard let pl = places[repo], let head = headOf(pl.wt, "HEAD", env: pl.pin) else { return nil }
+        let st = gitRun(["-c", "core.quotePath=false", "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=all"], cwd: pl.wt, env: pl.pin)
+        guard st.code == 0 else { return nil }
+        let untracked = st.out.split(separator: "\0").compactMap { $0.hasPrefix("?? ") ? String($0.dropFirst(3)) : nil }
+        return APRepoNow(branch: currentBranch(pl.wt, env: pl.pin), head: head, untracked: untracked)
+    }
+    func commits(_ repo: String, from: String, to: String) -> Int? {
+        guard let pl = places[repo], Self.hex(from), Self.hex(to), isAncestor(pl.wt, from, to, env: pl.pin) else { return nil }
+        return gitOut(["rev-list", "--count", "\(from)..\(to)"], cwd: pl.wt, env: pl.pin).flatMap { Int($0) }
+    }
+    func changed(_ repo: String, from: String) -> [String]? {
+        guard let pl = places[repo], Self.hex(from) else { return nil }
+        let r = gitRun(["-c", "core.quotePath=false", "diff", "--name-only", "-z", "--ignore-submodules=all", "--no-ext-diff", "--no-textconv", from, "--"], cwd: pl.wt, env: pl.pin)
+        return r.code == 0 ? r.out.split(separator: "\0").map(String.init) : nil
+    }
+    func harness() -> [String: String] {
+        let s = scanHarness(harnessFolders)
+        var out: [String: String] = [:]
+        for f in s.files {
+            let folder = f["folder"] as? String ?? "", rel = f["path"] as? String ?? ""
+            let key = harnessFolders.count > 1 ? (folder as NSString).lastPathComponent + "/" + rel : rel
+            out[key] = "\(f["sha256"] ?? "")/\(f["size"] ?? 0)"
+        }
+        return out
+    }
+    func scenarios() -> [String: String] {
+        var out: [String: String] = [:]
+        for p in scenarioFiles {
+            switch readHarnessFile(p, budget: harnessFileCap) {
+            case .data(let d)?: out[p] = sha256(d)
+            case .large(let n)?: out[p] = "large/\(n)"
+            case .other(let k)?: out[p] = k
+            case nil: out[p] = "없음"
+            }
+        }
+        return out
+    }
+    func claudeRunning(session: String) -> [Int32]? {
+        // ps 가 실패했거나 아무 줄도 못 읽으면(ps 자신도 늘 한 줄) 모른다 — 돌려주기를 막는 쪽(보안 검토 받침)
+        let r = runTool("/bin/ps", ["-A", "-o", "pid=,ppid=,pgid=,command="])
+        guard r.code == 0 else { return nil }
+        let table: [(pid: pid_t, cmd: String)] = r.out.split(separator: "\n").compactMap { line in
+            let f = line.split(separator: " ", maxSplits: 3, omittingEmptySubsequences: true)
+            guard f.count >= 3, let a = pid_t(f[0]) else { return nil }
+            return (a, f.count > 3 ? String(f[3]) : "")
+        }
+        guard !table.isEmpty else { return nil }
+        return table.filter { $0.pid != me && apClaudeHolds(cmd: $0.cmd, session: session) }.map { Int32($0.pid) }
+    }
+}
 
 // 보고서(3단계, 설계 6장)의 진짜 어댑터 — 규칙 apDrawReports(AutopilotRules/Report.swift)가 이 포트로만 읽고 쓴다.
 // 읽을 곳: 엔진이 쥔 run·queue(도는 엔진) 또는 실행 폴더의 run.json·queue.json(report 하위 명령), 단위 상태는 엔진 비공개 사본 먼저,
@@ -1961,7 +2059,7 @@ final class Engine {
     static let settingKeys = ["title", "model", "effort", "stopline", "caps", "check_timeout_min", "check_retries", "precheck_retry_min", "background_quiet_sec",
                               "allowed_tools", "disallowed_tools", "write_roots", "network_allow", "local_binding", "env_pass", "unix_sockets",
                               "read_deny", "sandbox_exclude", "claude_args", "claude_path", "project", "project_root", "base_branch", "publish",
-                              "check_sandbox", "check_unix_sockets", "browser_path", "usage_path"]
+                              "check_sandbox", "check_unix_sockets", "browser_path", "usage_path", "transcripts_dir"]
     static let unitKeys = ["id", "title", "prompt", "check", "precheck", "action", "context", "cwd", "caps", "check_timeout_min", "action_timeout_min",
                            "tickets", "review", "source_key", "kind", "est_min", "est_basis", "est_pp", "story", "branch", "depends", "prerun",
                            "scenarios", "criteria", "check_sandbox", "check_ports", "source_digest"]
@@ -2038,6 +2136,9 @@ final class Engine {
     func readControl() -> String? {
         guard fm.fileExists(atPath: controlPath) else { return nil }
         let c = readJSON(controlPath)
+        // 돌려주기의 카드 답(⑫-8): 사람이 "그대로 돌려주기"로 고른 카드 id — 꼴이 맞는 것만 열 개까지(apGivebackCheck 가 지금 바뀜의 id 와 견준다)
+        controlAccept = ((c as? [String: Any])?["accept"] as? [Any] ?? []).compactMap { $0 as? String }
+            .filter { $0.range(of: "^takeover-(harness|scenarios)-[0-9a-f]{1,16}$", options: .regularExpression) != nil }.prefix(10).map { $0 }
         let m = ((try? fm.attributesOfItem(atPath: controlPath))?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? now()
         try? fm.removeItem(atPath: controlPath)
         // 새 요청인지는 규칙 apControlNew(AutopilotRules/Control.swift)
@@ -2055,14 +2156,128 @@ final class Engine {
         slotTick()
         guard let a = readControl() else { return nil }
         // 받은 요청으로 할 일은 규칙 apControlOutcome
-        let o = apControlOutcome(a, paused: false)
+        let o = apControlOutcome(a, mode: .running)
         if let t = o.text { event("board", t) }
         switch o.step {
         case .pause: return .pause
         case .stop: return .stop
         case .restart: return askRestart(paused: false) ? .restart : nil
-        case .resume, .none: return nil
+        case .takeover:
+            // 터미널로 이어받기(⑫-8): 이어받을 세션이 있을 때만. 멈추는 길은 일시정지와 같고(claude·판정·대기를 멈춤) pause() 가 takeoverAsked 를 보고 이어받은 상태로 둔다
+            if let why = takeoverBlock() { event("board", "터미널로 이어받기를 넘깁니다: \(why).") ; return nil }
+            takeoverAsked = true
+            return .pause
+        case .resume, .giveback, .none: return nil
         }
+    }
+
+    // MARK: 터미널로 이어받기와 돌려주기(8단계 ⑫-8, 규칙 AutopilotRules/Takeover.swift)
+
+    var takeoverAsked = false            // pollControl 이 이어받기를 받아 .pause 로 멈추게 했다 — pause() 가 이어받은 상태로 둔다
+    var controlAccept: [String] = []     // 마지막 control.json 의 돌려주기 카드 답
+    var runningUnit: Int? { queue.firstIndex(where: { $0["status"] as? String == "running" }).map { $0 + 1 } }
+    // 이어받을 수 없는 까닭(없으면 nil) — 규칙 apTakeoverBlock
+    func takeoverBlock() -> String? {
+        let n = runningUnit
+        let u = n.map(loadUnit) ?? [:]
+        return apTakeoverBlock(state: state, unitStatus: n == nil ? nil : "running", phase: u["phase"] as? String, session: u["session_id"] as? String,
+                               sessionStarted: u["session_started"] as? Bool == true)
+    }
+    // 대화 기록 뿌리: 시험 빌드는 고정 설정 transcripts_dir(가짜 claude 의 장난감 자리)만, 설치판은 로그인 셸의 CLAUDE_CONFIG_DIR(없으면 ~/.claude)의 projects
+    var transcriptRoots: [String] {
+        if isDev { return (cfg["transcripts_dir"] as? String).map { [$0] } ?? [] }
+        let c = loginEnv["CLAUDE_CONFIG_DIR"].flatMap { $0.hasPrefix("/") ? $0 : nil } ?? home + "/.claude"
+        return [c + "/projects"]
+    }
+    func takeoverWorld() -> EngineTakeoverWorld {
+        var places: [String: EngineTakeoverWorld.Place] = [:]
+        for r in repos where gitDirOK(r) { places[r] = .init(wt: wt(r), pin: pin(r)) }
+        let folders = ((run["harness"] as? [String: Any])?["folders"] as? [String]) ?? []
+        return EngineTakeoverWorld(projects: transcriptRoots, places: places, harnessFolders: folders, scenarioFiles: scenarioSources(), me: getpid())
+    }
+    // 이어받는다 — claude·판정·대기는 이미 멈췄다(일시정지와 같은 길). 표지(가지·머리·대화 기록 크기·하네스·시나리오 지문)를 단위 기록에 남기고
+    // 상태를 taken_over 로. 멈출 선 자리는 놓고(돌려주면 slotTick 이 다시 잡음) 같은 경로 자리는 그대로 쥔다(설계 판단)
+    func takeOver() {
+        guard let n = runningUnit else { setState("paused", "이어받을 단위가 없어 일시정지로 둡니다."); return }
+        var u = loadUnit(n)
+        let sid = u["session_id"] as? String ?? ""
+        // 보드 탭의 대화형 claude·로그인 셸은 엔진의 git 박기 없이 이 작업 트리에서 git 을 부른다 — 엔진 claude 앞의 확인과 git 자리 훑기를 먼저(보안 검토 고침).
+        // 걸리면 이어받지 않고 일시정지로 두고 까닭을 run.json takeover.blocked 에(보드는 탭을 열지 않고 까닭을 보인다)
+        if let why = takeoverGitBlock(n, record: true) {
+            run["takeover"] = ["session": sid, "unit": n, "cwd": cwd(n), "at": r3(now()), "ts": run["control_seen"] ?? NSNull(),
+                               "blocked": ["at": r3(now()), "why": why]] as [String: Any]
+            event("board", "터미널로 이어받지 않았습니다: \(why)")
+            setState("paused", "터미널로 이어받지 않고 일시정지로 두었습니다: \(why)")
+            releaseSlot()
+            return
+        }
+        let mark = apTakeoverMark(session: sid, unit: n, cwd: cwd(n), at: r3(now()), repos: repos.map { ($0, repoInfo($0)["on"] as? String ?? "") }, world: takeoverWorld())
+        u["takeover"] = (try? JSONEncoder().encode(mark)).flatMap { try? JSONSerialization.jsonObject(with: $0) } ?? NSNull()
+        u["procs"] = [:] as [String: Any]   // 다시 뜬 엔진이 사람이 이어 연 claude(명령줄에 같은 세션 id)를 끄지 않게
+        saveUnit(n, u)
+        run["takeover"] = ["session": sid, "unit": n, "cwd": cwd(n), "at": mark.at, "ts": run["control_seen"] ?? NSNull()] as [String: Any]
+        event("board", "사람이 터미널로 이어받았습니다(단위 \(n), 세션 \(sid.prefix(8))). 엔진은 판정·새 단위·한도 대기를 하지 않고 돌려주기를 기다립니다. 보드 탭에서 같은 세션을 이어 엽니다.")
+        if mark.transcript == nil { event("engine", "이 세션의 대화 기록을 찾지 못했습니다. 돌려줄 때 사람이 친 요청은 모으지 못하고 바뀐 파일만 모읍니다.") }
+        setState(apTakenOverState, "사람이 터미널로 이어받았습니다. 자율주행에 돌려주면 같은 세션으로 이어 갑니다.")
+        releaseSlot()
+    }
+    // 이어받은 동안 — 돌려주기·중단·멈추고 다시 출발만 받는다(엔진이 다시 떠도 이 자리로 온다)
+    func takenOverLoop() {
+        while true {
+            if gotTerm != 0 { terminated() }
+            pollInbox()
+            summaryTick()
+            if let a = readControl() {
+                let o = apControlOutcome(a, mode: .takenOver)
+                if let t = o.text { event("board", t) }
+                switch o.step {
+                case .giveback: if giveBack() { return }
+                case .stop: stopRun()
+                case .restart: if askRestart(paused: true) { restartStop() }
+                default: break
+                }
+            }
+            sleep(1)
+        }
+    }
+    // 돌려받는다 — 규칙 apGivebackCheck(그 세션의 claude 가 끝났는지·가지·이어받기 전 커밋·하네스·시나리오 카드). 막히면 까닭을 run.json takeover.refused 와
+    // 진행 기록에 남기고 이어받은 상태 그대로. 되면 이어받기 지시를 단위 기록·진행 기록·inbox(다음 단위부터)에 남기고 같은 세션으로 지금 단위를 잇는다
+    func giveBack() -> Bool {
+        guard let n = runningUnit else { event("engine", "돌려받을 단위가 없습니다."); return false }
+        var u = loadUnit(n)
+        guard let mj = u["takeover"], let md = try? JSONSerialization.data(withJSONObject: mj), let mark = try? JSONDecoder().decode(APTakeoverMark.self, from: md) else {
+            event("engine", "이어받기 표지가 없어 돌려받지 못했습니다. 사람이 확인하세요(중단하거나 멈추고 다시 출발).")
+            return false
+        }
+        let g = apGivebackCheck(mark: mark, accepted: Set(controlAccept), world: takeoverWorld())
+        var t = run["takeover"] as? [String: Any] ?? [:]
+        guard g.ok else {
+            let cards = (try? JSONEncoder().encode(g.cards)).flatMap { try? JSONSerialization.jsonObject(with: $0) } ?? [] as [Any]
+            t["refused"] = ["at": r3(now()), "blocks": g.blocks, "cards": cards] as [String: Any]
+            run["takeover"] = t; saveRun()
+            let parts = g.blocks + g.cards.map { "\($0.title)(\($0.files.prefix(3).joined(separator: ", "))\($0.files.count > 3 ? " 등" : "")). 보드에서 고르면 돌려줍니다" }
+            event("board", "자율주행에 돌려주지 않았습니다: " + parts.joined(separator: " · "))
+            return false
+        }
+        let d = g.directive
+        var rec = (try? JSONEncoder().encode(d)).flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Any] ?? [:]
+        rec["at"] = mark.at; rec["back"] = r3(now()); rec["session"] = mark.session
+        let list = (u["takeovers"] as? [Any] ?? []) + [rec]
+        u["takeovers"] = list
+        u["takeover"] = nil
+        u["phase"] = "model"
+        u["next_message"] = apGivebackMessage(d)
+        saveUnit(n, u)
+        inbox = inbox + [apTakeoverInboxEntry(d, unit: n, k: list.count, statuses: statuses, at: r3(now()))]
+        t["refused"] = nil; t["back"] = r3(now())
+        run["takeover"] = nil
+        run["takeover_last"] = t
+        saveRun()
+        event("board", apTakeoverEventText(d, unit: n))
+        event("board", "자율주행에 돌려받았습니다. 같은 세션으로 단위 \(n) 을 이어 갑니다(판정은 모델 차례 뒤에).")
+        setState("running", "단위 \(n)/\(total) 하는 중: \(title(n))")
+        slotBeatAt = 0   // 멈출 선 자리를 곧 다시 잡는다(slotTick)
+        return true
     }
 
     // MARK: 방향을 바꿀 말과 멈추고 다시 출발(2단계 5-4)
@@ -2198,6 +2413,9 @@ final class Engine {
         } else if prev == "paused" {
             event("engine", "엔진이 다시 떴습니다. 사람이 일시정지한 실행이라 그대로 쉽니다.")
             saveRun()
+        } else if prev == apTakenOverState {
+            event("engine", "엔진이 다시 떴습니다. 사람이 이어받은 실행이라 돌려주기를 그대로 기다립니다.")
+            saveRun()
         } else {
             crashResume = true
             event("engine", "엔진이 다시 떴습니다. 직전에 비정상으로 끝나 하던 자리에서 잇습니다.")
@@ -2205,6 +2423,7 @@ final class Engine {
         }
         while true {
             if state == "paused" { pausedLoop(); continue }
+            if state == apTakenOverState { takenOverLoop(); continue }
             pollInbox()
             guard let n = queue.firstIndex(where: { $0["status"] as? String == "running" }).map({ $0 + 1 })
                     ?? queue.firstIndex(where: { ($0["status"] as? String ?? "pending") == "pending" }).map({ $0 + 1 }) else {
@@ -2388,15 +2607,18 @@ final class Engine {
             pollInbox()
             summaryTick()
             if let a = readControl() {
-                let o = apControlOutcome(a, paused: true)
+                let o = apControlOutcome(a, mode: .paused)
                 if let t = o.text { event("board", t) }
                 switch o.step {
                 case .resume:
+                    if (run["takeover"] as? [String: Any])?["blocked"] != nil { run["takeover"] = nil }   // 이어받지 못한 표지는 재개하면 지운다
                     setState("running", "재개했습니다.")
                     return
                 case .stop: stopRun()
                 case .restart: if askRestart(paused: true) { restartStop() }   // 도는 단위가 없는 일시정지만 바로 멈춘다
-                case .pause, .none: break
+                case .takeover:   // 일시정지 → 보드 탭에서 이어 열기(설계 6장 8단계)
+                    if let why = takeoverBlock() { event("board", "터미널로 이어받기를 넘깁니다: \(why).") } else { takeOver(); return }
+                case .pause, .giveback, .none: break
                 }
             }
             sleep(1)
@@ -2404,6 +2626,7 @@ final class Engine {
     }
 
     func pause() {
+        if takeoverAsked { takeoverAsked = false; takeOver(); return }   // 이어받기로 멈춘 것(⑫-8)
         event("board", "일시정지했습니다. 재개하면 같은 세션으로 이어 갑니다.")
         setState("paused", "사람이 일시정지했습니다. 재개하면 이어 갑니다.")
         releaseSlot()   // 멈춘 동안은 자리를 풀고, 재개하면 도는 단위가 다시 적는다(slotTick)
@@ -2499,7 +2722,7 @@ final class Engine {
     // 1분마다(pollControl): 도는 단위가 있고 일시정지가 아니면 자리를 다시 적는다(그 단위가 쓴 %p 와 함께). 다시 뜬 엔진이 이어 가는 단위도 이것으로 자리를 되찾는다
     func slotTick() {
         let t = now()
-        guard t - slotBeatAt >= 60, state != "paused" else { return }
+        guard t - slotBeatAt >= 60, state != "paused", state != apTakenOverState else { return }
         guard let i = queue.firstIndex(where: { $0["status"] as? String == "running" }) else { return }
         let n = i + 1
         slotBeatAt = t
@@ -2631,8 +2854,10 @@ final class Engine {
     }
     // 작업 트리 안 git 꼴 자리를 출발 때 집합(branches.git_places)과 견주어 새로 생기거나 설정이 바뀐 것을 알린다(알림용 받침, gitPlaces 의 주석).
     // 찾은 것은 branches.git_places_changed 에 쌓고(같은 자리·같은 지문은 한 번), 훑기를 다 하지 못하면 branches.git_places_scan 에 적고 알린다
-    func checkGitPlaces(_ when: String) {
-        guard !repos.isEmpty else { return }
+    // 돌려주는 값(⑫-8 보안 검토 고침, 이어받기 전 막기): 출발 때와 다른 git 자리 모두(이미 알린 것도)·훑기를 다 했는지·못 한 까닭
+    @discardableResult
+    func checkGitPlaces(_ when: String) -> (drift: [String], complete: Bool, why: String?) {
+        guard !repos.isEmpty else { return ([], true, nil) }
         let scan = gitPlaces(repos.map(wt))
         var b = br
         guard let base = b["git_places"] as? [String: String] else {
@@ -2642,7 +2867,7 @@ final class Engine {
             b["git_places_scan"] = ["complete": false, "why": "출발 때 기록 없음, \(when)부터 봄" + (scan.complete ? "" : " · \(scan.why ?? "")"), "when": when] as [String: Any]
             br = b; saveRun()
             event("engine", "보안: 출발 때 작업 트리의 git 자리 기록이 없어 \(when)의 상태를 기준으로 잡았습니다. 그 앞에 생기거나 바뀐 git 자리는 알릴 수 없습니다.")
-            return
+            return ([], false, "출발 때 기록 없음")
         }
         var seen = b["git_places_changed"] as? [[String: Any]] ?? []
         var found: [String] = []
@@ -2664,6 +2889,33 @@ final class Engine {
         if !scan.complete, (last?["complete"] as? Bool ?? true) || (last?["why"] as? String) != why {
             event("engine", "보안: \(when) 작업 트리를 다 훑지 못했습니다(\(scan.why ?? "?")). 출발 때 없던 git 자리가 있을 수 있는 것으로 봅니다. 그 작업 트리의 하위 폴더에서 git 을 돌리기 전에 사람이 확인하세요.")
         }
+        let drift = scan.places.keys.filter { base[$0] != scan.places[$0] }.sorted().map { $0.hasPrefix(home + "/") ? "~/" + $0.dropFirst(home.count + 1) : $0 }
+        return (drift, scan.complete && late == nil, why.isEmpty ? nil : why)
+    }
+    // 읽기만 하는 같은 견주기(보드가 탭을 열기 직전에 부르는 takeover-check — 도는 엔진의 run.json 을 쓰지 않는다)
+    func gitPlacesDrift() -> (drift: [String], complete: Bool, why: String?) {
+        guard !repos.isEmpty else { return ([], true, nil) }
+        guard let base = br["git_places"] as? [String: String], br["git_places_late"] == nil else { return ([], false, "출발 때 기록 없음") }
+        let scan = gitPlaces(repos.map(wt))
+        let drift = scan.places.keys.filter { base[$0] != scan.places[$0] }.sorted().map { $0.hasPrefix(home + "/") ? "~/" + $0.dropFirst(home.count + 1) : $0 }
+        return (drift, scan.complete, scan.why)
+    }
+    // 이어받기 전 git 막기(⑫-8 보안 검토 고침, HIGH): 엔진이 자기 claude 앞에 두는 unitGitOK 와 같은 확인을 이 단위 작업 폴더와 모든 저장소에 —
+    // 작업 폴더와 뿌리 사이 .git, git 폴더 바꿔치기, 하위 모듈(gitlink·.gitmodules). 진행 기록을 쓰지 않고 까닭만(이어받기·takeover-check 가 함께 씀)
+    func unitGitWhy(_ n: Int) -> String? {
+        let r = repoOf(cwd(n))
+        if let why = strayGitDir(from: cwd(n), root: r.map(wt)) { return "단위 \(n) 의 \(why)" }
+        for x in repos {
+            if let why = gitDirChange(repoInfo(x), at: wt(x)) { return "\(repoName(x)) 의 \(why)" }
+            if let why = submoduleReason(x) { return "\(repoName(x)) 의 \(why)" }
+        }
+        return nil
+    }
+    // 이어받아도 되는가(규칙 apTakeoverGitBlock). record: 이어받기 때는 작업 트리 훑기를 기록·알림(checkGitPlaces), takeover-check 는 읽기만
+    func takeoverGitBlock(_ n: Int, record: Bool) -> String? {
+        let g = unitGitWhy(n)
+        let p = record ? checkGitPlaces("이어받기 전") : gitPlacesDrift()
+        return apTakeoverGitBlock(gitWhy: g, drift: p.drift, complete: p.complete, scanWhy: p.why)
     }
     func unitGitOK(_ n: Int) -> Bool {
         let r = repoOf(cwd(n))
@@ -3146,7 +3398,10 @@ final class Engine {
         let ni = apInboxNextFor(inbox, unit: n)
         if !ni.isEmpty {
             var es = inbox
-            directions = apInboxNextText(ni.map { es[$0].text })
+            // 사람이 보낸 말과 이어받기 지시(⑫-8, source takeover)는 머리 글이 다르다 — 받은 차례대로 각각 묶는다
+            let said = ni.filter { es[$0].source != apTakeoverSource }, took = ni.filter { es[$0].source == apTakeoverSource }
+            directions = [said.isEmpty ? nil : apInboxNextText(said.map { es[$0].text }), took.isEmpty ? nil : apTakeoverNextText(took.map { es[$0].text })]
+                .compactMap { $0 }.joined(separator: "\n\n")
             for i in ni { es[i].status = "applied"; es[i].units.append(n); if es[i].done == nil { es[i].done = r3(now()) } }
             inbox = es; saveRun()
             event("board", "사람이 보낸 방향 \(ni.count)개를 단위 \(n) 의 첫 입력에 붙였습니다.")
@@ -4062,9 +4317,14 @@ func usage() -> Never {
     fail("""
     사용법: claude-autopilot start <실행 폴더> [--dev]
            claude-autopilot run <실행 폴더> <고정 설정 해시>
-           claude-autopilot control <실행 폴더> pause|resume|stop|restart_from_intake
+           claude-autopilot control <실행 폴더> pause|resume|stop|restart_from_intake|takeover|giveback [--accept <카드 id,…>]
              restart_from_intake: 멈추고 다시 출발(지금 단위를 마친 뒤 멈춤, 보드가 이 실행을 이어 가는 출발 준비를 연다)
+             takeover: 터미널로 이어받기(claude 를 멈추고 세션 id 를 남겨 이어받은 상태로, 사람이 claude --resume <세션 id> 로 이어 연다)
+             giveback: 자율주행에 돌려주기(그 세션의 claude 가 끝났고 가지가 그대로일 때 같은 세션으로 잇는다. 하네스·판정 시나리오를
+                       바꿨으면 status 의 돌려주기 카드 id 를 --accept 로 넘긴다)
            claude-autopilot status <실행 폴더> [--dev] [--json]
+           claude-autopilot takeover-check <실행 폴더>
+             이어받은 실행의 작업 트리 git 확인(보드가 이어받기 탭을 열기 직전에 부름, JSON {ok, why}, 안 되면 종료 코드 1)
              출발 전 --json: 보드가 읽는 확인 결과(고칠 것·어디서·저장소·Jira 단위의 가지)
            claude-autopilot records import [--dev | --db <파일>] [--project <이름>] [--unit-key <칸 경로>] <원본…>
              원본: 실행 폴더(run.json·queue.json 이 있는 폴더) 또는 일반 꼴 대기열 파일(format "claude-board-queue")
@@ -4238,6 +4498,12 @@ func prepare(_ dir: String, dev: Bool) -> (problems: [String], frozen: [String: 
     if let v = run["usage_path"] {
         if !dev { problems.append("usage_path 는 시험용 칸이라 --dev 출발에서만 씁니다") }
         else if let t = v as? String, t.hasPrefix("/") { f["usage_path"] = t } else { problems.append("run.json 의 usage_path 는 절대 경로 글자입니다") }
+    }
+    // 대화 기록 뿌리(8단계 ⑫-8, 시험 빌드만): 이어받기 돌려주기 때 사람이 친 차례를 읽는 Claude Code projects 자리. 시험은 가짜 claude 의 장난감 자리를 가리켜
+    // ~/.claude/projects 를 읽지 않는다. 설치판은 받지 않고, 고정 설정에 있어도 엔진이 듣지 않는다(transcriptRoots)
+    if let v = run["transcripts_dir"] {
+        if !dev { problems.append("transcripts_dir 는 시험용 칸이라 --dev 출발에서만 씁니다") }
+        else if let t = v as? String, t.hasPrefix("/") { f["transcripts_dir"] = t } else { problems.append("run.json 의 transcripts_dir 는 절대 경로 글자입니다") }
     }
     let answers = readJSON(dir + "/answers.json") as? [String: Any] ?? [:]
     prepareEnvRows = []; prepareGaps = []
@@ -4723,14 +4989,43 @@ func cmdRun(_ args: [String]) -> Never {
     e.main()
 }
 
+// 보드가 이어받기 탭을 열기 직전(되살리기 포함)에 부른다(8단계 ⑫-8 보안 검토 고침): 이어받은 실행의 그 단위 작업 폴더·저장소를 이어받기 때와 같은 규칙
+// (unitGitWhy·git 자리 훑기, apTakeoverGitBlock)으로 다시 본다. 도는 엔진의 파일은 읽기만 한다. 출력 JSON {ok, why}, 열면 안 되면 종료 코드 1
+func cmdTakeoverCheck(_ args: [String]) -> Never {
+    let dir = runDir(args.first { !$0.hasPrefix("--") })
+    func reply(_ ok: Bool, _ why: String?) -> Never { print(jsonText(["ok": ok, "why": why.map { $0 as Any } ?? NSNull()])); exit(ok ? 0 : 1) }
+    let e = Engine(dir)
+    guard e.load() else { reply(false, "run.json·queue.json 을 읽지 못했습니다") }
+    guard e.state == apTakenOverState, let t = e.run["takeover"] as? [String: Any], t["blocked"] == nil,
+          let n = (t["unit"] as? NSNumber)?.intValue, n >= 1, n <= e.queue.count else { reply(false, "이어받은 상태가 아닙니다") }
+    // 고정 설정(pinned/, 모델이 쓸 수 없음)에서 단위 작업 폴더를 읽는다 — 해시는 LaunchAgent 인자라 여기서는 꼴만 본다
+    guard let f = readJSON(dir + "/pinned/frozen.json") as? [String: Any], let u = f["units"] as? [[String: Any]], u.count == e.queue.count else {
+        reply(false, "고정 설정을 읽지 못했습니다")
+    }
+    e.cfg = f; e.defs = u
+    if let why = e.takeoverGitBlock(n, record: false) { reply(false, why) }
+    reply(true, nil)
+}
+
 func cmdControl(_ args: [String]) -> Never {
     guard args.count >= 2, apControlActions.contains(args[1]) else { usage() }
     let dir = runDir(args[0])
     guard let run = readJSON(dir + "/run.json") as? [String: Any] else { fail("run.json 을 읽지 못했습니다") }
     let s = run["state"] as? String ?? ""
     if apRunEnded(s) { print("이미 끝난 실행입니다(\(stateLabel[s] ?? s))."); exit(0) }
-    writeJSON(dir + "/control.json", ["action": args[1], "ts": r3(now())])
+    // 보드와 같은 규칙(⑫-8): 이어받은 실행에는 돌려주기·중단·멈추고 다시 출발만, 돌려주기는 이어받은 실행에만
+    guard apBoardCanControl(args[1], state: s) else {
+        print("지금 상태(\(stateLabel[s] ?? s))에서는 보내지 않습니다: \(apControlNames[args[1]] ?? args[1]). 돌려주기는 이어받은 실행에만, 이어받은 실행에는 돌려주기·중단·멈추고 다시 출발만 보냅니다.")
+        exit(1)
+    }
+    var c: [String: Any] = ["action": args[1], "ts": r3(now())]
+    // 돌려주기의 카드 답: --accept <카드 id,…>(status 의 "돌려주기 카드" 줄에 id 가 보인다)
+    if args[1] == "giveback", let i = args.firstIndex(of: "--accept"), i + 1 < args.count {
+        c["accept"] = args[i + 1].split(separator: ",").map(String.init)
+    }
+    writeJSON(dir + "/control.json", c)
     print("보냈습니다: \(apControlNames[args[1]] ?? args[1]). 엔진이 1초 안에 받습니다.")
+    if args[1] == "giveback" { print("돌려주지 못하면 까닭을 status 의 이어받기 줄과 진행 기록에 남깁니다.") }
     exit(0)
 }
 
@@ -4940,6 +5235,18 @@ func cmdStatus(_ args: [String]) -> Never {
         let c = { (s: String) in a.filter { $0["status"] as? String == s }.count }
         let parts = [("넘김", c("delivered")), ("붙임", c("applied")), ("기다림", c("waiting")), ("넘기지 않음", c("late") + c("dropped") + c("unused")), ("읽지 못함", c("bad"))]
         out += "보낸 말: \(a.count)개(" + parts.filter { $0.1 > 0 }.map { "\($0.0) \($0.1)" }.joined(separator: " · ") + ")\n"
+    }
+    // 터미널로 이어받기(⑫-8): 이어받은 상태·시각·세션, 돌려주지 못한 까닭과 카드
+    if let t = run["takeover"] as? [String: Any] {
+        out += "이어받음: \(num(t["at"]).map { stampFmt.string(from: Date(timeIntervalSince1970: $0)) } ?? "?") · 단위 \(num(t["unit"]).map { String(Int($0)) } ?? "?") · 세션 \(t["session"] ?? "?") · \(t["cwd"] ?? "")\n"
+        if let r = t["refused"] as? [String: Any] {
+            for b in r["blocks"] as? [String] ?? [] { out += "  돌려주지 못함: \(b)\n" }
+            for c in r["cards"] as? [[String: Any]] ?? [] {
+                out += "  돌려주기 카드 \(c["id"] ?? "?"): \(c["title"] ?? "") · \((c["files"] as? [String] ?? []).joined(separator: ", ")) (그대로 돌려주려면 control … giveback --accept \(c["id"] ?? "?"))\n"
+            }
+        }
+    } else if let t = run["takeover_last"] as? [String: Any] {
+        out += "지난 이어받기: \(num(t["at"]).map { stampFmt.string(from: Date(timeIntervalSince1970: $0)) } ?? "?") → 돌려줌 \(num(t["back"]).map { stampFmt.string(from: Date(timeIntervalSince1970: $0)) } ?? "?") · 단위 \(num(t["unit"]).map { String(Int($0)) } ?? "?")\n"
     }
     if let r = run["restart"] as? [String: Any] {
         out += "멈추고 다시 출발: " + (r["stopped"] != nil ? "멈췄습니다(보드가 이어 가는 출발 준비를 엽니다)" : (num(r["unit"]).map { "지금 단위(단위 \(Int($0)))를 마친 뒤 멈춥니다" } ?? "곧 멈춥니다")) + "\n"
@@ -7631,6 +7938,7 @@ case "report": cmdReport(Array(argv.dropFirst()))
 case "start": cmdStart(Array(argv.dropFirst()))
 case "run": cmdRun(Array(argv.dropFirst()))
 case "control": cmdControl(Array(argv.dropFirst()))
+case "takeover-check": cmdTakeoverCheck(Array(argv.dropFirst()))
 case "status": cmdStatus(Array(argv.dropFirst()))
 case "records": cmdRecords(Array(argv.dropFirst()))
 case "prerun": cmdPrerun(Array(argv.dropFirst()))

@@ -115,6 +115,8 @@ struct APUnit: Equatable, Identifiable {
     var caps: APCaps?
     var merge: String?         // Jira 작업 → 스토리: merged·nothing·not_merged
     var mergeWhy = ""
+    var session: String?       // 이 단위의 모델 세션 id(engine.json session_id)와 열렸는지(session_started) — 터미널로 이어받기 단추(⑫-8)
+    var sessionStarted = false
     // Jira 작업 키 — 스토리가 있는 단위의 tickets 첫 값
     var task: String? { story == nil ? nil : tickets.first }
 }
@@ -125,6 +127,14 @@ struct APEvent: Equatable { let ts: Double; let who: String; let text: String }
 struct APRestartMark: Equatable { let asked: Double; let unit: Int?; let stopped: Double? }
 // 보드가 inbox/ 에 쓴 말 — 엔진이 받기 전까지 자율주행 중 화면에 "엔진이 받기를 기다립니다"로 보인다
 struct APSaid: Equatable { let file: String; let to: String; let text: String; let at: Double }
+// 사람이 터미널로 이어받은 것(run.json takeover, 8단계 ⑫-8): 세션·단위·작업 경로·시각, 엔진이 돌려받지 못한 까닭과 카드
+struct APTakeoverNow: Equatable {
+    var session: String, unit: Int, cwd: String, at: Double
+    var blocked: String?                // 엔진이 git 확인으로 이어받지 않은 까닭(보안 검토 고침) — 이때 실행은 일시정지, 탭을 열지 않는다
+    var refusedAt: Double?
+    var blocks: [String] = []
+    var cards: [APGivebackCard] = []
+}
 
 // 실행 하나 — run.json·queue.json·units/<n>/engine.json 을 합친 것
 struct APRun: Equatable, Identifiable {
@@ -160,6 +170,7 @@ struct APRun: Equatable, Identifiable {
     var stashes: [APStash] = []         // 읽기 전용 자리에 남은 변경을 엔진이 보관한 것(branches.stashed, 5-3b ①)
     var inbox: [APInboxEntry] = []      // 방향을 바꿀 말 — 엔진이 받은 것과 어떻게 됐는지(run.json inbox, 2단계 5-4)
     var restart: APRestartMark?         // 멈추고 다시 출발 — 엔진이 받은 것(run.json restart, 5-4)
+    var takeover: APTakeoverNow?        // 터미널로 이어받음 — 엔진이 남긴 것(run.json takeover, ⑫-8)
 
     var active: Bool { !state.isEmpty && !["done", "stopped", "error"].contains(state) }
     var jira: Bool { units.contains { $0.story != nil } }
@@ -229,6 +240,16 @@ struct APRun: Equatable, Identifiable {
         if let rs = r["restart"] as? [String: Any] {
             x.restart = APRestartMark(asked: apNum(rs["asked"]) ?? 0, unit: apNum(rs["unit"]).map { Int($0) }, stopped: apNum(rs["stopped"]))
         }
+        if let t = r["takeover"] as? [String: Any], let sid = t["session"] as? String {
+            var k = APTakeoverNow(session: sid, unit: Int(apNum(t["unit"]) ?? 0), cwd: t["cwd"] as? String ?? "", at: apNum(t["at"]) ?? 0)
+            k.blocked = (t["blocked"] as? [String: Any])?["why"] as? String
+            if let rf = t["refused"] as? [String: Any] {
+                k.refusedAt = apNum(rf["at"])
+                k.blocks = rf["blocks"] as? [String] ?? []
+                if let c = rf["cards"], let d = try? JSONSerialization.data(withJSONObject: c) { k.cards = (try? JSONDecoder().decode([APGivebackCard].self, from: d)) ?? [] }
+            }
+            x.takeover = k
+        }
         let br = r["branches"] as? [String: Any] ?? [:]
         let repos = br["repos"] as? [String: Any] ?? [:]
         for (k, v) in repos {
@@ -282,6 +303,8 @@ struct APRun: Equatable, Identifiable {
                 if e["caps"] is [String: Any] { u.caps = APCaps.from(e["caps"], x.caps) }
                 if let m = e["merge"] as? [String: Any] { u.merge = m["state"] as? String; u.mergeWhy = m["why"] as? String ?? "" }
                 if let b = apText(e["branch"]) { u.branch = b }
+                u.session = e["session_id"] as? String
+                u.sessionStarted = e["session_started"] as? Bool == true
                 u.savedAt = apStamp(ep)
             }
             x.units.append(u)
@@ -385,6 +408,12 @@ struct APLogGroup: Identifiable {
     @Published private(set) var sayError: [String: String] = [:]
     // 이 보드가 멈추고 다시 출발을 보낸 실행 — 끝 정리까지 마치면 한 번 출발 준비를 저절로 연다(규칙 apReopenIntake, 5-4). 보드를 끄면 잊고 화면의 단추로 연다
     private var restartAsked: Set<String> = [], reopened: Set<String> = []
+    // 터미널로 이어받기(⑫-8): 이 보드가 이어받기를 보낸 실행 — 엔진이 claude 를 멈추고 taken_over 로 둔 뒤 한 번 보드 탭을 연다(표지 시각마다 한 번).
+    // 보드를 끄면 잊고 화면의 "보드 탭에서 이어 열기" 단추로 연다. 카드 답은 실행 id → 카드 id → keep·wait
+    private var takeoverAsked: Set<String> = [], takeoverOpened: [String: Double] = [:]
+    @Published private(set) var takeoverError: [String: String] = [:]
+    @Published private(set) var takeoverAnswers: [String: [String: String]] = [:]
+    @Published private(set) var takeoverTabs: Set<String> = []   // 이어받은 세션의 보드 탭이 있는 실행(1초마다, 바뀔 때만 알림 — 화면이 TerminalHub 를 직접 지켜보지 않게)
     @Published private(set) var history = APHistory()
     @Published private(set) var detail: APPastDetail?
     // 지난 실행에서 거른 프로젝트(nil 이면 모든 프로젝트)와 상세에 보이는 실행 — 상세는 거른 목록 안에서 고른다(규칙 apHistoryPick, 5-3b ⑥)
@@ -471,6 +500,19 @@ struct APLogGroup: Identifiable {
             if !left.isEmpty { pruned[id] = left }
         }
         if pruned != said { said = pruned }
+        // 이 보드가 이어받기를 보낸 실행 — 엔진이 taken_over 로 두면 표지 시각마다 한 번 보드 탭을 연다(⑫-8). 돌려준 뒤에는 카드 답을 잊는다
+        for r in live {
+            if r.state == apTakenOverState, takeoverAsked.contains(r.id), let t = r.takeover, takeoverOpened[r.id] != t.at {
+                takeoverOpened[r.id] = t.at
+                DispatchQueue.main.async { MainActor.assumeIsolated { AutopilotStore.shared.openTakeoverTab(r) } }
+            }
+            if r.state != apTakenOverState, takeoverAnswers[r.id] != nil { takeoverAnswers[r.id] = nil }
+        }
+        let tabbed = Set(live.compactMap { r -> String? in
+            guard r.state == apTakenOverState, let t = r.takeover, TerminalHub.shared.hasTakeoverTab(session: t.session) else { return nil }
+            return r.id
+        })
+        if tabbed != takeoverTabs { takeoverTabs = tabbed }
         // 멈추고 다시 출발로 멈춘 실행 — 끝 정리를 마치면 이 실행을 이어 가는 출발 준비를 한 번 연다. 다른 출발 준비가 열려 있으면 그것을 버리지 않고 단추로 남긴다
         for id in restartAsked where !reopened.contains(id) {
             guard let r = cache.values.compactMap(\.run).first(where: { $0.id == id }) else { continue }
@@ -583,13 +625,15 @@ struct APLogGroup: Identifiable {
 
     // 일시정지·재개·중단 — control.json 을 엔진 control 명령과 같은 꼴({"action","ts"}, 임시 파일을 바꿔 넣음)로 쓴다.
     // 쓰기 직전에 run.json 을 다시 읽어 끝난 실행이면 쓰지 않는다
-    func send(_ action: String, _ run: APRun) {
+    func send(_ action: String, _ run: APRun, extra: [String: Any] = [:]) {
         guard sent[run.id] == nil else { return }
         // 아는 요청이고 출발한·끝나지 않은 실행인지는 규칙 apBoardCanControl(AutopilotRules/Control.swift)
         let state = (apRead(run.dir + "/run.json") as? [String: Any])?["state"] as? String ?? ""
         guard apBoardCanControl(action, state: state) else { return }
         let ts = (Date().timeIntervalSince1970 * 1000).rounded() / 1000
-        guard let data = try? JSONSerialization.data(withJSONObject: ["action": action, "ts": ts], options: [.prettyPrinted, .sortedKeys]) else { return }
+        var body: [String: Any] = ["action": action, "ts": ts]
+        for (k, v) in extra { body[k] = v }   // 돌려주기의 카드 답 accept(⑫-8)
+        guard let data = try? JSONSerialization.data(withJSONObject: body, options: [.prettyPrinted, .sortedKeys]) else { return }
         let path = run.dir + "/control.json", tmp = path + ".tmp-\(getpid())"
         guard FileManager.default.createFile(atPath: tmp, contents: data + Data("\n".utf8)), rename(tmp, path) == 0 else {
             unlink(tmp)
@@ -598,6 +642,89 @@ struct APLogGroup: Identifiable {
         }
         sent[run.id] = APSent(action: action, ts: ts)
         if action == "restart_from_intake" { restartAsked.insert(run.id) }
+        if action == "takeover" { takeoverAsked.insert(run.id) }
+    }
+
+    // MARK: 터미널로 이어받기와 돌려주기(8단계 ⑫-8, 규칙 AutopilotRules/Takeover.swift)
+
+    // 이어받을 수 없는 까닭(단추 잠금) — 엔진과 같은 규칙 apTakeoverBlock
+    func takeoverBlock(_ run: APRun) -> String? {
+        let u = run.units.first { $0.status == "running" }
+        return apTakeoverBlock(state: run.state, unitStatus: u?.status, phase: u?.phase, session: u?.session, sessionStarted: u?.sessionStarted ?? false)
+    }
+    func takeover(_ run: APRun) {
+        takeoverError[run.id] = nil
+        send("takeover", run)
+    }
+    // 이어받은 세션을 보드 탭에서 연다 — 엔진이 claude 를 멈추고 taken_over 로 둔 뒤에만(그 전에 열면 엔진의 -p 와 한 세션을 함께 쥔다).
+    // 명령은 설치판 claude, 시험 빌드만 설정 autopilotTabClaude(이름이 claude 인 가짜 claude 자리)를 듣는다
+    // 보안 검토 고침(HIGH): 탭의 대화형 claude·로그인 셸은 엔진의 git 보호 없이 그 작업 트리에서 git 을 부르므로, 열기 직전에 앱 안 엔진 takeover-check
+    // (이어받기 때와 같은 규칙 apTakeoverGitBlock)를 뒤에서 한 번 더 부르고, 명령 앞에 git 보호 환경(apTakeoverEnvPrefix)을 붙인다
+    func openTakeoverTab(_ run: APRun) {
+        guard run.state == apTakenOverState, let t = run.takeover, t.blocked == nil else { return }
+        guard FileManager.default.fileExists(atPath: t.cwd) else { takeoverError[run.id] = "작업 경로가 없어 열지 못했습니다: \(t.cwd)"; return }
+        takeoverOpened[run.id] = t.at
+        prepareTakeover(runId: run.id, session: t.session) { line in
+            guard let line else { return }
+            TerminalHub.shared.launchTakeover(line.command, gitEnv: line.gitEnv, in: t.cwd, sessionId: t.session, runId: run.id, name: "\(run.name) 이어받음")
+            boardLog("자율주행 \(run.id): 이어받은 세션 \(t.session) 을 보드 탭에서 엶")
+        }
+    }
+    // 이어받기 탭에 넣을 명령(새 탭·다시 뜰 때 되살리기 모두) — 실행이 아직 같은 세션으로 이어받은 상태인지(apTakeoverRestore) 보고, 앱 안 엔진 takeover-check 를
+    // 뒤에서 부른 뒤 메인에서 done(명령·git 보호 환경 또는 nil, nil 이면 까닭을 화면에). 명령은 남긴 글자가 아니라 늘 규칙(apTakeoverTabCommand)으로 다시 만든다
+    func prepareTakeover(runId: String, session: String?, done: @escaping @MainActor ((command: String, gitEnv: String)?) -> Void) {
+        let dir = autopilotRoot + "/runs/" + runId
+        guard takeoverRestore(runId, session: session), let sid = session, let r = APRun.parse(id: runId, dir: dir) else {
+            boardLog("이어받기 탭을 열지 않음: 자율주행 \(runId) 이 그 세션으로 이어받은 상태가 아닙니다")
+            done(nil); return
+        }
+        let claude = apDevBuild ? (UserDefaults.standard.string(forKey: "autopilotTabClaude").flatMap { $0.isEmpty ? nil : $0 } ?? "claude") : "claude"
+        guard let cmd = apTakeoverTabCommand(claude: claude, session: sid) else {
+            takeoverError[runId] = "이어 열 명령을 만들지 못했습니다(세션 id 나 claude 명령의 꼴이 맞지 않음)"
+            done(nil); return
+        }
+        // GIT_CEILING_DIRECTORIES: 저장소 뿌리(따로 작업 트리면 그 자리)의 부모 — 엔진 claudeEnv 와 같은 자리
+        let roots = r.worktreePath.map { [$0] } ?? r.repos
+        let env = apTakeoverEnvPrefix(ceilings: roots.map { (apCanonical($0) as NSString).deletingLastPathComponent })
+        DispatchQueue.global(qos: .userInitiated).async {
+            let x = apEngine(["takeover-check", dir])
+            let o = (try? JSONSerialization.jsonObject(with: Data(x.out.utf8))) as? [String: Any]
+            let ok = x.code == 0 && o?["ok"] as? Bool == true
+            let why = o?["why"] as? String ?? (x.out.isEmpty ? "엔진 확인이 실패했습니다" : String(x.out.prefix(300)))
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    if ok { done((cmd, env)); return }
+                    AutopilotStore.shared.takeoverError[runId] = "보드 탭을 열지 않았습니다: " + why
+                    boardLog("자율주행 \(runId): 이어받기 탭을 열지 않음(\(why))")
+                    done(nil)
+                }
+            }
+        }
+    }
+    // 돌려주기 — 그 세션의 보드 탭에서 claude 가 아직 돌면 보내지 않고 알린다(강제로 끄지 않음). 카드에 "그대로 돌려주기"로 답한 것은 accept 로 넘긴다.
+    // 가지·하네스·시나리오·보드 밖 터미널의 claude 는 엔진이 다시 보고(apGivebackCheck) 막히면 run.json takeover.refused 에 남긴다
+    func giveback(_ run: APRun) {
+        guard let t = run.takeover else { return }
+        if TerminalHub.shared.takeoverTabBusy(session: t.session) == true {
+            takeoverError[run.id] = "보드 탭에서 이어 연 claude 가 아직 돕니다. 그 탭에서 /exit 로 끝낸 뒤 돌려주세요. 자율주행은 강제로 끄지 않습니다."
+            return
+        }
+        takeoverError[run.id] = nil
+        let accept = (takeoverAnswers[run.id] ?? [:]).filter { $0.value == "keep" }.map(\.key).sorted()
+        send("giveback", run, extra: accept.isEmpty ? [:] : ["accept": accept])
+    }
+    // 돌려주기 카드에 답한다 — 모든 카드가 "그대로 돌려주기"이고 막는 까닭이 없으면 바로 다시 돌려준다
+    func answerCard(_ run: APRun, _ card: APGivebackCard, _ key: String) {
+        takeoverAnswers[run.id, default: [:]][card.id] = key
+        guard key == "keep", let t = run.takeover, t.blocks.isEmpty, t.cards.allSatisfy({ takeoverAnswers[run.id]?[$0.id] == "keep" }) else { return }
+        giveback(run)
+    }
+    // 보드가 다시 뜰 때 이어받기 탭을 그 세션으로 이어 열까(TerminalHub.restoreNode·restoreCommand) — 규칙 apTakeoverRestore, run.json 을 바로 읽는다
+    func takeoverRestore(_ runId: String, session: String?) -> Bool {
+        guard apRunIDOK(runId), let r = apRead(autopilotRoot + "/runs/" + runId + "/run.json") as? [String: Any] else { return false }
+        let t = r["takeover"] as? [String: Any]
+        guard t?["blocked"] == nil else { return false }   // 엔진이 git 확인으로 이어받지 않은 실행(보안 검토 고침)
+        return apTakeoverRestore(runState: r["state"] as? String, takeoverSession: t?["session"] as? String, entrySession: session)
     }
 
     // 방향을 바꿀 말 보내기(2단계 5-4, 와이어프레임 자율주행 중 ③ "한마디") — 규칙 apInboxSend 가 확인하고 inbox/<yyyyMMdd-HHmmss-SSS>.md 로 쓴다.
@@ -1180,6 +1307,7 @@ func apStateChip(_ r: APRun) -> (String, Color) {
     if r.active, r.pid > 0, !r.alive { return ("엔진 꺼짐", APColor.fail) }
     switch r.state {
     case "paused": return ("일시정지", APColor.pause)
+    case "taken_over": return ("이어받음", APColor.wait)
     case "waiting_limit": return ("한도 대기", APColor.limit)
     case "waiting_stopline": return ("멈출 선 대기", APColor.stop)
     case "waiting_precheck": return ("환경 확인 대기", APColor.stop)
@@ -1686,7 +1814,7 @@ struct APRunningScreen: View {
             }
         } else {
             switch run.state {
-            case "paused", "waiting_limit", "waiting_stopline", "waiting_precheck":
+            case "paused", "taken_over", "waiting_limit", "waiting_stopline", "waiting_precheck":
                 let sc = apStateChip(run)
                 VStack(alignment: .leading, spacing: 4) {
                     APChip(text: sc.0, color: sc.1, strong: true)
@@ -1726,7 +1854,9 @@ struct APRunningScreen: View {
             : run.restart != nil ? "이미 받았습니다. 지금 단위를 마친 뒤 멈춥니다" : ""
         return VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
-                if run.state == "paused" {
+                if run.state == apTakenOverState {
+                    // 이어받은 동안은 일시정지·재개 대신 아래 이어받기 상자의 돌려주기(⑫-8)
+                } else if run.state == "paused" {
                     APButton(title: "재개", primary: true, enabled: can, help: "같은 세션으로 이어 갑니다", axid: "ap-resume") { ap.send("resume", run) }
                 } else {
                     APButton(title: "일시정지", enabled: can, help: "지금 단위를 멈추고 쉽니다. 재개하면 같은 세션으로 이어 갑니다", axid: "ap-pause") {
@@ -1752,6 +1882,7 @@ struct APRunningScreen: View {
                     Text("실행 합계 \(apUSD(run.totalCost)) USD").boardFont(10.5).monospacedDigit().foregroundStyle(.secondary).fixedSize()
                 }
             }
+            if run.active { takeoverBox(run, can: can, compact: compact) }
             if let w = wait {
                 Text("\(apControlNames[w.action] ?? w.action) 요청을 보냈습니다. 엔진이 받기를 기다립니다…")
                     .boardFont(10.5).foregroundStyle(APColor.stop)
@@ -1783,6 +1914,75 @@ struct APRunningScreen: View {
         }
         .padding(compact ? 0 : 10)
         .background(RoundedRectangle(cornerRadius: 12).fill(Color.white.opacity(compact ? 0 : 0.04)))
+    }
+
+    // 터미널로 이어받기(8단계 ⑫-8) — 도는 실행이면 "터미널로 이어받기"(이어받을 세션이 없으면 잠그고 까닭), 이어받은 실행이면 세션·시각과
+    // "자율주행에 돌려주기"·"보드 탭에서 이어 열기", 엔진이 돌려받지 못한 까닭과 카드(그대로 돌려주기 · 돌려주지 않고 기다림)
+    @ViewBuilder private func takeoverBox(_ run: APRun, can: Bool, compact: Bool) -> some View {
+        let err = ap.takeoverError[run.id]
+        if run.state == apTakenOverState, let t = run.takeover {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("사람이 터미널로 이어받았습니다 · 단위 \(t.unit) · 세션 \(t.session.prefix(8)) · \(apClock(t.at))")
+                    .boardFont(11, weight: .semibold).foregroundStyle(APColor.wait).fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("ap-takeover-state")
+                if !compact {
+                    Text("보드 탭에서 같은 세션으로 일하고 claude 를 끝낸 뒤 돌려주면, 자율주행이 같은 세션으로 지금 단위를 잇습니다. 사람이 친 요청과 바꾼 파일은 이어받기 지시로 남습니다.")
+                        .boardFont(10.5).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+                WrapRow(spacing: 6) {
+                    APButton(title: "자율주행에 돌려주기", primary: true, enabled: can, help: "그 탭의 claude 를 끝낸 뒤 누릅니다. 가지·하네스·판정 시나리오를 엔진이 다시 봅니다", axid: "ap-giveback") {
+                        ap.giveback(run)
+                    }
+                    if !ap.takeoverTabs.contains(run.id) {
+                        APButton(title: "보드 탭에서 이어 열기", icon: "terminal", enabled: true, help: "작업 경로에서 claude --resume 으로 이 세션을 엽니다", axid: "ap-takeover-open") {
+                            ap.openTakeoverTab(run)
+                        }
+                    }
+                }
+                if let err { apNote(err, APColor.fail).accessibilityIdentifier("ap-takeover-error") }
+                if t.refusedAt != nil, !t.blocks.isEmpty || !t.cards.isEmpty {
+                    Text("돌려주지 못했습니다\(t.refusedAt.map { " · " + apClock($0) } ?? "")").boardFont(10.5, weight: .semibold).foregroundStyle(APColor.fail)
+                    ForEach(Array(t.blocks.enumerated()), id: \.offset) { i, b in
+                        apNote(apPlain(b), APColor.fail).accessibilityIdentifier("ap-giveback-why-\(i)")
+                    }
+                    ForEach(t.cards, id: \.id) { c in
+                        let picked = ap.takeoverAnswers[run.id]?[c.id]
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(c.title).boardFont(11, weight: .semibold)
+                            Text(c.why).boardFont(10.5).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                            Text(c.files.prefix(8).joined(separator: ", ") + (c.files.count > 8 ? " 외 \(c.files.count - 8)개" : ""))
+                                .boardFont(10, design: .monospaced).foregroundStyle(.secondary).lineLimit(3).truncationMode(.middle)
+                            WrapRow(spacing: 6) {
+                                ForEach(c.options, id: \.key) { o in
+                                    APButton(title: o.label + (o.key == c.recommended ? "(추천)" : ""), tint: picked == o.key ? Palette.accent : nil, enabled: can,
+                                             help: o.note, axid: "ap-giveback-card-\(c.id)-\(o.key)") { ap.answerCard(run, c, o.key) }
+                                }
+                            }
+                            if picked == "wait" { apNote("되돌리거나 고친 뒤 다시 돌려주기를 누릅니다.") }
+                        }
+                        .padding(8)
+                        .background(RoundedRectangle(cornerRadius: 8).fill(Color.white.opacity(0.05)))
+                        .accessibilityElement(children: .contain)
+                        .accessibilityIdentifier("ap-giveback-card-\(c.id)")
+                    }
+                }
+            }
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("ap-takeover")
+        } else if run.state != apTakenOverState {
+            let why = ap.takeoverBlock(run)
+            if let b = run.takeover?.blocked {
+                apNote("터미널로 이어받지 않았습니다(일시정지로 둠): " + apPlain(b), APColor.fail).accessibilityIdentifier("ap-takeover-blocked")
+            }
+            WrapRow(spacing: 6) {
+                APButton(title: "터미널로 이어받기", icon: "terminal", enabled: can && why == nil,
+                         help: why ?? "지금 단위를 멈추고 같은 세션을 보드 탭에서 엽니다. 돌려줄 때까지 자율주행은 판정·새 단위를 하지 않습니다", axid: "ap-takeover") {
+                    ap.takeover(run)
+                }
+                if !compact, let why { Text(why).boardFont(10.5).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true) }
+            }
+            if let err { apNote(err, APColor.fail).accessibilityIdentifier("ap-takeover-error") }
+        }
     }
 
     private func restartNote(_ rs: APRestartMark, paused: Bool) -> String {
@@ -1995,7 +2195,7 @@ struct APSayBox: View {
                     VStack(alignment: .leading, spacing: 2) {
                         HStack(spacing: 6) {
                             Text(apClock(l.at)).boardFont(10, design: .monospaced).foregroundStyle(.secondary).fixedSize()
-                            APChip(text: l.to == "next" ? "다음 단위부터" : "지금 단위에")
+                            APChip(text: l.to == apTakeoverSource ? "이어받기 지시" : l.to == "next" ? "다음 단위부터" : "지금 단위에")
                             APChip(text: l.status, color: l.color, strong: true)
                             Spacer(minLength: 0)
                         }
@@ -2019,7 +2219,10 @@ struct APSayBox: View {
         var out: [Line] = run.inbox.filter { $0.status != "bad" || !$0.file.isEmpty }.map { e in
             let l = apInboxLabel(e)
             let c: Color = ["waiting": APColor.wait, "delivered": APColor.ok, "applied": APColor.ok, "bad": APColor.fail][e.status] ?? APColor.muted
-            return Line(id: e.file, at: e.sent ?? e.received, to: e.to, text: e.status == "bad" ? "(읽지 못한 파일 \(e.file))" : e.text, status: l.status, detail: l.detail, color: c)
+            // 이어받기 지시(⑫-8, source takeover)는 감싼 표시 줄을 빼고 보인다
+            let text = e.source == apTakeoverSource ? e.text.components(separatedBy: "\n").filter { $0 != apTakeoverOpen && $0 != apTakeoverClose }.joined(separator: "\n") : e.text
+            return Line(id: e.file, at: e.sent ?? e.received, to: e.source == apTakeoverSource ? apTakeoverSource : e.to,
+                        text: e.status == "bad" ? "(읽지 못한 파일 \(e.file))" : text, status: l.status, detail: l.detail, color: c)
         }
         for s in ap.said[run.id] ?? [] where !out.contains(where: { $0.id == s.file }) {
             out.append(Line(id: s.file, at: s.at, to: s.to, text: s.text, status: run.active ? "보냄" : "받지 못함",

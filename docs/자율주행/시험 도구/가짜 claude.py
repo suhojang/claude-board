@@ -48,7 +48,43 @@
 # (샌드박스 밖에서 도는 claude 의 git, 2026-10-30 5-4 실측 흉내)
 # 띄운 횟수 기록(7단계 ⑫-7b, "모델 호출 0" 을 보이려고): 이 파일 옆에 .fake-calls.jsonl 이 이미 있으면 띄울 때마다 한 줄(시각·종류·작업 폴더·첫 줄)을 덧붙인다.
 #     저장소의 이 파일은 그 기록 파일이 없어 남기지 않는다(시험은 scratchpad 사본 옆에 빈 파일을 만들어 켠다)
-import json, os, signal, subprocess, sys, threading, time
+#
+#  8) 터미널로 이어받기(8단계 ⑫-8): 이 파일 옆에 fake-config.json({"projects": "<장난감 대화 기록 뿌리>", "script": "<대본 파일>"})이 있을 때만
+#     대화 기록을 Claude Code 꼴(<projects>/<작업 경로의 영문·숫자 밖 글자를 '-' 로>/<세션 id>.jsonl, 줄마다 type user·assistant)로 남긴다.
+#     없으면 어디에도 쓰지 않는다(~/.claude/projects 에 쓰지 않는다). 엔진은 시험 빌드 run.json 의 transcripts_dir 로 같은 뿌리를 읽는다.
+#     - 줄대로 꼴(-p, 2)의 차례마다 받은 입력을 user 줄, 결과 글을 assistant 줄로 덧붙인다(이어받기 전 차례 — 엔진이 거르는지 보려고)
+#     - 대화형 꼴(-p·--input-format·--tools·--mcp-config 가 없고 --resume <세션 id>): 보드 탭이 넣는 `claude --name <탭 이름> --resume <id> --plugin-dir …`
+#       처럼 받는다(--name·--plugin-dir 은 받아 넘김). 대본 파일이 있으면 줄마다 하고 다 하면 이름을 바꿔 둔다(다시 열면 다시 하지 않게):
+#         USER <글>            사람이 친 차례 — 대화 기록에 user 줄(그리고 가짜 assistant 줄)
+#         WRITE <상대 경로> <글> 사람의 요청으로 파일을 씀(작업 폴더 기준)    COMMIT <메시지>  쓴 파일만 add 해 커밋
+#         SH <셸 명령>          명령을 돌림(가지 바꾸기·하네스 고치기 시험)
+#         HOLD <파일>           그 파일이 생길 때까지 끝나지 않음(탭의 claude 가 아직 돎 시험)    EXIT  바로 끝냄
+#         CLOSE                 부모 셸에 SIGHUP 을 보내고 끝냄(보드 탭이 닫힘 — 돌려주지 않고 탭을 닫은 때의 시험)
+#       대본에 EXIT 가 없으면 표준 입력(탭에 친 글)을 줄마다 사람 차례로 받고 /exit·빈 입력 끝에서 끝난다. 기록은 .fake-home/interactive.log(대본·입력 어느 길로 차례가 생겼는지)
+import json, os, signal, subprocess, sys, threading, time, uuid as _uuid, re as _re0
+from datetime import datetime, timezone
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+try:
+    _CFG = json.load(open(os.path.join(_HERE, "fake-config.json")))
+except Exception:
+    _CFG = {}
+def _transcript(sid, cwd):
+    root = _CFG.get("projects")
+    if not root or not os.path.isabs(root) or not _re0.match(r"^[0-9a-f-]{36}$", sid or ""):
+        return None
+    d = os.path.join(root, _re0.sub(r"[^A-Za-z0-9]", "-", cwd))
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, sid + ".jsonl")
+def _say(sid, role, text, cwd=None):
+    p = _transcript(sid, cwd or os.getcwd())
+    if not p:
+        return
+    o = {"type": role, "message": {"role": role, "content": text if role == "user" else [{"type": "text", "text": text}]},
+         "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z", "sessionId": sid, "uuid": str(_uuid.uuid4()),
+         "isSidechain": False, "cwd": cwd or os.getcwd(), "userType": "external"}
+    with open(p, "a", encoding="utf-8") as f:
+        f.write(json.dumps(o, ensure_ascii=False) + "\n")
 
 UNIT = os.environ.get("CLAUDE_BOARD_UNIT_DIR", ".")
 args = sys.argv[1:]
@@ -58,6 +94,72 @@ def _call(kind, first=""):
     if os.path.isfile(CALLS) and not os.path.islink(CALLS):
         with open(CALLS, "a", encoding="utf-8") as f:
             f.write(json.dumps({"at": round(time.time(), 3), "kind": kind, "cwd": os.getcwd(), "first": first[:120], "pid": os.getpid()}, ensure_ascii=False) + "\n")
+
+# ---- 8) 대화형(보드 탭에서 이어 열기, ⑫-8) — 작업 폴더에 아무 기록도 남기지 않는다(그 저장소의 git 바뀜으로 잡히지 않게) ----
+if not ({"-p", "--print", "--input-format", "--tools", "--mcp-config"} & set(args)) and "--resume" in args:
+    sid = args[args.index("--resume") + 1] if args.index("--resume") + 1 < len(args) else ""
+    name = args[args.index("--name") + 1] if "--name" in args and args.index("--name") + 1 < len(args) else ""
+    _call("interactive", "--resume " + sid)
+    home = os.path.join(_HERE, ".fake-home")
+    os.makedirs(home, exist_ok=True)
+    def ilog(t):
+        with open(os.path.join(home, "interactive.log"), "a", encoding="utf-8") as f:
+            f.write("%s pid %d %s\n" % (time.strftime("%H:%M:%S"), os.getpid(), t))
+    ilog("뜸 세션 %s 이름 %s 작업 폴더 %s 인자 %s" % (sid, name, os.getcwd(), json.dumps(args, ensure_ascii=False)))
+    # 보드가 명령 앞에 붙인 git 보호 환경(⑫-8 보안 검토 고침)을 받았는지
+    ilog("git 환경 " + json.dumps({k: v for k, v in os.environ.items() if k.startswith("GIT_CONFIG_") or k == "GIT_CEILING_DIRECTORIES"}, ensure_ascii=False, sort_keys=True))
+    print("가짜 claude(대화형) · 세션 %s · 이름 %s" % (sid[:8], name), flush=True)
+    written = []
+    def turn(text, how):
+        _say(sid, "user", text)
+        _say(sid, "assistant", "가짜 claude 가 받았습니다: " + text[:80])
+        ilog("사람 차례(%s): %s" % (how, text))
+        print("> " + text, flush=True)
+    script = _CFG.get("script")
+    lines = []
+    if script and os.path.isfile(script):
+        lines = [l.rstrip("\n") for l in open(script, encoding="utf-8") if l.strip()]
+        os.rename(script, script + ".used-%d" % int(time.time()))   # 다시 이어 열면(보드가 다시 뜸) 같은 대본을 또 하지 않는다
+        ilog("대본 %d줄" % len(lines))
+    end = False
+    for l in lines:
+        verb, _, rest = l.partition(" ")
+        if verb == "USER": turn(rest, "대본")
+        elif verb == "WRITE":
+            path, _, text = rest.partition(" ")
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            open(path, "w").write(text + "\n"); written.append(path); ilog("파일 씀 " + path)
+        elif verb == "COMMIT":
+            if written:
+                subprocess.run(["git", "add", "--"] + written, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                subprocess.run(["git", "commit", "-q", "-m", rest or "사람 커밋"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                ilog("커밋 " + rest)
+        elif verb == "SH":
+            subprocess.run(["/bin/sh", "-c", rest], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); ilog("명령 " + rest)
+        elif verb == "HOLD":
+            ilog("기다림 " + rest)
+            while not os.path.exists(rest):
+                time.sleep(0.3)
+            ilog("기다림 끝")
+        elif verb == "EXIT":
+            end = True
+            break
+        elif verb == "CLOSE":
+            ilog("셸 닫기 pid %d" % os.getppid())
+            os.kill(os.getppid(), signal.SIGHUP)
+            end = True
+            break
+    if not end:
+        print("(가짜 claude: 요청을 쓰고 Return, 끝내려면 /exit)", flush=True)
+        for raw in sys.stdin:
+            t = raw.strip()
+            if t in ("/exit", "exit", "/quit"):
+                break
+            if t:
+                turn(t, "입력")
+    ilog("끝남")
+    print("가짜 claude 를 끝냅니다.", flush=True)
+    sys.exit(0)
 
 def log(name, text):
     with open(os.path.join(UNIT, name), "a") as f:
@@ -276,6 +378,8 @@ if lines:
         msg = c if isinstance(c, str) else "".join(b.get("text", "") for b in c if isinstance(b, dict))
     except Exception:
         msg = lines[0]
+if msg:
+    _say(sid, "user", msg)   # 8) fake-config.json 이 있을 때만(장난감 대화 기록)
 
 def fake_lines(text):
     got = []
@@ -420,6 +524,7 @@ try:
     open(os.path.join(UNIT, "result.json"), "w").write(json.dumps(res, ensure_ascii=False))
 except Exception:
     pass
+_say(sid, "assistant", "끝냈습니다(가짜 claude 가 줄 %d개를 했습니다)" % len(todo))
 out({"type": "result", "subtype": "success", "is_error": False, "num_turns": 2, "result": "끝냈습니다", "total_cost_usd": 0.01, "session_id": sid})
 # 결과 뒤에도 SIGINT 를 받을 수 있게 입력이 닫힐 때까지 기다린다
 while not closed.is_set():
