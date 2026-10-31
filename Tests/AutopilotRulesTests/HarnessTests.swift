@@ -165,6 +165,15 @@ private struct FakeHarness: APHarnessSource {
         #expect(r.marks.count == apHarnessFileMax && r.capped)
     }
 
+    @Test("출발 전 자율주행 가지에 시나리오로 커밋해도 되는 자리: 하네스·.git 은 아님(접은 꼴로)")
+    func 시나리오자리() {
+        #expect(apSeedScenarioPathOK(".autopilot/scenarios/u1/check.sh") && apSeedScenarioPathOK("sub/.autopilot/scenarios/p/u1/a.py"))
+        for bad in [".claude/hooks/guard.sh", ".Claude/settings.json", "CLAUDE.md", "docs/Claude.md", ".mcp.json", ".git/hooks/pre-commit", ".GIT/config",
+                    "../x.sh", "/etc/x", "a/.claude/rules/r.md", ".gitattributes"] {
+            #expect(!apSeedScenarioPathOK(bad), "\(bad)")
+        }
+    }
+
     @Test("지문 견주기: 접은 경로, 바뀜·더함·뺌, 세트 기준 없으면 그대로")
     func 견주기() {
         let a = [APHarnessFileMark(path: "CLAUDE.md", digest: "1", size: 3), APHarnessFileMark(path: ".claude/rules/a.md", digest: "2", size: 3), APHarnessFileMark(path: "x.md", digest: "9", size: 1)]

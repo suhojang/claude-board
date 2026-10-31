@@ -253,6 +253,17 @@ public func apHarnessCardId(_ p: APHarnessPoint) -> String {
     apHarnessCardPrefix + String((p.file + "-" + String(p.line)).map { $0.isLetter || $0.isNumber || $0 == "-" ? $0 : "-" }.prefix(80))
 }
 
+// 출발 전 자율주행 가지에 판정 시나리오로 커밋해도 되는 자리(7단계 ⑫-7b: 세트 이어 쓰기가 고친 시나리오·가져오기 세션 시나리오·버린 실행에서 되살린 시나리오).
+// 저장소 안 상대 경로이고, 하네스(CLAUDE.md·.claude/·.mcp.json 등, 접은 꼴)·.git 자리가 아니어야 한다 — 이어 갈 단위 정의의 시나리오 자리가 하네스를 가리키면
+// 시나리오 고침이 하네스를 바꾸는 길이 되므로(사용자 하네스는 출발 준비·실행·끝 어디서도 고치지 않는다, 설계 1장)
+public func apSeedScenarioPathOK(_ rel: String) -> Bool {
+    guard apScenarioPathOK(rel) else { return false }
+    let parts = apPathKey(rel).split(separator: "/").map(String.init)
+    if parts.contains(where: { [".git", ".claude"].contains($0) }) { return false }
+    if let last = parts.last, ["claude.md", "claude.local.md", ".mcp.json", "agents.md", ".gitmodules", ".gitattributes"].contains(last) { return false }
+    return !apHarnessFileWanted(rel)
+}
+
 // MARK: - 정책 카드 (7단계 ⑫-7b): 확인 지점 가운데 사람 몫 정책이 필요한 것 — 바깥 쓰기, 배포·운영 확인
 
 // 정책 카드는 프로젝트 설정 policy_answers 에 답이 남아 다음 출발에 미리 골라진다(2단계 정책 답 길). 그래서 id 는 줄 번호가 아니라
