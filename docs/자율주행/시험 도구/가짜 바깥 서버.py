@@ -25,6 +25,10 @@
 #              Figma GET /v1/files/<키>/nodes?ids= · GET /v1/files/<키>?depth=2 · GET /v1/images/<키>?ids=(그림 주소는 --image-base 아래 /img/…)
 #              그림 GET /img/<…>.png — 인증 없이 PNG 를 주고 받은 인증 머리 꼴을 기록한다(토큰이 그림 호스트로 가지 않는지 보려고)
 #   --image-base U  /v1/images 가 돌려줄 그림 주소의 앞(기본은 이 서버). 다른 포트의 이 서버를 띄워 "다른 호스트"로 쓴다
+#   가져오기(⑫-7a): Jira GET /rest/api/3/search/jql(jql 의 filter = 10001 · parent = TOY-10 이면 장난감 목록 TOY-1~6, 그 밖은 빈 목록. 쪽은 maxResults 3 씩,
+#              다음 쪽 표지 nextPageToken) — TOY-2 는 Done(statusCategory done), TOY-3 은 In Progress(indeterminate), TOY-4 설명에 가짜 토큰(이어 붙여 만듦)
+#              Notion GET /v1/databases/<id>(상태 속성의 묶음 To-do·In progress·Complete) · POST /v1/databases/<id>/query(쪽 둘, start_cursor) —
+#              본문이 page_size·start_cursor 말고 다른 칸이면 400(엔진이 질의를 정한 꼴로만 보내는지 보려고)
 # 기록 한 줄: {ts, server, method, path, status, auth:{scheme, ok, sha8}, bytes, checks:[…], created} — 인증 머리 값은 남기지 않는다(sha256 앞 8자만)
 import argparse, base64, hashlib, json, os, re, struct, sys, threading, time, uuid, zlib
 from urllib.parse import urlsplit, parse_qs
@@ -90,6 +94,43 @@ JIRA = {
                 "description": adf(para("같은 회의실 같은 시각에 두 예약이 생기지 않게 합니다."), head(2, "수용 기준"),
                                    para("겹치면 409 를 돌려줍니다."), head(2, "참고"), para("배포 토큰: " + FAKE_ATL))},
 }
+
+
+# 가져오기(⑫-7a) 견본 — 장난감 Jira 필터·에픽 목록과 Notion 데이터베이스
+def toy_issue(key, summary, cat, status, desc, type_="Story", level=0, parent=None):
+    f = {"summary": summary, "status": {"name": status, "statusCategory": {"key": cat}}, "issuetype": {"name": type_, "hierarchyLevel": level, "subtask": level == -1},
+         "priority": {"name": "보통"}, "labels": ["가져오기"], "updated": "2026-10-30T09:00:00.000+0900", "description": adf(*[para(t) for t in desc])}
+    if parent:
+        f["parent"] = {"key": parent}
+    return {"key": key, "fields": f}
+
+
+TOY_LIST = [
+    toy_issue("TOY-1", "회원 목록 쪽 나누기", "new", "To Do", ["한 쪽에 20명씩 보입니다.", "다음 쪽 단추가 있습니다."], parent="TOY-10"),
+    toy_issue("TOY-2", "로그인 실패 문구", "done", "Done", ["이미 끝난 일입니다."], parent="TOY-10"),
+    toy_issue("TOY-3", "알림 설정 저장", "indeterminate", "In Progress", ["누가 하고 있습니다."], parent="TOY-10"),
+    toy_issue("TOY-4", "배포 메모 정리", "new", "To Do", ["메모 파일을 정리합니다.", "옛 배포 토큰: " + FAKE_ATL], parent="TOY-10"),
+    toy_issue("TOY-5", "주문 합계 반올림", "new", "To Do", ["합계를 원 단위로 반올림합니다."], parent="TOY-10"),
+    toy_issue("TOY-6", "주문 합계 반올림 시험", "new", "To Do", ["반올림 시험을 더합니다."], type_="Subtask", level=-1, parent="TOY-5"),
+]
+
+NOTION_DB = {"object": "database", "id": "", "title": [{"plain_text": "장난감 할 일"}], "properties": {
+    "이름": {"type": "title", "title": {}},
+    "상태": {"type": "status", "status": {"options": [{"id": "s1", "name": "할 일"}, {"id": "s2", "name": "하는 중"}, {"id": "s3", "name": "끝"}],
+                                          "groups": [{"name": "To-do", "option_ids": ["s1"]}, {"name": "In progress", "option_ids": ["s2"]},
+                                                     {"name": "Complete", "option_ids": ["s3"]}]}},
+    "메모": {"type": "rich_text", "rich_text": {}}}}
+
+
+def notion_row(n, title, sid, sname, memo):
+    pid = "%08d-0000-4000-8000-%012d" % (n, n)
+    return {"object": "page", "id": pid, "url": "https://www.notion.so/" + pid.replace("-", ""),
+            "properties": {"이름": {"type": "title", "title": [{"plain_text": title}]}, "상태": {"type": "status", "status": {"id": sid, "name": sname}},
+                           "메모": {"type": "rich_text", "rich_text": [{"plain_text": memo}]}}}
+
+
+NOTION_ROWS = [notion_row(1, "예약 겹침 알림", "s1", "할 일", "겹치면 알림을 띄웁니다."), notion_row(2, "예약 목록 정렬", "s3", "끝", "이미 끝났습니다."),
+               notion_row(3, "예약 취소 사유", "s2", "하는 중", "누가 하고 있습니다."), notion_row(4, "예약 내보내기", "s1", "할 일", "CSV 로 내보냅니다.")]
 
 
 def storage(evil):
@@ -257,6 +298,31 @@ class H(BaseHTTPRequestHandler):
         with lock:
             state["n"] += 1
             nid = str(state["n"])
+        # 가져오기(⑫-7a): Jira 검색 · Notion 데이터베이스
+        if path == "/rest/api/3/search/jql" and method == "GET":
+            jql = (query.get("jql") or [""])[0]
+            per = min(int((query.get("maxResults") or ["3"])[0] or 3), 3)
+            start = int(((query.get("nextPageToken") or ["p0"])[0] or "p0").lstrip("p") or 0)
+            rows = TOY_LIST if re.search(r"filter\s*=\s*10001|parent\s*=\s*TOY-10", jql) else []
+            e["checks"].append("jql: " + jql[:80])
+            page = rows[start:start + per]
+            out = {"issues": page, "isLast": start + per >= len(rows)}
+            if start + per < len(rows):
+                out["nextPageToken"] = "p%d" % (start + per)
+            return self.reply(200, out, None, e)
+        m = re.fullmatch(r"/v1/databases/([0-9a-f-]{32,36})", path)
+        if m and method == "GET":
+            db = dict(NOTION_DB); db["id"] = m.group(1)
+            return self.reply(200, db, None, e)
+        m = re.fullmatch(r"/v1/databases/([0-9a-f-]{32,36})/query", path)
+        if m and method == "POST":
+            extra = sorted(set((body or {}).keys()) - {"page_size", "start_cursor"})
+            if extra:
+                e["checks"].append("질의 본문 형식 밖 칸: " + ",".join(extra))
+                return self.reply(400, {"message": "fake: unexpected query body"}, None, e)
+            start = 2 if (body or {}).get("start_cursor") == "c2" else 0
+            out = {"object": "list", "results": NOTION_ROWS[start:start + 2], "has_more": start == 0, "next_cursor": "c2" if start == 0 else None}
+            return self.reply(200, out, None, e)
         # 티켓(⑩-3)
         m = re.fullmatch(r"/rest/api/3/project/([A-Z][A-Z0-9_]*)", path)
         if m and method == "GET":
