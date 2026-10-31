@@ -3,78 +3,10 @@
 //   명세 spec.md(요구사항과 Given/When/Then 수용 기준) · 단위 목록 units.json(대기열 꼴) · 판정 시나리오 scenarios/<단위 id>/<파일> ·
 //   출발 카드 초안 cards.json(객관식) · 자율주행 지시 초안 autopilot.md
 // 여기는 그 순수 규칙이다: 세션에 줄 글(쓰는 법·입력·결과 꼴), claude 인자와 세션 설정(읽기 도구만, Bash·웹·MCP 없음, 쓰기는 결과 자리만),
-// 결과의 기계 검사(칸·상한·HTML 없음·비밀 꼴 없음·수용 기준마다 시나리오나 카드·하네스 확인 지점을 지시가 모두 다룸), 하네스 확인 지점 찾기,
+// 결과의 기계 검사(칸·상한·HTML 없음·비밀 꼴 없음·수용 기준마다 시나리오나 카드·하네스 확인 지점을 지시가 모두 다룸. 확인 지점 찾기는 Harness.swift),
 // 준비를 버리거나 다시 할 때 남는 drafts/ 정리 판단. 프로세스·파일은 엔진(진짜 어댑터)이, 가짜 어댑터는 Tests/AutopilotRulesTests 에만 둔다.
 // 사람이 읽는 글(준비 화면·모델에게 넘기는 글)에는 긴 줄표를 쓰지 않는다
 import Foundation
-
-// MARK: - 하네스 확인 지점 (설계 2장 끝 "하네스 읽기")
-
-// 저장소 하네스에서 기계로 찾은 확인 지점 하나 — 사람에게 묻기·확인받기·승인·미리보기·기다리기·바깥 쓰기 도구 이름
-public struct APHarnessPoint: Equatable, Sendable {
-    public var file: String      // 저장소 뿌리 기준 상대 경로
-    public var line: Int         // 1부터
-    public var kind: String      // ask·confirm·approve·preview·wait·write
-    public var text: String      // 그 줄(앞뒤 빈칸을 다듬고 200자까지)
-    public init(file: String, line: Int, kind: String, text: String) { self.file = file; self.line = line; self.kind = kind; self.text = text }
-    public var place: String { "\(file):\(line)" }
-}
-
-// 읽을 하네스 파일인가(저장소 뿌리 기준 상대 경로) — CLAUDE.md·CLAUDE.local.md(깊이 3 까지), .claude/ 의 규칙·스킬·에이전트·명령 글
-public func apHarnessFileWanted(_ rel: String) -> Bool {
-    let parts = rel.split(separator: "/").map(String.init)
-    guard let last = parts.last, !parts.contains(where: { $0 == ".." || $0 == "." || $0.isEmpty }) else { return false }
-    if (last == "CLAUDE.md" || last == "CLAUDE.local.md") && parts.count <= 3 && !parts.contains(where: { ["node_modules", ".git", "build", "dist"].contains($0) }) { return true }
-    guard parts.first == ".claude", parts.count >= 3, last.hasSuffix(".md") else { return false }
-    return ["rules", "skills", "agents", "commands"].contains(parts[1])
-}
-
-private let harnessPatterns: [(kind: String, re: NSRegularExpression)] = [
-    ("write", "createJiraIssue|editJiraIssue|addCommentToJiraIssue|transitionJiraIssue|createConfluence(Page|Content)|updateConfluence(Page|Content)|mcp__[A-Za-z0-9_-]*atlassian"),
-    ("ask", "AskUserQuestion|묻(는|고|어|습|기)|물어|질문(하|을)|ask (the )?user"),
-    ("confirm", "확인(을)? ?받|컨펌|confirm (with|before)"),
-    ("approve", "승인|approv"),
-    ("preview", "미리 ?보기|preview"),
-    ("wait", "기다(리|린|려|릴|렸)|대기(하|해|한)|wait for"),
-].map { ($0.0, try! NSRegularExpression(pattern: $0.1, options: [.caseInsensitive])) }
-
-public let apHarnessPointMax = 200
-
-// 하네스 파일 글에서 확인 지점을 찾는다(줄마다 처음 맞은 종류 하나). 파일 차례·줄 차례, 200곳까지
-public func apHarnessPoints(_ files: [(path: String, text: String)]) -> [APHarnessPoint] {
-    var out: [APHarnessPoint] = []
-    for f in files.sorted(by: { $0.path < $1.path }) where apHarnessFileWanted(f.path) {
-        for (i, raw) in f.text.components(separatedBy: "\n").enumerated() {
-            let line = raw.trimmingCharacters(in: .whitespaces)
-            guard !line.isEmpty else { continue }
-            let r = NSRange(line.startIndex..., in: line)
-            guard let k = harnessPatterns.first(where: { $0.re.firstMatch(in: line, range: r) != nil })?.kind else { continue }
-            out.append(APHarnessPoint(file: f.path, line: i + 1, kind: k, text: String(line.prefix(200))))
-            if out.count >= apHarnessPointMax { return out }
-        }
-    }
-    return out
-}
-
-// 지시 글이 그 확인 지점을 이름으로 다뤘나 — "파일:줄" 이 글에 그대로 있어야 한다(설계 판단: 이름으로 하나씩)
-public func apHarnessMissing(_ points: [APHarnessPoint], instruction: String) -> [APHarnessPoint] {
-    points.filter { !instruction.contains($0.place) }
-}
-
-// 빠진 확인 지점의 출발 카드(막지 않고 묻는다, 2026-10-21 저녁 사용자 결정). 추천은 보류해 다음 출발로
-public let apHarnessCardPrefix = "harness-"
-public func apHarnessCard(_ p: APHarnessPoint) -> APCardText {
-    APCardText(label: "하네스 확인 지점",
-               title: "이 확인 지점을 자율주행에서 어떻게 할까요: \(p.place)",
-               why: "\(p.text) (초안 세션이 쓴 자율주행 지시가 이 자리를 다루지 않았습니다.)",
-               options: [("defer", "보류해 다음 출발로", "이 자리에 닿으면 그 부분만 보류하고 next_start 에 남깁니다"),
-                         ("follow", "그대로 따름", "하네스 글대로 합니다. 사람이 필요한 자리면 멈춰 보류합니다"),
-                         ("drop", "범위에서 뺌", "이 자리가 걸린 일은 이번 실행에서 하지 않습니다")],
-               recommended: "defer")
-}
-public func apHarnessCardId(_ p: APHarnessPoint) -> String {
-    apHarnessCardPrefix + String((p.file + "-" + String(p.line)).map { $0.isLetter || $0.isNumber || $0 == "-" ? $0 : "-" }.prefix(80))
-}
 
 // MARK: - 초안 세션의 입력과 글
 
@@ -83,7 +15,7 @@ public let apInstructionHeadLine = "이 지시는 저장소 하네스의 확인�
 public let apInstructionGuide = """
 자율주행 지시(autopilot.md) 쓰는 법
 ① 첫 줄은 "\(apInstructionHeadLine)" 그대로 쓰고, 다음 줄에 그 이유를 씁니다: 자율주행 중에는 대답할 사람이 없어 그 자리에서 일이 멈추고, 사람의 답은 출발 카드로 이미 받았습니다.
-② 확인 지점마다 한 항목: 파일:줄(예: CLAUDE.md:12), 원래 글, 자율주행에서 대신 할 일, 그 일을 정한 출발 카드 답(카드 id).
+② 확인 지점마다 한 항목: 파일:줄(예: CLAUDE.md:12), 원래 글, 자율주행에서 대신 할 일, 그 일을 정한 출발 카드 답(카드 id). 바깥 쓰기·push 를 시키는 하네스 줄을 원래 글 그대로 옮길 때는 그 항목을 `- 파일:줄 "원래 글": 보류합니다(출발 카드 <그 지점의 카드 id>)` 꼴로만 씁니다(파일:줄 은 확인 지점 목록 그대로, 따옴표 안은 원래 글 그대로, 따옴표 뒤는 "보류합니다"·"보류해 next_start 에 남깁니다"·"하지 않습니다" 가운데 하나. 기계 검사가 이 꼴만 인용으로 받습니다).
 ③ 하지 말 것만 쓰지 않고 대신 할 일을 씁니다(예: "묻지 않고 그 부분만 보류해 next_start 에 남긴다"). 하지 않을 명령은 "<명령> 는 하지 않는다" 꼴로 명령 바로 뒤에 씁니다(기계 검사가 그 꼴만 받습니다).
 ④ 규칙마다 짧은 이유를 붙입니다. 대문자·"절대"·"반드시" 같은 강조는 쓰지 않습니다.
 ⑤ 목록에 없는 확인 지점을 만나면 그 부분만 보류하고 이어 간다는 줄을 둡니다.
@@ -452,14 +384,17 @@ public func apDraftCardParse(_ v: Any, n: Int, unitIds: [String], units: [APDraf
 // 자율주행 지시 초안(autopilot.md 글)의 기계 검사 — apDraftCheck 의 지시 줄(⑫-7a 에서 그대로 떼어 냄): 상한·HTML·비밀 꼴·첫 줄·금지 줄, 다루지 않은 하네스 확인 지점
 public func apInstructionCheck(_ t: String, harness: [APHarnessPoint]) -> (instruction: String, problems: [String], missing: [APHarnessPoint], warnings: [String]) {
     var problems: [String] = [], warnings: [String] = []
-    let instruction = t.trimmingCharacters(in: .whitespacesAndNewlines)
+    // 금지 꼴이 든 확인 지점 줄은 빼고(그 지점은 출발 카드로), 확인 지점과 상관없는 금지 줄은 준비를 멈춘다(⑫-7b apInstructionClean)
+    let cleaned = apInstructionClean(t, harness: harness)
+    let instruction = cleaned.text.trimmingCharacters(in: .whitespacesAndNewlines)
     if instruction.count > APDraftLimit.instruction { problems.append("자율주행 지시(autopilot.md)가 2만 자보다 깁니다") }
     if apHasTag(t) { problems.append("자율주행 지시(autopilot.md)에 HTML 태그가 있습니다") }
     if apRedact(t).count > 0 { problems.append("자율주행 지시(autopilot.md)에 비밀 꼴(토큰·키 등)이 있습니다") }
     let first = t.components(separatedBy: "\n").map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "# ").union(.whitespaces)) }.first { !$0.isEmpty } ?? ""
     if !first.hasPrefix(apInstructionHeadLine) { problems.append("자율주행 지시의 첫 줄이 \"\(apInstructionHeadLine)\" 가 아닙니다") }
-    for l in apForbiddenLines(t) { problems.append("자율주행 지시에 바깥 쓰기·하네스 고치기·push 를 시키는 줄이 있습니다: \(l)") }
-    let missing = apHarnessMissing(harness, instruction: t)
+    for l in cleaned.forbidden { problems.append("자율주행 지시에 바깥 쓰기·하네스 고치기·push 를 시키는 줄이 있습니다: \(l)") }
+    for l in cleaned.dropped { warnings.append("자율주행 지시의 이 줄은 바깥 쓰기·하네스 고치기·push 꼴이 섞여 지시에서 빼고 그 확인 지점은 출발 카드로 묻습니다: \(l)") }
+    let missing = apHarnessMissing(harness, instruction: cleaned.text)
     if !missing.isEmpty { warnings.append("하네스 확인 지점 \(missing.count)곳을 지시가 다루지 않아 출발 카드로 묻습니다") }
     return (instruction, problems, missing, warnings)
 }

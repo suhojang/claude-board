@@ -46,11 +46,18 @@
 # 남기는 것(단위 폴더 $CLAUDE_BOARD_UNIT_DIR): fake-args.log(띄울 때 인자 한 줄), fake-in.log(표준 입력 줄 원문, 띄울 때마다 머리 줄),
 # fake-signals.log(받은 신호와 시각), fake-runs.count(이 단위에서 띄운 횟수). 뜰 때 진짜 claude 처럼 작업 폴더에서 git status 를 한 번 부른다
 # (샌드박스 밖에서 도는 claude 의 git, 2026-10-30 5-4 실측 흉내)
+# 띄운 횟수 기록(7단계 ⑫-7b, "모델 호출 0" 을 보이려고): 이 파일 옆에 .fake-calls.jsonl 이 이미 있으면 띄울 때마다 한 줄(시각·종류·작업 폴더·첫 줄)을 덧붙인다.
+#     저장소의 이 파일은 그 기록 파일이 없어 남기지 않는다(시험은 scratchpad 사본 옆에 빈 파일을 만들어 켠다)
 import json, os, signal, subprocess, sys, threading, time
 
 UNIT = os.environ.get("CLAUDE_BOARD_UNIT_DIR", ".")
 args = sys.argv[1:]
 T0 = time.time()
+CALLS = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".fake-calls.jsonl")
+def _call(kind, first=""):
+    if os.path.isfile(CALLS) and not os.path.islink(CALLS):
+        with open(CALLS, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"at": round(time.time(), 3), "kind": kind, "cwd": os.getcwd(), "first": first[:120], "pid": os.getpid()}, ensure_ascii=False) + "\n")
 
 def log(name, text):
     with open(os.path.join(UNIT, name), "a") as f:
@@ -66,6 +73,7 @@ open(runs_path, "w").write(str(runs))
 log("fake-in.log", "### run %d pid %d %s\n" % (runs, os.getpid(), "resume" if "--resume" in args else "new"))
 
 if "--mcp-config" in args:
+    _call("read")
     import fnmatch, re as _re
     from urllib.parse import urlsplit, parse_qs
     def after(k):
@@ -144,6 +152,7 @@ if "--input-format" not in args and "--tools" in args:
     elif prompt.startswith("Claude Board 자율주행의 가져오기 세션입니다."):
         kind = "import"
     fixing = kind == "draft" and "판정 고치기 차례입니다." in prompt.split("\n", 1)[0]
+    _call(kind, prompt.split("\n", 1)[0])
     rec = {"argv": args, "model": after("--model"), "settings": settings, "cwd": os.getcwd(), "kind": kind, "fix": fixing,
            "env_draft": os.environ.get("CLAUDE_BOARD_DRAFT"), "env_critic": os.environ.get("CLAUDE_BOARD_CRITIC"), "env_revise": os.environ.get("CLAUDE_BOARD_REVISE"), "env_import": os.environ.get("CLAUDE_BOARD_IMPORT"),
            "prompt_head": prompt[:1500], "prompt_chars": len(prompt), "first_line": prompt.split("\n", 1)[0]}
@@ -215,6 +224,7 @@ if "--input-format" not in args and "--tools" in args:
 
 sid = args[args.index("--resume") + 1] if "--resume" in args else args[args.index("--session-id") + 1]
 resume = "--resume" in args
+_call("unit")
 
 out_lock = threading.Lock()
 def out(o):
