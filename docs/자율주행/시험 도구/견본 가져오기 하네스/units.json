@@ -1,0 +1,29 @@
+[
+ {
+  "id": "u1",
+  "item": "@인사 파일 hello.txt 에 안녕 한 줄을 쓴다",
+  "title": "인사 파일 만들기",
+  "kind": "dev",
+  "folder": "",
+  "prompt": "hello.txt 에 인사 한 줄을 씁니다.\n- FAKE WRITE hello.txt 안녕\n- FAKE COMMIT 인사",
+  "check": "grep -qx '안녕' hello.txt",
+  "est_min": 10,
+  "why": "할 일 문서 '이번 주' 첫 항목"
+ },
+ {
+  "id": "u2",
+  "item": "@작별 파일 bye.txt 에 잘 가 한 줄을 쓴다",
+  "title": "작별 파일 만들기",
+  "kind": "dev",
+  "folder": "",
+  "prompt": "bye.txt 에 작별 인사 한 줄을 씁니다.\n- FAKE WRITE bye.txt 잘가\n- FAKE COMMIT 작별\n- FAKE REVISE 견본 이어 쓰기 하네스",
+  "est_min": 10,
+  "scenarios": [
+   {
+    "file": "check.sh",
+    "kind": "shell"
+   }
+  ],
+  "why": "할 일 문서 '이번 주' 둘째 항목(판정은 시나리오만)"
+ }
+]
