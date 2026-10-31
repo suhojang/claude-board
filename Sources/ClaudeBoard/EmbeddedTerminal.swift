@@ -715,12 +715,28 @@ final class SplitNode {
     // 자율주행을 터미널로 이어받은 세션을 새 탭에서 이어 연다(8단계 ⑫-8, AutopilotStore.openTakeoverTab) — 그 실행의 작업 경로(따로 작업 트리면 그 자리)에서
     // `claude --resume <세션 id>`(대화형, 사람이 승인, 자율주행의 허용 목록·샌드박스는 얹지 않음). 탭 이름에 실행 이름을 붙이고(세션 이름 --name 도 이 이름),
     // 답변 꾸미기는 다른 보드 탭처럼 켠다. 원래 작업 트리 경로의 자율주행 경고(startSession)는 이 길에서 띄우지 않는다
-    func launchTakeover(_ command: String, in dir: String, sessionId: String, runId: String, name: String) {
+    // 보안 검토 고침: 명령 앞에 엔진 claudeEnv 와 같은 git 보호 환경(gitEnv, 규칙 apTakeoverEnvPrefix)을 붙인다. 세션 이름(--name)·답변 꾸미기(--plugin-dir)는
+    // 그 앞의 claude 명령에 먼저 붙인다(환경이 앞에 오면 claude 명령 꼴로 알아보지 못해서). 엔진 확인(takeover-check)은 부르는 쪽이 먼저 한다
+    func launchTakeover(_ command: String, gitEnv: String, in dir: String, sessionId: String, runId: String, name: String) {
         guard let tab = openShell(in: dir) else { return }
         tab.customName = name
         tab.focused.autopilotRun = runId
-        run(mdRenderCommand(command, off: false), in: tab.focused, sessionId: sessionId, mdRenderOff: false)
+        runTakeover(command, gitEnv: gitEnv, in: tab.focused, sessionId: sessionId)
         reveal(tab.id)
+    }
+    // 이어받기 화면에 명령을 넣는다(새 탭·다시 뜰 때 되살리기) — 쥔 목록에는 claude 명령만 남기고 환경은 넣을 때 붙인다
+    func runTakeover(_ command: String, gitEnv: String, in s: BoardSurface, sessionId: String) {
+        s.held = nil
+        s.command = command
+        s.sessionId = sessionId
+        s.mdRenderOff = false
+        s.type { [weak self, weak s] in
+            MainActor.assumeIsolated {
+                let named = s.flatMap { s in self?.named(command, in: s) } ?? command
+                return gitEnv + " " + mdRenderCommand(named, off: false)
+            }
+        }
+        saveTabs()
     }
 
     // 이어받은 세션의 보드 탭 — 없으면 nil, 있으면 그 탭의 claude(또는 셸 위의 다른 프로그램)가 아직 도는가. 돌려주기 전에 본다(탭의 앞 프로세스로,
@@ -874,7 +890,7 @@ final class SplitNode {
         if let command = s.command {
             e["command"] = command
             // 이어받기 화면(⑫-8): 실행 id 와 넣은 명령을 그대로 남긴다 — 가짜 claude·hook 이 없는 세션도 이 항목만으로 되살린다
-            if let r = s.autopilotRun { e["autopilot_run"] = r; e["takeover_cmd"] = command }
+            if let r = s.autopilotRun { e["autopilot_run"] = r }   // 되살릴 때 명령은 남긴 글자가 아니라 규칙으로 다시 만든다(보안 검토 받침)
             if s.mdRenderOff { e["mdoff"] = "1" }   // 대화 없이 꺼져 세션 파일·끈 세션 기억이 치워져도 끈 채로 되살린다
             // 화면 안에서 /clear 등으로 세션 id 가 바뀌면 tty 로 짝지은 세션이 지금 것이다
             if let id = s.session?.id ?? s.sessionId {
@@ -951,14 +967,20 @@ final class SplitNode {
             boardLog("이어받기 탭을 셸로만 되살림: 자율주행 \(r) 이 이어받은 상태가 아닙니다")
             dir = FileManager.default.fileExists(atPath: cwd) ? cwd : NSHomeDirectory()
             s = makeSurface(in: dir)
+        } else if let r = e["autopilot_run"], FileManager.default.fileExists(atPath: cwd) {
+            // 이어받기 화면(⑫-8): 셸만 띄워 두고 들어갈 때(resumeHeld) 엔진 확인을 거쳐 이어 연다
+            dir = cwd
+            s = makeSurface(in: dir)
+            s.held = e.filter { ["cwd", "command", "session", "autopilot_run"].contains($0.key) }
+            s.sessionId = e["session"]
+            s.autopilotRun = r
         } else if e["command"] != nil {
             let off = e["mdoff"] != nil || isMdRenderOff(e["session"])
             guard let (_, id, d) = restoreCommand(e, off: off) else { return nil }
             dir = d
             s = makeSurface(in: dir)
-            s.held = e.filter { ["cwd", "command", "mdoff", "session", "resume", "autopilot_run", "takeover_cmd"].contains($0.key) }
+            s.held = e.filter { ["cwd", "command", "mdoff", "session", "resume"].contains($0.key) }
             s.sessionId = e["session"] ?? id   // 끝난 세션 줄을 누르면 이 화면에서 이어 연다(resumeSession)
-            s.autopilotRun = e["autopilot_run"]
         } else {
             dir = FileManager.default.fileExists(atPath: cwd) ? cwd : NSHomeDirectory()
             s = makeSurface(in: dir)
@@ -972,6 +994,16 @@ final class SplitNode {
     private func resumeHeld(_ s: BoardSurface) {
         guard let e = s.held else { return }
         s.held = nil
+        // 이어받기 화면(⑫-8): 실행이 아직 같은 세션으로 이어받은 상태이고 엔진 확인(takeover-check)을 지나면 규칙으로 다시 만든 명령으로 연다(보안 검토 고침).
+        // 안 되면 셸로 두고 까닭을 남긴다
+        if let r = e["autopilot_run"] {
+            AutopilotStore.shared.prepareTakeover(runId: r, session: e["session"]) { [weak self, weak s] line in
+                guard let self, let s else { return }
+                if let line, let sid = e["session"] { self.runTakeover(line.command, gitEnv: line.gitEnv, in: s, sessionId: sid) }
+                else { s.autopilotRun = nil; self.saveTabs() }
+            }
+            return
+        }
         let off = e["mdoff"] != nil || isMdRenderOff(e["session"])
         if let (cmd, id, _) = restoreCommand(e, off: off) { run(cmd, in: s, sessionId: id, mdRenderOff: off) } else { s.autopilotRun = nil; saveTabs() }
     }
@@ -981,12 +1013,6 @@ final class SplitNode {
     // 세션 파일의 pid 가 아직 claude 로 살아 있으면(/bg·nohup 으로 떨어져 나갔거나 다른 터미널에서 이어 연 세션) 이어 열지 않는다 — nil.
     // 답변 꾸미기는 off(끈 탭·끈 세션)를 따라 mdRenderCommand 로 고친다 — 세션 파일이 없으면 남겨 둔 명령·resume_cmd 문자열로
     private func restoreCommand(_ e: [String: String], off: Bool) -> (String, String?, String)? {
-        // 이어받기 화면(⑫-8): 세션 파일(hook)에 기대지 않고 남겨 둔 명령으로 — 그 실행이 아직 같은 세션으로 이어받은 상태일 때만(들어갈 때 다시 본다)
-        if let r = e["autopilot_run"] {
-            guard AutopilotStore.shared.takeoverRestore(r, session: e["session"]), let cmd = e["takeover_cmd"], let cwd = e["cwd"],
-                  FileManager.default.fileExists(atPath: cwd) else { return nil }
-            return (cmd, e["session"], cwd)
-        }
         guard let command = e["command"].map({ mdRenderCommand($0, off: off) }), let cwd = e["cwd"] else { return nil }
         guard let id = e["session"] else {
             let (c, i) = freshSessionCommand(command)

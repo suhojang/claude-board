@@ -92,8 +92,8 @@ public protocol APTakeoverWorld: Sendable {
     func changed(_ repo: String, from: String) -> [String]?
     func harness() -> [String: String]
     func scenarios() -> [String: String]
-    /// 그 세션 id 를 명령줄에 쥔 claude 프로세스(엔진 자신의 자식은 빼고) — 아직 돌면 돌려주지 않는다
-    func claudeRunning(session: String) -> [Int32]
+    /// 그 세션 id 를 명령줄에 쥔 claude 프로세스(엔진 자신의 자식은 빼고) — 아직 돌면 돌려주지 않는다. 프로세스 표를 읽지 못하면 nil(닫힌 쪽으로 막는다)
+    func claudeRunning(session: String) -> [Int32]?
 }
 
 // 이어받을 때(엔진, claude 를 멈춘 뒤) 표지를 만든다. repos 는 저장소와 엔진이 걸어 둔 가지
@@ -133,7 +133,9 @@ public func apTranscriptTurns(_ data: Data, after: Double? = nil) -> [String] {
     let iso2 = ISO8601DateFormatter()
     for line in data.split(separator: UInt8(ascii: "\n")) {
         guard let o = (try? JSONSerialization.jsonObject(with: Data(line))) as? [String: Any], o["type"] as? String == "user" else { continue }
-        if o["isMeta"] as? Bool == true || o["isSidechain"] as? Bool == true { continue }
+        // 압축 요약(isCompactSummary)·대화 기록에만 보이는 줄(isVisibleInTranscriptOnly)은 Claude Code 가 user 꼴로 남기지만 사람이 친 글이 아니다(보안 검토 고침)
+        if o["isMeta"] as? Bool == true || o["isSidechain"] as? Bool == true || o["isCompactSummary"] as? Bool == true
+            || o["isVisibleInTranscriptOnly"] as? Bool == true { continue }
         guard let m = o["message"] as? [String: Any], (m["role"] as? String ?? "user") == "user" else { continue }
         if let a = after {
             guard let ts = o["timestamp"] as? String, let d = iso.date(from: ts) ?? iso2.date(from: ts), d.timeIntervalSince1970 > a else { continue }
@@ -153,7 +155,8 @@ public func apTranscriptTurns(_ data: Data, after: Double? = nil) -> [String] {
             t = "! " + t[r].dropFirst("<bash-input>".count).dropLast("</bash-input>".count).trimmingCharacters(in: .whitespacesAndNewlines)
         }
         if t.isEmpty || t.hasPrefix("[Request interrupted") { continue }
-        if t.range(of: "^<(command-|local-command-|bash-stdout|bash-stderr|system-reminder)", options: .regularExpression) != nil { continue }
+        // 감싸기 꼴(명령·명령 출력·백그라운드 작업 알림·system-reminder 등)은 Claude Code 나 도구가 넣은 글이다 — 사람이 친 글이 이 꼴로 시작해도 받지 않는다(닫힌 쪽)
+        if t.range(of: "^<(command-|local-command-|bash-stdout|bash-stderr|system-reminder|task-notification|user-prompt-submit-hook|tool-use-|persisted-output|stdout|stderr)", options: .regularExpression) != nil { continue }
         out.append(apTakeoverClean(t, max: apTakeoverTurnChars))
     }
     return out
@@ -188,7 +191,40 @@ public func apClaudeHolds(cmd: String, session: String) -> Bool {
     guard apSessionIDOK(session) else { return false }
     let words = cmd.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
     guard words.contains(where: { $0 == session || $0.hasSuffix("=" + session) }) else { return false }
-    return words.contains { ($0 as NSString).lastPathComponent == "claude" }
+    // claude 실행 파일: 이름이 claude, 설치판의 판 폴더(…/claude/versions/<판>), npm 설치의 …/claude-code/cli.js(보안 검토 받침)
+    return words.contains { w in
+        (w as NSString).lastPathComponent == "claude" || w.contains("/claude/versions/") || (w.hasSuffix("/cli.js") && w.contains("claude-code"))
+    }
+}
+
+// 이어받기 전 git 막기(보안 검토 고침, HIGH): 보드 탭의 대화형 claude·로그인 셸은 엔진의 git 박기(GIT_DIR) 없이 그 작업 트리에서 git 을 부른다.
+// 엔진이 자기 claude 앞에 두는 확인(unitGitOK: 작업 폴더와 뿌리 사이 .git·git 폴더 바꿔치기·하위 모듈)과 출발 때 없던 git 자리(작업 트리 훑기)를
+// 이어받기 전과 보드가 탭을 열기 직전에 한 번 더 본다. 하나라도 걸리거나 훑기를 다 하지 못하면 이어받지 않는다(닫힌 쪽). 막는 까닭 또는 nil
+public func apTakeoverGitBlock(gitWhy: String?, drift: [String], complete: Bool, scanWhy: String?) -> String? {
+    if let w = gitWhy { return "보안: \(w) 보드 탭의 claude 는 엔진의 git 보호 없이 그 자리에서 git 을 부르므로 이어받지 않습니다. 사람이 확인하세요" }
+    if !drift.isEmpty {
+        let shown = drift.prefix(3).joined(separator: ", ") + (drift.count > 3 ? " 등" : "")
+        return "보안: 작업 트리에 출발 때 없던(또는 설정이 바뀐) git 자리 \(drift.count)곳이 있어(\(shown)) 이어받지 않습니다. 사람이 확인하세요"
+    }
+    if !complete { return "보안: 작업 트리를 다 훑지 못해(\(scanWhy ?? "?")) 출발 때 없던 git 자리가 있을 수 있어 이어받지 않습니다" }
+    return nil
+}
+
+// 보드 탭에 치는 claude 명령 앞의 환경(보안 검토 고침, HIGH): 엔진 claudeEnv 와 같은 git 보호 — fsmonitor 끄기·bare 꼴 폴더를 스스로 저장소로 쓰지 않기·
+// 하위 모듈로 들어가지 않기, 저장소 뿌리의 부모 위로는 저장소를 찾지 않기(GIT_CEILING_DIRECTORIES). push 막기는 넣지 않는다(사람이 모는 세션).
+// 환경만으로는 .gitmodules 의 ignore=none 을 이기지 못하고 셸 프롬프트의 git 은 막지 못한다 — apTakeoverGitBlock 과 함께 쓴다
+public func apTakeoverEnvPrefix(ceilings: [String]) -> String {
+    let kv = [("core.fsmonitor", "false"), ("safe.bareRepository", "explicit"), ("diff.ignoreSubmodules", "all")]
+    var parts = ["GIT_CONFIG_COUNT=\(kv.count)"]
+    for (i, (k, v)) in kv.enumerated() { parts += ["GIT_CONFIG_KEY_\(i)=\(k)", "GIT_CONFIG_VALUE_\(i)=\(v)"] }
+    let ceil = Array(Set(ceilings.filter { $0.hasPrefix("/") && $0 != "/" && !$0.contains(":") && !$0.contains("\n") })).sorted()
+    if !ceil.isEmpty { parts.append("GIT_CEILING_DIRECTORIES=" + apShellQuote(ceil.joined(separator: ":"))) }
+    return parts.joined(separator: " ")
+}
+// 셸에 넣는 글자 하나를 따옴표로(보드 shlexQuote 와 같은 꼴)
+public func apShellQuote(_ s: String) -> String {
+    if !s.isEmpty, s.range(of: "[^A-Za-z0-9_@%+=:,./-]", options: .regularExpression) == nil { return s }
+    return "'" + s.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
 }
 
 // MARK: - 돌려주기 확인
@@ -221,8 +257,9 @@ public struct APTakeoverDirective: Equatable, Sendable, Codable {
     public var harness: [String] = []        // 사람이 바꾼 하네스(폴더 번호:경로)
     public var scenarios: [String] = []      // 사람이 바꾼 판정 시나리오 원본
     public var notes: [String] = []          // 대화 기록을 못 읽음 등 사람에게 보일 말
+    public var filesUnread: [String] = []    // 바뀐 파일을 읽지 못한 저장소 이름(보안 검토 받침: "없음" 과 가름)
     public init() {}
-    public var isEmpty: Bool { turns.isEmpty && commits.values.allSatisfy { $0 == 0 } && files.isEmpty && harness.isEmpty && scenarios.isEmpty }
+    public var isEmpty: Bool { turns.isEmpty && commits.values.allSatisfy { $0 == 0 } && files.isEmpty && filesUnread.isEmpty && harness.isEmpty && scenarios.isEmpty }
 }
 public struct APGiveback: Equatable, Sendable {
     public var blocks: [String]              // 돌려주지 않는 까닭(사람이 고친 뒤 다시)
@@ -234,6 +271,10 @@ public struct APGiveback: Equatable, Sendable {
 
 public let apTakeoverFileMax = 200
 
+// 하네스 지문 열쇠가 Claude Code 설정 파일인가(.claude/settings.json·.claude/settings.local.json·.mcp.json, 폴더 이름·번호가 앞에 붙어도)
+public func apTakeoverSettingsFile(_ key: String) -> Bool {
+    key.lowercased().range(of: "(^|[/:])(\\.claude/settings(\\.local)?\\.json|\\.mcp\\.json)$", options: .regularExpression) != nil
+}
 func apChangedKeys(_ a: [String: String], _ b: [String: String]) -> [String] {
     Set(a.keys).union(b.keys).filter { a[$0] != b[$0] }.sorted()
 }
@@ -249,7 +290,9 @@ public func apGivebackCheck(mark: APTakeoverMark, accepted: Set<String>, world: 
     var blocks: [String] = [], cards: [APGivebackCard] = []
     var d = APTakeoverDirective()
     let pids = world.claudeRunning(session: mark.session)
-    if !pids.isEmpty {
+    if pids == nil {
+        blocks.append("프로세스 목록을 읽지 못해(ps 실패) 이어받은 세션의 claude 가 끝났는지 알 수 없습니다. 잠시 뒤 다시 돌려주세요")
+    } else if let pids, !pids.isEmpty {
         blocks.append("이어받은 세션의 claude 가 아직 돕니다(pid \(pids.map(String.init).joined(separator: ", "))). 그 터미널에서 /exit 로 먼저 끝내 주세요. 자율주행은 강제로 끄지 않습니다")
     }
     for r in mark.repos {
@@ -265,7 +308,9 @@ public func apGivebackCheck(mark: APTakeoverMark, accepted: Set<String>, world: 
             blocks.append("\(name): 이어받기 전 커밋(\(r.head.prefix(8)))이 \(r.branch) 에서 빠졌습니다(되감기·고쳐 쓰기). 그 커밋으로 돌아온 뒤 돌려주세요"); continue
         }
         d.commits[r.repo] = c
-        var fs = Set((world.changed(r.repo, from: r.head) ?? []).compactMap(apTakeoverPath))
+        let changed = world.changed(r.repo, from: r.head)
+        if changed == nil { d.filesUnread.append(name) }   // 읽지 못한 것을 "바뀐 파일 없음" 으로 넘기지 않는다(보안 검토 받침)
+        var fs = Set((changed ?? []).compactMap(apTakeoverPath))
         let before = Set(r.untracked)
         for u in now.untracked where !before.contains(u) { if let p = apTakeoverPath(u) { fs.insert(p) } }
         let list = fs.sorted().map { mark.repos.count > 1 ? "\(name)/\($0)" : $0 }
@@ -283,9 +328,13 @@ public func apGivebackCheck(mark: APTakeoverMark, accepted: Set<String>, world: 
     if !d.harness.isEmpty {
         let id = apCardID("harness", apChangedKeys(mark.harness, hNow), hNow)
         if !accepted.contains(id) {
+            // 설정 파일(.claude/settings.json·settings.local.json·.mcp.json)이 바뀌었으면 기다림을 추천한다(보안 검토 받침): 뒤의 claude -p 는
+            // --setting-sources project,local 로 그 설정의 hook·MCP 를 읽어 사람이 넣은 hook 이 샌드박스 밖에서 돌 수 있다
+            let settings = d.harness.filter(apTakeoverSettingsFile)
             cards.append(APGivebackCard(id: id, kind: "harness", title: "이어받은 동안 하네스가 바뀌었습니다",
-                why: "사람이 하네스(CLAUDE.md·.claude/·.mcp.json)를 바꿨습니다. 자율주행은 하네스를 고치지 않고, 바뀐 하네스는 이 세션의 다음 차례부터 읽힐 수 있습니다. 바뀐 것은 판정 놓침 기록으로 다음 출발의 세트 이어 쓰기에 넘깁니다",
-                files: d.harness, options: [keep, wait], recommended: "keep"))
+                why: "사람이 하네스(CLAUDE.md·.claude/·.mcp.json)를 바꿨습니다. 자율주행은 하네스를 고치지 않고, 바뀐 하네스는 이 세션의 다음 차례부터 읽힐 수 있습니다. 바뀐 것은 판정 놓침 기록으로 다음 출발의 세트 이어 쓰기에 넘깁니다"
+                    + (settings.isEmpty ? "" : ". 설정 파일(\(settings.prefix(3).joined(separator: ", ")))이 바뀌어, 돌려주면 자율주행 세션이 그 설정의 hook·MCP 를 샌드박스 밖에서 돌릴 수 있습니다. 되돌리거나 내용을 확인한 뒤 돌려주기를 추천합니다"),
+                files: d.harness, options: [keep, wait], recommended: settings.isEmpty ? "keep" : "wait"))
         }
     }
     if !d.scenarios.isEmpty {
@@ -296,19 +345,24 @@ public func apGivebackCheck(mark: APTakeoverMark, accepted: Set<String>, world: 
                 files: d.scenarios, options: [keep, wait], recommended: "keep"))
         }
     }
-    // 대화 기록: 이어받을 때 크기 뒤로 늘어난 줄. 줄었으면(다시 쓰임) 처음부터 읽고 이어받은 시각 뒤 차례만
-    switch world.transcript(session: mark.session, cwd: mark.cwd, from: mark.transcript?.size ?? 0, max: apTakeoverReadMax) {
-    case .missing: d.notes.append("이 세션의 대화 기록을 찾지 못해 사람이 친 요청을 모으지 못했습니다")
-    case .notFile(let why): d.notes.append("대화 기록이 보통 파일이 아니라 읽지 않았습니다(\(why))")
-    case .data(_, let size, let bytes):
-        if let m = mark.transcript, size < m.size {
-            if case .data(_, _, let all) = world.transcript(session: mark.session, cwd: mark.cwd, from: 0, max: apTakeoverReadMax) {
-                d.turns = apTranscriptTurns(all, after: mark.at)
+    // 대화 기록: 이어받을 때 크기 뒤로 늘어난 줄. 줄었으면(다시 쓰임) 처음부터 읽는다. 어느 갈래든 이어받은 시각 뒤 차례만(보안 검토 고침).
+    // 이어받을 때 대화 기록 표지가 없으면 모으지 않는다 — 처음부터 읽으면 엔진의 첫 입력·판정 실패 글이 사람 요청으로 잡힌다
+    if let m = mark.transcript {
+        switch world.transcript(session: mark.session, cwd: mark.cwd, from: m.size, max: apTakeoverReadMax) {
+        case .missing: d.notes.append("이 세션의 대화 기록을 찾지 못해 사람이 친 요청을 모으지 못했습니다")
+        case .notFile(let why): d.notes.append("대화 기록이 보통 파일이 아니라 읽지 않았습니다(\(why))")
+        case .data(_, let size, let bytes):
+            if size < m.size {
+                if case .data(_, _, let all) = world.transcript(session: mark.session, cwd: mark.cwd, from: 0, max: apTakeoverReadMax) {
+                    d.turns = apTranscriptTurns(all, after: mark.at)
+                }
+                d.notes.append("대화 기록이 이어받을 때보다 짧아져 처음부터 읽고 이어받은 뒤 차례만 골랐습니다")
+            } else {
+                d.turns = apTranscriptTurns(bytes, after: mark.at)
             }
-            d.notes.append("대화 기록이 이어받을 때보다 짧아져 처음부터 읽고 이어받은 뒤 차례만 골랐습니다")
-        } else {
-            d.turns = apTranscriptTurns(bytes)
         }
+    } else {
+        d.notes.append("이어받을 때 이 세션의 대화 기록이 없어 사람이 친 요청을 모으지 못했습니다")
     }
     if d.turns.count > apTakeoverTurnMax { d.turnsMore = d.turns.count - apTakeoverTurnMax; d.turns = Array(d.turns.suffix(apTakeoverTurnMax)) }
     return APGiveback(blocks: blocks, cards: cards, directive: d)
@@ -330,7 +384,12 @@ public func apTakeoverBlockText(_ d: APTakeoverDirective) -> String {
     }
     let commits = d.commits.keys.sorted().map { "\(($0 as NSString).lastPathComponent) \(d.commits[$0] ?? 0)개" }
     lines.append("이어받은 뒤 커밋: " + (commits.isEmpty ? "없음" : commits.joined(separator: ", ")))
-    lines.append(d.files.isEmpty ? "바뀐 파일: 없음" : "바뀐 파일 \(d.files.count + d.filesMore)개: " + d.files.joined(separator: ", ") + (d.filesMore > 0 ? " 외 \(d.filesMore)개" : ""))
+    if d.files.isEmpty {
+        lines.append(d.filesUnread.isEmpty ? "바뀐 파일: 없음" : "바뀐 파일: 읽지 못함(" + d.filesUnread.joined(separator: ", ") + ")")
+    } else {
+        lines.append("바뀐 파일 \(d.files.count + d.filesMore)개: " + d.files.joined(separator: ", ") + (d.filesMore > 0 ? " 외 \(d.filesMore)개" : "")
+                     + (d.filesUnread.isEmpty ? "" : " (읽지 못한 저장소: " + d.filesUnread.joined(separator: ", ") + ")"))
+    }
     if !d.harness.isEmpty { lines.append("사람이 바꾼 하네스: " + d.harness.joined(separator: ", ")) }
     if !d.scenarios.isEmpty { lines.append("사람이 바꾼 판정 시나리오 원본(판정은 출발 때 고정본 그대로): " + d.scenarios.joined(separator: ", ")) }
     lines += d.notes.map { "참고: " + $0 }

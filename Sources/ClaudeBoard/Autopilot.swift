@@ -130,6 +130,7 @@ struct APSaid: Equatable { let file: String; let to: String; let text: String; l
 // 사람이 터미널로 이어받은 것(run.json takeover, 8단계 ⑫-8): 세션·단위·작업 경로·시각, 엔진이 돌려받지 못한 까닭과 카드
 struct APTakeoverNow: Equatable {
     var session: String, unit: Int, cwd: String, at: Double
+    var blocked: String?                // 엔진이 git 확인으로 이어받지 않은 까닭(보안 검토 고침) — 이때 실행은 일시정지, 탭을 열지 않는다
     var refusedAt: Double?
     var blocks: [String] = []
     var cards: [APGivebackCard] = []
@@ -241,6 +242,7 @@ struct APRun: Equatable, Identifiable {
         }
         if let t = r["takeover"] as? [String: Any], let sid = t["session"] as? String {
             var k = APTakeoverNow(session: sid, unit: Int(apNum(t["unit"]) ?? 0), cwd: t["cwd"] as? String ?? "", at: apNum(t["at"]) ?? 0)
+            k.blocked = (t["blocked"] as? [String: Any])?["why"] as? String
             if let rf = t["refused"] as? [String: Any] {
                 k.refusedAt = apNum(rf["at"])
                 k.blocks = rf["blocks"] as? [String] ?? []
@@ -656,17 +658,48 @@ struct APLogGroup: Identifiable {
     }
     // 이어받은 세션을 보드 탭에서 연다 — 엔진이 claude 를 멈추고 taken_over 로 둔 뒤에만(그 전에 열면 엔진의 -p 와 한 세션을 함께 쥔다).
     // 명령은 설치판 claude, 시험 빌드만 설정 autopilotTabClaude(이름이 claude 인 가짜 claude 자리)를 듣는다
+    // 보안 검토 고침(HIGH): 탭의 대화형 claude·로그인 셸은 엔진의 git 보호 없이 그 작업 트리에서 git 을 부르므로, 열기 직전에 앱 안 엔진 takeover-check
+    // (이어받기 때와 같은 규칙 apTakeoverGitBlock)를 뒤에서 한 번 더 부르고, 명령 앞에 git 보호 환경(apTakeoverEnvPrefix)을 붙인다
     func openTakeoverTab(_ run: APRun) {
-        guard run.state == apTakenOverState, let t = run.takeover else { return }
+        guard run.state == apTakenOverState, let t = run.takeover, t.blocked == nil else { return }
         guard FileManager.default.fileExists(atPath: t.cwd) else { takeoverError[run.id] = "작업 경로가 없어 열지 못했습니다: \(t.cwd)"; return }
-        let claude = apDevBuild ? (UserDefaults.standard.string(forKey: "autopilotTabClaude").flatMap { $0.isEmpty ? nil : $0 } ?? "claude") : "claude"
-        guard let cmd = apTakeoverTabCommand(claude: claude, session: t.session) else {
-            takeoverError[run.id] = "이어 열 명령을 만들지 못했습니다(세션 id 나 claude 명령의 꼴이 맞지 않음)"
-            return
-        }
         takeoverOpened[run.id] = t.at
-        TerminalHub.shared.launchTakeover(cmd, in: t.cwd, sessionId: t.session, runId: run.id, name: "\(run.name) 이어받음")
-        boardLog("자율주행 \(run.id): 이어받은 세션 \(t.session) 을 보드 탭에서 엶")
+        prepareTakeover(runId: run.id, session: t.session) { line in
+            guard let line else { return }
+            TerminalHub.shared.launchTakeover(line.command, gitEnv: line.gitEnv, in: t.cwd, sessionId: t.session, runId: run.id, name: "\(run.name) 이어받음")
+            boardLog("자율주행 \(run.id): 이어받은 세션 \(t.session) 을 보드 탭에서 엶")
+        }
+    }
+    // 이어받기 탭에 넣을 명령(새 탭·다시 뜰 때 되살리기 모두) — 실행이 아직 같은 세션으로 이어받은 상태인지(apTakeoverRestore) 보고, 앱 안 엔진 takeover-check 를
+    // 뒤에서 부른 뒤 메인에서 done(명령·git 보호 환경 또는 nil, nil 이면 까닭을 화면에). 명령은 남긴 글자가 아니라 늘 규칙(apTakeoverTabCommand)으로 다시 만든다
+    func prepareTakeover(runId: String, session: String?, done: @escaping @MainActor ((command: String, gitEnv: String)?) -> Void) {
+        let dir = autopilotRoot + "/runs/" + runId
+        guard takeoverRestore(runId, session: session), let sid = session, let r = APRun.parse(id: runId, dir: dir) else {
+            boardLog("이어받기 탭을 열지 않음: 자율주행 \(runId) 이 그 세션으로 이어받은 상태가 아닙니다")
+            done(nil); return
+        }
+        let claude = apDevBuild ? (UserDefaults.standard.string(forKey: "autopilotTabClaude").flatMap { $0.isEmpty ? nil : $0 } ?? "claude") : "claude"
+        guard let cmd = apTakeoverTabCommand(claude: claude, session: sid) else {
+            takeoverError[runId] = "이어 열 명령을 만들지 못했습니다(세션 id 나 claude 명령의 꼴이 맞지 않음)"
+            done(nil); return
+        }
+        // GIT_CEILING_DIRECTORIES: 저장소 뿌리(따로 작업 트리면 그 자리)의 부모 — 엔진 claudeEnv 와 같은 자리
+        let roots = r.worktreePath.map { [$0] } ?? r.repos
+        let env = apTakeoverEnvPrefix(ceilings: roots.map { (apCanonical($0) as NSString).deletingLastPathComponent })
+        DispatchQueue.global(qos: .userInitiated).async {
+            let x = apEngine(["takeover-check", dir])
+            let o = (try? JSONSerialization.jsonObject(with: Data(x.out.utf8))) as? [String: Any]
+            let ok = x.code == 0 && o?["ok"] as? Bool == true
+            let why = o?["why"] as? String ?? (x.out.isEmpty ? "엔진 확인이 실패했습니다" : String(x.out.prefix(300)))
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    if ok { done((cmd, env)); return }
+                    AutopilotStore.shared.takeoverError[runId] = "보드 탭을 열지 않았습니다: " + why
+                    boardLog("자율주행 \(runId): 이어받기 탭을 열지 않음(\(why))")
+                    done(nil)
+                }
+            }
+        }
     }
     // 돌려주기 — 그 세션의 보드 탭에서 claude 가 아직 돌면 보내지 않고 알린다(강제로 끄지 않음). 카드에 "그대로 돌려주기"로 답한 것은 accept 로 넘긴다.
     // 가지·하네스·시나리오·보드 밖 터미널의 claude 는 엔진이 다시 보고(apGivebackCheck) 막히면 run.json takeover.refused 에 남긴다
@@ -689,7 +722,9 @@ struct APLogGroup: Identifiable {
     // 보드가 다시 뜰 때 이어받기 탭을 그 세션으로 이어 열까(TerminalHub.restoreNode·restoreCommand) — 규칙 apTakeoverRestore, run.json 을 바로 읽는다
     func takeoverRestore(_ runId: String, session: String?) -> Bool {
         guard apRunIDOK(runId), let r = apRead(autopilotRoot + "/runs/" + runId + "/run.json") as? [String: Any] else { return false }
-        return apTakeoverRestore(runState: r["state"] as? String, takeoverSession: (r["takeover"] as? [String: Any])?["session"] as? String, entrySession: session)
+        let t = r["takeover"] as? [String: Any]
+        guard t?["blocked"] == nil else { return false }   // 엔진이 git 확인으로 이어받지 않은 실행(보안 검토 고침)
+        return apTakeoverRestore(runState: r["state"] as? String, takeoverSession: t?["session"] as? String, entrySession: session)
     }
 
     // 방향을 바꿀 말 보내기(2단계 5-4, 와이어프레임 자율주행 중 ③ "한마디") — 규칙 apInboxSend 가 확인하고 inbox/<yyyyMMdd-HHmmss-SSS>.md 로 쓴다.
@@ -1936,6 +1971,9 @@ struct APRunningScreen: View {
             .accessibilityIdentifier("ap-takeover")
         } else if run.state != apTakenOverState {
             let why = ap.takeoverBlock(run)
+            if let b = run.takeover?.blocked {
+                apNote("터미널로 이어받지 않았습니다(일시정지로 둠): " + apPlain(b), APColor.fail).accessibilityIdentifier("ap-takeover-blocked")
+            }
             WrapRow(spacing: 6) {
                 APButton(title: "터미널로 이어받기", icon: "terminal", enabled: can && why == nil,
                          help: why ?? "지금 단위를 멈추고 같은 세션을 보드 탭에서 엽니다. 돌려줄 때까지 자율주행은 판정·새 단위를 하지 않습니다", axid: "ap-takeover") {

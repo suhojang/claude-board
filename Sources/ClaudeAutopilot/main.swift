@@ -7,6 +7,7 @@
 //        claude-autopilot control <실행 폴더> pause|resume|stop|restart_from_intake|takeover|giveback [--accept <카드 id,…>]
 //                                                                   control.json 쓰기(보드도 같은 파일을 쓴다. takeover·giveback 은 8단계 ⑫-8)
 //        claude-autopilot status <실행 폴더> [--dev] [--json]         사람이 읽는 한 화면 요약(출발 전 --json 은 보드가 읽는 확인 결과)
+//        claude-autopilot takeover-check <실행 폴더>                  이어받은 실행의 작업 트리 git 확인(보드가 이어받기 탭을 열기 직전, JSON {ok, why})
 //        claude-autopilot records import [--dev|--db <파일>] [--project <이름>] [--unit-key <칸 경로>] <원본…>
 //                                                                   실행 기록 저장소(SQLite)에 실행 폴더·일반 꼴 대기열을 옮겨 담기
 //        claude-autopilot prerun <실행 폴더> [--dev]                  출발 전 판정 미리 돌리기(prerun.json)
@@ -1946,8 +1947,17 @@ struct EngineTakeoverWorld: APTakeoverWorld {
         }
         return out
     }
-    func claudeRunning(session: String) -> [Int32] {
-        processTable().filter { $0.pid != me && apClaudeHolds(cmd: $0.cmd, session: session) }.map { Int32($0.pid) }
+    func claudeRunning(session: String) -> [Int32]? {
+        // ps 가 실패했거나 아무 줄도 못 읽으면(ps 자신도 늘 한 줄) 모른다 — 돌려주기를 막는 쪽(보안 검토 받침)
+        let r = runTool("/bin/ps", ["-A", "-o", "pid=,ppid=,pgid=,command="])
+        guard r.code == 0 else { return nil }
+        let table: [(pid: pid_t, cmd: String)] = r.out.split(separator: "\n").compactMap { line in
+            let f = line.split(separator: " ", maxSplits: 3, omittingEmptySubsequences: true)
+            guard f.count >= 3, let a = pid_t(f[0]) else { return nil }
+            return (a, f.count > 3 ? String(f[3]) : "")
+        }
+        guard !table.isEmpty else { return nil }
+        return table.filter { $0.pid != me && apClaudeHolds(cmd: $0.cmd, session: session) }.map { Int32($0.pid) }
     }
 }
 
@@ -2191,6 +2201,16 @@ final class Engine {
         guard let n = runningUnit else { setState("paused", "이어받을 단위가 없어 일시정지로 둡니다."); return }
         var u = loadUnit(n)
         let sid = u["session_id"] as? String ?? ""
+        // 보드 탭의 대화형 claude·로그인 셸은 엔진의 git 박기 없이 이 작업 트리에서 git 을 부른다 — 엔진 claude 앞의 확인과 git 자리 훑기를 먼저(보안 검토 고침).
+        // 걸리면 이어받지 않고 일시정지로 두고 까닭을 run.json takeover.blocked 에(보드는 탭을 열지 않고 까닭을 보인다)
+        if let why = takeoverGitBlock(n, record: true) {
+            run["takeover"] = ["session": sid, "unit": n, "cwd": cwd(n), "at": r3(now()), "ts": run["control_seen"] ?? NSNull(),
+                               "blocked": ["at": r3(now()), "why": why]] as [String: Any]
+            event("board", "터미널로 이어받지 않았습니다: \(why)")
+            setState("paused", "터미널로 이어받지 않고 일시정지로 두었습니다: \(why)")
+            releaseSlot()
+            return
+        }
         let mark = apTakeoverMark(session: sid, unit: n, cwd: cwd(n), at: r3(now()), repos: repos.map { ($0, repoInfo($0)["on"] as? String ?? "") }, world: takeoverWorld())
         u["takeover"] = (try? JSONEncoder().encode(mark)).flatMap { try? JSONSerialization.jsonObject(with: $0) } ?? NSNull()
         u["procs"] = [:] as [String: Any]   // 다시 뜬 엔진이 사람이 이어 연 claude(명령줄에 같은 세션 id)를 끄지 않게
@@ -2591,6 +2611,7 @@ final class Engine {
                 if let t = o.text { event("board", t) }
                 switch o.step {
                 case .resume:
+                    if (run["takeover"] as? [String: Any])?["blocked"] != nil { run["takeover"] = nil }   // 이어받지 못한 표지는 재개하면 지운다
                     setState("running", "재개했습니다.")
                     return
                 case .stop: stopRun()
@@ -2833,8 +2854,10 @@ final class Engine {
     }
     // 작업 트리 안 git 꼴 자리를 출발 때 집합(branches.git_places)과 견주어 새로 생기거나 설정이 바뀐 것을 알린다(알림용 받침, gitPlaces 의 주석).
     // 찾은 것은 branches.git_places_changed 에 쌓고(같은 자리·같은 지문은 한 번), 훑기를 다 하지 못하면 branches.git_places_scan 에 적고 알린다
-    func checkGitPlaces(_ when: String) {
-        guard !repos.isEmpty else { return }
+    // 돌려주는 값(⑫-8 보안 검토 고침, 이어받기 전 막기): 출발 때와 다른 git 자리 모두(이미 알린 것도)·훑기를 다 했는지·못 한 까닭
+    @discardableResult
+    func checkGitPlaces(_ when: String) -> (drift: [String], complete: Bool, why: String?) {
+        guard !repos.isEmpty else { return ([], true, nil) }
         let scan = gitPlaces(repos.map(wt))
         var b = br
         guard let base = b["git_places"] as? [String: String] else {
@@ -2844,7 +2867,7 @@ final class Engine {
             b["git_places_scan"] = ["complete": false, "why": "출발 때 기록 없음, \(when)부터 봄" + (scan.complete ? "" : " · \(scan.why ?? "")"), "when": when] as [String: Any]
             br = b; saveRun()
             event("engine", "보안: 출발 때 작업 트리의 git 자리 기록이 없어 \(when)의 상태를 기준으로 잡았습니다. 그 앞에 생기거나 바뀐 git 자리는 알릴 수 없습니다.")
-            return
+            return ([], false, "출발 때 기록 없음")
         }
         var seen = b["git_places_changed"] as? [[String: Any]] ?? []
         var found: [String] = []
@@ -2866,6 +2889,33 @@ final class Engine {
         if !scan.complete, (last?["complete"] as? Bool ?? true) || (last?["why"] as? String) != why {
             event("engine", "보안: \(when) 작업 트리를 다 훑지 못했습니다(\(scan.why ?? "?")). 출발 때 없던 git 자리가 있을 수 있는 것으로 봅니다. 그 작업 트리의 하위 폴더에서 git 을 돌리기 전에 사람이 확인하세요.")
         }
+        let drift = scan.places.keys.filter { base[$0] != scan.places[$0] }.sorted().map { $0.hasPrefix(home + "/") ? "~/" + $0.dropFirst(home.count + 1) : $0 }
+        return (drift, scan.complete && late == nil, why.isEmpty ? nil : why)
+    }
+    // 읽기만 하는 같은 견주기(보드가 탭을 열기 직전에 부르는 takeover-check — 도는 엔진의 run.json 을 쓰지 않는다)
+    func gitPlacesDrift() -> (drift: [String], complete: Bool, why: String?) {
+        guard !repos.isEmpty else { return ([], true, nil) }
+        guard let base = br["git_places"] as? [String: String], br["git_places_late"] == nil else { return ([], false, "출발 때 기록 없음") }
+        let scan = gitPlaces(repos.map(wt))
+        let drift = scan.places.keys.filter { base[$0] != scan.places[$0] }.sorted().map { $0.hasPrefix(home + "/") ? "~/" + $0.dropFirst(home.count + 1) : $0 }
+        return (drift, scan.complete, scan.why)
+    }
+    // 이어받기 전 git 막기(⑫-8 보안 검토 고침, HIGH): 엔진이 자기 claude 앞에 두는 unitGitOK 와 같은 확인을 이 단위 작업 폴더와 모든 저장소에 —
+    // 작업 폴더와 뿌리 사이 .git, git 폴더 바꿔치기, 하위 모듈(gitlink·.gitmodules). 진행 기록을 쓰지 않고 까닭만(이어받기·takeover-check 가 함께 씀)
+    func unitGitWhy(_ n: Int) -> String? {
+        let r = repoOf(cwd(n))
+        if let why = strayGitDir(from: cwd(n), root: r.map(wt)) { return "단위 \(n) 의 \(why)" }
+        for x in repos {
+            if let why = gitDirChange(repoInfo(x), at: wt(x)) { return "\(repoName(x)) 의 \(why)" }
+            if let why = submoduleReason(x) { return "\(repoName(x)) 의 \(why)" }
+        }
+        return nil
+    }
+    // 이어받아도 되는가(규칙 apTakeoverGitBlock). record: 이어받기 때는 작업 트리 훑기를 기록·알림(checkGitPlaces), takeover-check 는 읽기만
+    func takeoverGitBlock(_ n: Int, record: Bool) -> String? {
+        let g = unitGitWhy(n)
+        let p = record ? checkGitPlaces("이어받기 전") : gitPlacesDrift()
+        return apTakeoverGitBlock(gitWhy: g, drift: p.drift, complete: p.complete, scanWhy: p.why)
     }
     func unitGitOK(_ n: Int) -> Bool {
         let r = repoOf(cwd(n))
@@ -4273,6 +4323,8 @@ func usage() -> Never {
              giveback: 자율주행에 돌려주기(그 세션의 claude 가 끝났고 가지가 그대로일 때 같은 세션으로 잇는다. 하네스·판정 시나리오를
                        바꿨으면 status 의 돌려주기 카드 id 를 --accept 로 넘긴다)
            claude-autopilot status <실행 폴더> [--dev] [--json]
+           claude-autopilot takeover-check <실행 폴더>
+             이어받은 실행의 작업 트리 git 확인(보드가 이어받기 탭을 열기 직전에 부름, JSON {ok, why}, 안 되면 종료 코드 1)
              출발 전 --json: 보드가 읽는 확인 결과(고칠 것·어디서·저장소·Jira 단위의 가지)
            claude-autopilot records import [--dev | --db <파일>] [--project <이름>] [--unit-key <칸 경로>] <원본…>
              원본: 실행 폴더(run.json·queue.json 이 있는 폴더) 또는 일반 꼴 대기열 파일(format "claude-board-queue")
@@ -4935,6 +4987,24 @@ func cmdRun(_ args: [String]) -> Never {
     guard args.count >= 2, e.loadFrozen(args[1]) else { e.frozenChanged() }
     e.syncFromFrozen()
     e.main()
+}
+
+// 보드가 이어받기 탭을 열기 직전(되살리기 포함)에 부른다(8단계 ⑫-8 보안 검토 고침): 이어받은 실행의 그 단위 작업 폴더·저장소를 이어받기 때와 같은 규칙
+// (unitGitWhy·git 자리 훑기, apTakeoverGitBlock)으로 다시 본다. 도는 엔진의 파일은 읽기만 한다. 출력 JSON {ok, why}, 열면 안 되면 종료 코드 1
+func cmdTakeoverCheck(_ args: [String]) -> Never {
+    let dir = runDir(args.first { !$0.hasPrefix("--") })
+    func reply(_ ok: Bool, _ why: String?) -> Never { print(jsonText(["ok": ok, "why": why.map { $0 as Any } ?? NSNull()])); exit(ok ? 0 : 1) }
+    let e = Engine(dir)
+    guard e.load() else { reply(false, "run.json·queue.json 을 읽지 못했습니다") }
+    guard e.state == apTakenOverState, let t = e.run["takeover"] as? [String: Any], t["blocked"] == nil,
+          let n = (t["unit"] as? NSNumber)?.intValue, n >= 1, n <= e.queue.count else { reply(false, "이어받은 상태가 아닙니다") }
+    // 고정 설정(pinned/, 모델이 쓸 수 없음)에서 단위 작업 폴더를 읽는다 — 해시는 LaunchAgent 인자라 여기서는 꼴만 본다
+    guard let f = readJSON(dir + "/pinned/frozen.json") as? [String: Any], let u = f["units"] as? [[String: Any]], u.count == e.queue.count else {
+        reply(false, "고정 설정을 읽지 못했습니다")
+    }
+    e.cfg = f; e.defs = u
+    if let why = e.takeoverGitBlock(n, record: false) { reply(false, why) }
+    reply(true, nil)
 }
 
 func cmdControl(_ args: [String]) -> Never {
@@ -7868,6 +7938,7 @@ case "report": cmdReport(Array(argv.dropFirst()))
 case "start": cmdStart(Array(argv.dropFirst()))
 case "run": cmdRun(Array(argv.dropFirst()))
 case "control": cmdControl(Array(argv.dropFirst()))
+case "takeover-check": cmdTakeoverCheck(Array(argv.dropFirst()))
 case "status": cmdStatus(Array(argv.dropFirst()))
 case "records": cmdRecords(Array(argv.dropFirst()))
 case "prerun": cmdPrerun(Array(argv.dropFirst()))
