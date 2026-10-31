@@ -178,18 +178,18 @@ func seededRepo(_ f: [String: Any], _ r: String) -> APSeed? { seedOf(f).flatMap 
 func gitRaw(_ args: [String], cwd: String) -> (code: Int32, out: String) {
     runTool("/usr/bin/env", gitHardenEnv + ["/usr/bin/git", "--no-optional-locks"] + gitHardenC + args, cwd: cwd, timeout: 60)
 }
-// 시나리오 글: 작업 폴더에 없고 출발 전 자율주행 가지가 있으면 그 가지 머리의 파일(git 객체)에서 읽는다(출발 전에는 사람의 작업 트리에 없으므로).
-// 보통 파일(100644·100755)만, 1 MB 까지, 경로는 시나리오 경로 꼴만(링크·폴더 밖 못 가리킴)
+// 시나리오 글: 출발 전 자율주행 가지가 있으면 그 가지 머리의 파일(git 객체)을 먼저 읽고(출발하면 그 가지에서 돌므로. 7단계 ⑫-7b: 이어 가기·가져오기도
+// 그 가지에 고친·되살린 시나리오를 커밋한다), 그 가지에 없으면 작업 폴더. 보통 파일(100644·100755)만, 1 MB 까지, 경로는 시나리오 경로 꼴만(링크·폴더 밖 못 가리킴)
 func scenarioSourceSeeded(_ cwd: String, _ file: String, _ seed: APSeed?) -> (data: Data?, why: String?) {
     let w = scenarioSource(cwd, file)
-    guard w.data == nil, w.why == "작업 폴더에 없습니다", let s = seed else { return w }
+    guard let s = seed else { return w }
     let repo = canonical(s.repo)
     guard cwd == repo || cwd.hasPrefix(repo + "/") else { return w }
     let rel = (cwd == repo ? "" : String(cwd.dropFirst(repo.count + 1)) + "/") + file
     guard apScenarioPathOK(rel) else { return w }
     let ls = gitRaw(["ls-tree", s.head, "--", rel], cwd: repo)
     let head = ls.out.split(separator: "\t").first?.split(separator: " ").map(String.init) ?? []
-    guard ls.code == 0, head.count == 3, head[1] == "blob" else { return (nil, "작업 폴더와 출발 전 자율주행 가지(\(s.branch))에 없습니다") }
+    guard ls.code == 0, head.count == 3, head[1] == "blob" else { return w.data != nil ? w : (nil, "작업 폴더와 출발 전 자율주행 가지(\(s.branch))에 없습니다") }
     guard head[0] == "100644" || head[0] == "100755" else { return (nil, "출발 전 자율주행 가지의 그 자리가 보통 파일이 아닙니다(링크 등)") }
     guard let size = Int(gitRaw(["cat-file", "-s", head[2]], cwd: repo).out.trimmingCharacters(in: .whitespacesAndNewlines)), size <= 1 << 20 else { return (nil, "1 MB 보다 큽니다") }
     let c = gitRaw(["cat-file", "blob", head[2]], cwd: repo)
@@ -4095,7 +4095,9 @@ func usage() -> Never {
            claude-autopilot read servers [--cwd <작업 경로>] [--dev]
              바깥 읽기(4단계): Jira·Confluence·Notion·Figma 는 내장 REST(GET 만, 연결의 읽기 범위가 있을 때만), 그 밖은 --mcp 서버 하나만 켠 읽기 세션.
              결과는 메타 형식 파일과 MANIFEST.json(출처·읽은 시각·해시·가린 비밀 수). 시험 빌드만 --mcp-from <장난감 설정>·--claude <가짜 claude>
-           claude-autopilot seed <출발 준비 폴더> base|scenarios|drop [--dev]
+           claude-autopilot harness <출발 준비 폴더> [--dev]
+             하네스 읽기(7단계): 저장소 하네스의 확인 지점·지문을 찾고 프로젝트 세트의 하네스 기준(set/harness.json)과 견줘 harness.json 에
+           claude-autopilot seed <출발 준비 폴더> base|scenarios|drop|recover [--dev]
              주제로 시작(5단계): base 는 출발 가지에서 autopilot/<실행 id> 를 만들고 새 폴더면 뼈대(공식 생성기·보드 틀)를 커밋, scenarios 는 기계 검사를
              지난 판정 시나리오를 .autopilot/scenarios/<단위 id>/ 로 커밋, drop 은 준비가 만든 가지를 지움. 출발 때 엔진이 이 가지를 그대로 이어받는다
            claude-autopilot draft <출발 준비 폴더> [--dev] [--max-sec <초>] [--fix <차례> --cards <카드 id,…> | --accept-fix <차례>]
@@ -6505,12 +6507,80 @@ struct EngineHarnessSource: APHarnessSource {
         }
     }
     func read(_ relative: String, max: Int) -> Data? {
-        var st = stat()
-        guard lstat(root + "/" + relative, &st) == 0, st.st_mode & S_IFMT == S_IFREG, st.st_size <= off_t(max) else { return nil }
-        return fm.contents(atPath: root + "/" + relative)
+        if case .data(let d)? = readFile(relative, max: max) { return d }
+        return nil
+    }
+    // 하네스 지문(⑫-7b): readHarnessFile 처럼 lstat·O_NOFOLLOW|O_NONBLOCK 으로 열고 보통 파일만 글로, 링크·FIFO·장치·큰 파일은 종류로
+    func readFile(_ relative: String, max: Int) -> APHarnessFileRead? {
+        switch readHarnessFile(root + "/" + relative, budget: max) {
+        case .data(let d)?: return .data(d)
+        case .large(let n)?: return .other("large:\(n)")
+        case .other(let k)?: return k == "dir" ? nil : .other(k)
+        case nil: return nil
+        }
     }
 }
 func harnessTexts(_ root: String) -> [(path: String, text: String)] { apHarnessTexts(EngineHarnessSource(root: root)) }
+
+// 하네스 읽기(7단계 ⑫-7b, 설계 2장 "하네스 읽기"·"세트 기록과 이어 쓰기"): 저장소 뿌리(들)의 하네스 파일을 모아 확인 지점·지문을 내고,
+// 프로젝트 세트의 하네스 기준(set/harness.json — 그 지시가 마지막으로 맞춰진 하네스, 보드가 출발할 때 씀)과 견준다.
+// 준비 폴더 harness.json(보드가 그림)·harness-points.json(초안·가져오기 검사가 읽음)에 쓴다. 저장소가 둘 이상이면 경로 앞에 저장소 이름을 붙인다
+func harnessReadPrep(dir: String, roots: [String], project: String?, dev: Bool) -> [String: Any] {
+    var points: [APHarnessPoint] = [], marks: [APHarnessFileMark] = [], skipped: [String] = [], capped = false
+    let multi = roots.count > 1
+    for r in roots {
+        let one = apHarnessCollect(EngineHarnessSource(root: r))
+        let pre = multi ? repoName(r) + "/" : ""
+        points += apHarnessPoints(one.files).map { APHarnessPoint(file: pre + $0.file, line: $0.line, kind: $0.kind, text: $0.text) }
+        marks += one.marks.map { APHarnessFileMark(path: pre + $0.path, digest: $0.digest, size: $0.size) }
+        skipped += one.skipped.map { pre + $0 }
+        capped = capped || one.capped
+    }
+    let proj = project.flatMap { validName($0) ? $0 : nil }
+    let baseline = proj.flatMap { apHarnessBaselineParse(plainFile(setDir(project: $0, dev: dev) + "/harness.json")) }
+    let setText = proj.flatMap { setInstructionText(project: $0, dev: dev) }
+    let state = APHarnessState(points: points, marks: marks, changes: baseline.map { apHarnessChanges(old: $0.marks, new: marks) } ?? [], hasBaseline: baseline != nil)
+    let missing = setText.map { apHarnessMissing(points, instruction: $0) } ?? points
+    let o: [String: Any] = ["ok": true, "roots": roots, "points": points.map(harnessPointJSON), "files": marks.map { ["path": $0.path, "digest": $0.digest, "size": $0.size] as [String: Any] },
+                            "skipped": skipped, "capped": capped, "baseline": baseline.map { ["at": $0.at, "run": $0.run, "points": $0.points] as [String: Any] } ?? NSNull(),
+                            "changes": state.changes.map { ["path": $0.path, "change": $0.change] }, "changed": state.changed, "set_instruction": setText != nil,
+                            "set_missing": missing.map(harnessPointJSON), "note": apHarnessStateNote(state, setHasInstruction: setText != nil), "at": r3(now())]
+    writeJSON(dir + "/harness.json", o)
+    writeJSON(dir + "/harness-points.json", points.map(harnessPointJSON))
+    return o
+}
+
+// harness <준비> — 출발 준비의 하네스 읽기(이어 가기는 대기열 단위의 저장소, 가져오기는 작업 경로, 주제로 시작은 출발 전 자율주행 가지의 저장소 보기)
+func cmdHarness(_ args: [String]) -> Never {
+    let dev = args.contains("--dev")
+    guard let raw = args.first(where: { !$0.hasPrefix("--") }) else { usage() }
+    let dir = runDir(raw)
+    guard let run = readJSON(dir + "/run.json") as? [String: Any] else { fail("run.json 을 읽지 못했습니다") }
+    guard run["state"] == nil else { fail("이미 출발한 실행입니다. 하네스 읽기는 출발 전에만 합니다") }
+    var roots: [String] = []
+    if let c = readJSON(dir + "/import.json") as? [String: Any], let r = c["repo"] as? String, r.hasPrefix("/"), isDir(r) {
+        roots = gitRepos([r])
+    } else if let t = readJSON(dir + "/topic.json") as? [String: Any], let r = t["repo"] as? String, r.hasPrefix("/"), isDir(r) {
+        let wt = ((run["seed"] as? [String: Any])?["worktree"] as? String).flatMap { isDir($0) ? $0 : nil }
+        roots = wt.map { [$0] } ?? gitRepos([r])
+    } else {
+        roots = gitRepos((readJSON(dir + "/queue.json") as? [[String: Any]] ?? []).compactMap { $0["cwd"] as? String }.filter { $0.hasPrefix("/") && isDir($0) })
+    }
+    guard !roots.isEmpty else { fail("하네스를 읽을 저장소가 없습니다(작업 경로·대기열 단위의 작업 폴더)") }
+    let o = harnessReadPrep(dir: dir, roots: roots, project: run["project"] as? String, dev: dev)
+    print(jsonText(o)); exit(0)
+}
+// 기계 검사가 금지 꼴이 섞인 확인 지점 줄을 뺀 지시(규칙 apInstructionClean, ⑫-7b)를 결과 파일에 다시 쓴다 — 보드는 이 파일을 지시 글로 읽고 출발 때 세트에 쓴다.
+// 모델이 쓴 원문은 autopilot.raw.md 로 남긴다(뺀 줄을 사람이 볼 수 있게)
+func cleanInstructionFile(_ folder: String, _ cleaned: String) {
+    let path = folder + "/autopilot.md"
+    guard let d = plainFile(path), String(decoding: d, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines) != cleaned, !cleaned.isEmpty else { return }
+    unlink(folder + "/autopilot.raw.md")
+    _ = fm.createFile(atPath: folder + "/autopilot.raw.md", contents: d)
+    let tmp = path + ".tmp"
+    unlink(tmp)
+    if fm.createFile(atPath: tmp, contents: Data((cleaned + "\n").utf8)) { rename(tmp, path) }
+}
 func harnessPointJSON(_ p: APHarnessPoint) -> [String: Any] { ["file": p.file, "line": p.line, "kind": p.kind, "text": p.text] }
 func harnessPointOf(_ o: [String: Any]) -> APHarnessPoint? {
     guard let f = o["file"] as? String, let l = inum(o["line"]) else { return nil }
@@ -6533,6 +6603,9 @@ func topicPrep(_ args: [String]) -> TopicPrep {
     guard validName(id) else { fail("준비 폴더 이름은 영문·숫자·.-_ 로만 씁니다: \(id)") }
     guard let run = readJSON(dir + "/run.json") as? [String: Any] else { fail("run.json 을 읽지 못했습니다") }
     guard run["state"] == nil else { fail("이미 출발한 실행입니다. 뼈대·초안 세션은 출발 전에만 합니다") }
+    if !fm.fileExists(atPath: dir + "/topic.json") {   // 이어 가기·가져오기(7단계 ⑫-7b): 시나리오 커밋·되살리기만
+        switch seedPrepOf(dir: dir, run: run, dev: dev) { case .ok(let x): return x; case .bad(let why): fail(why) }
+    }
     guard let topic = readJSON(dir + "/topic.json") as? [String: Any] else { fail("topic.json(주제로 시작 입력)을 읽지 못했습니다") }
     guard let r0 = topic["repo"] as? String, r0.hasPrefix("/"), isDir(r0) else { fail("topic.json 의 repo 는 있는 폴더의 절대 경로여야 합니다") }
     let repo = canonical(gitOut(["rev-parse", "--show-toplevel"], cwd: r0) ?? r0)
@@ -6541,6 +6614,90 @@ func topicPrep(_ args: [String]) -> TopicPrep {
     guard !base.isEmpty, branchExists(repo, base) else { fail("출발 가지(\(base.isEmpty ? "정하지 않음" : base))가 저장소에 없습니다") }
     if !dev, run["tool_path"] != nil || run["external_generators"] != nil { fail("tool_path·external_generators 는 시험 빌드(--dev)에서만 받습니다") }
     return TopicPrep(dir: dir, id: id, run: run, topic: topic, repo: repo, base: base, newFolder: topic["new"] as? Bool ?? false, stack: stackSetOf(topic["stack"]), dev: dev)
+}
+
+// 이어 가기·가져오기의 준비(7단계 ⑫-7b) — 저장소 하나(가져오기는 import.json repo, 이어 가기는 대기열 단위 작업 폴더의 저장소)와 출발 가지 하나(run.json base_branch 글자)
+// 일 때만 출발 전 자율주행 가지를 쓴다(묶음은 저장소마다 출발 가지가 달라 seed 하나로 담지 못함)
+enum SeedPrepResult { case ok(TopicPrep), bad(String) }
+func seedPrepOf(dir: String, run: [String: Any], dev: Bool) -> SeedPrepResult {
+    let id = (dir as NSString).lastPathComponent
+    var repos: [String] = []
+    if let c = readJSON(dir + "/import.json") as? [String: Any], let r = c["repo"] as? String, r.hasPrefix("/"), isDir(r) { repos = gitRepos([r]) }
+    else { repos = gitRepos((readJSON(dir + "/queue.json") as? [[String: Any]] ?? []).compactMap { $0["cwd"] as? String }.filter { $0.hasPrefix("/") && isDir($0) }) }
+    guard repos.count == 1, let repo = repos.first else { return .bad(repos.isEmpty ? "단위의 저장소를 찾지 못했습니다" : "저장소가 둘 이상인 묶음은 출발 전 자율주행 가지에 시나리오를 커밋하지 않습니다") }
+    guard let base = run["base_branch"] as? String, !base.isEmpty, branchExists(repo, base) else { return .bad("출발 가지(run.json base_branch)가 정해지지 않았거나 저장소에 없습니다") }
+    if !dev, run["tool_path"] != nil || run["external_generators"] != nil { return .bad("tool_path·external_generators 는 시험 빌드(--dev)에서만 받습니다") }
+    return .ok(TopicPrep(dir: dir, id: id, run: run, topic: [:], repo: repo, base: base, newFolder: false, stack: APStackSet(), dev: dev))
+}
+func reloadPrep(_ x: TopicPrep) -> TopicPrep {
+    TopicPrep(dir: x.dir, id: x.id, run: readJSON(x.dir + "/run.json") as? [String: Any] ?? x.run, topic: x.topic, repo: x.repo, base: x.base, newFolder: x.newFolder, stack: x.stack, dev: x.dev)
+}
+
+// 출발 전 자율주행 가지에 판정 시나리오를 커밋한다(7단계 ⑫-7b: 세트 이어 쓰기가 고친 시나리오·가져오기 세션이 쓴 시나리오·버린 실행의 고정본에서 되살린 시나리오).
+// 주제로 시작의 seed scenarios 와 같은 길(⑪-2 자동 보안 검토 MEDIUM 3): 파일 시스템을 거치지 않고 git 색인에 직접(엔진 전용 임시 파일 → hash-object --no-filters
+// → update-index --cacheinfo, GIT_DIR·GIT_WORK_TREE 박음), 자리는 규칙 apSeedScenarioPathOK 만(하네스·.git 아님). 가지가 없으면 출발 가지 머리에서
+// autopilot/<준비 id> 를 만든다(뼈대 없음). 끝나면 임시 작업 트리를 지우고 run.json seed 의 머리를 새 커밋으로
+func seedCommitFiles(_ x0: TopicPrep, _ items: [(rel: String, data: Data)], message: String) -> (head: String?, problem: String?) {
+    for it in items where !apSeedScenarioPathOK(it.rel) { return (nil, "\(it.rel) 는 판정 시나리오 자리가 아닙니다(하네스·.git 자리는 커밋하지 않습니다)") }
+    var x = x0
+    let work = "autopilot/" + x.id, wt = seedTree(x.id, x.repo)
+    if apSeedParse(x.run["seed"]) == nil {
+        if headOf(x.repo, "refs/heads/" + work) != nil || isDir(wt) {
+            let note = dropSeed(x)
+            if headOf(x.repo, "refs/heads/" + work) != nil { return (nil, "앞 준비의 \(work) 를 지우지 못했습니다: \(note)") }
+        }
+        guard let baseHead = headOf(x.repo, "refs/heads/" + x.base) else { return (nil, "출발 가지 \(x.base) 머리를 읽지 못했습니다") }
+        mkdirPrivate(home + "/.claude-board"); mkdirPrivate(home + "/.claude-board/worktrees"); mkdirPrivate((wt as NSString).deletingLastPathComponent)
+        _ = gitRun(["worktree", "prune"], cwd: x.repo)
+        var r0 = x.run; r0["seed_pending"] = baseHead; writeJSON(x.dir + "/run.json", r0)
+        let add = gitRun(["worktree", "add", "-q", "-b", work, wt, x.base], cwd: x.repo)
+        guard add.code == 0 else { writeSeed(reloadPrep(x), nil); return (nil, "출발 가지 \(x.base) 에서 \(work) 와 임시 작업 트리를 만들지 못했습니다: \(firstLine(add.out))") }
+        writeSeed(reloadPrep(x), ["repo": x.repo, "branch": work, "base": x.base, "base_head": baseHead, "head": baseHead, "worktree": wt,
+                                  "skeleton": [] as [Any], "skeleton_commit": NSNull(), "first_unit": false, "at": r3(now())])
+        x = reloadPrep(x)
+    } else {
+        guard ensureSeedTree(x) != nil else { return (nil, "출발 전 자율주행 가지의 임시 작업 트리를 다시 만들지 못했습니다(가지가 준비 뒤에 바뀌었거나 다른 작업 트리에 걸림)") }
+        x = reloadPrep(x)
+    }
+    guard var seed = x.run["seed"] as? [String: Any], let sd = apSeedParse(seed), isDir(wt) else { return (nil, "출발 전 자율주행 가지 기록이 없습니다") }
+    func cleanup() {
+        _ = gitRun(["worktree", "remove", "--force", wt], cwd: x.repo); try? fm.removeItem(atPath: wt)
+        _ = gitRun(["worktree", "prune"], cwd: x.repo)
+        let parent = (wt as NSString).deletingLastPathComponent
+        if (try? fm.contentsOfDirectory(atPath: parent))?.isEmpty == true { try? fm.removeItem(atPath: parent) }
+    }
+    guard let gd = gitOut(["rev-parse", "--absolute-git-dir"], cwd: wt) else { cleanup(); return (nil, "임시 작업 트리의 git 자리를 읽지 못했습니다") }
+    let pin = ["GIT_DIR=" + gd, "GIT_WORK_TREE=" + wt]
+    let tmpDir = privateRoot(dev: x.dev) + "/draft/" + x.id
+    mkdirPrivate(privateRoot(dev: x.dev)); mkdirPrivate(privateRoot(dev: x.dev) + "/draft"); mkdirPrivate(tmpDir)
+    for it in items {
+        let tmp = tmpDir + "/blob"
+        unlink(tmp)
+        guard writePrivate(tmp, it.data) else { cleanup(); return (nil, "시나리오 임시 파일을 쓰지 못했습니다") }
+        let h = gitRun(["hash-object", "-w", "--no-filters", "--", tmp], cwd: wt, env: pin)
+        unlink(tmp)
+        guard h.code == 0, h.out.range(of: "^[0-9a-f]{40,64}$", options: .regularExpression) != nil else { cleanup(); return (nil, "시나리오를 git 객체로 넣지 못했습니다: \(firstLine(h.out))") }
+        let ui = gitRun(["update-index", "--add", "--cacheinfo", "100755,\(h.out),\(it.rel)"], cwd: wt, env: pin)
+        guard ui.code == 0 else { cleanup(); return (nil, "\(it.rel) 를 색인에 넣지 못했습니다(출발 가지의 그 자리가 링크·파일이면 넣지 않습니다): \(firstLine(ui.out))") }
+    }
+    var head = sd.head
+    if !items.isEmpty, gitRun(["diff", "--cached", "--quiet"], cwd: wt, env: pin).code != 0 {   // 같은 글이면 커밋하지 않는다
+        let cm = gitRun(["commit", "-q", "--no-verify", "-m", message], cwd: wt, commit: true, env: pin)
+        guard cm.code == 0, let h = headOf(wt, "HEAD", env: pin) else { cleanup(); return (nil, "판정 시나리오를 커밋하지 못했습니다: \(firstLine(cm.out))") }
+        head = h
+    }
+    cleanup()
+    seed["head"] = head; seed["worktree"] = NSNull(); seed["scenario_commit"] = head == sd.head ? (seed["scenario_commit"] ?? NSNull()) : head
+    seed["scenarios"] = ((seed["scenarios"] as? Int) ?? 0) + (head == sd.head ? 0 : items.count)
+    writeSeed(reloadPrep(x), seed)
+    return (head, nil)
+}
+
+// 저장소 뿌리 기준 시나리오 자리(단위 작업 폴더 + 파일)
+func repoRelative(_ repo: String, cwd: String, file: String) -> String? {
+    let c = canonical(cwd), r = canonical(repo)
+    guard c == r || c.hasPrefix(r + "/") else { return nil }
+    return (c == r ? "" : String(c.dropFirst(r.count + 1)) + "/") + file
 }
 
 // 준비가 만든 가지가 지금 어느 작업 트리(준비 임시 작업 트리 밖)에 걸려 있나
@@ -6616,8 +6773,8 @@ func cmdSeed(_ args: [String]) {
             reply(["ok": false, "step": "skeleton", "problems": res.problems, "plan": steps, "done": res.done], false)
         }
         let head = headOf(wt, "HEAD") ?? baseHead
-        let points = apHarnessPoints(harnessTexts(wt))
-        writeJSON(x.dir + "/harness-points.json", points.map(harnessPointJSON))
+        let hr = harnessReadPrep(dir: x.dir, roots: [wt], project: x.run["project"] as? String, dev: x.dev)
+        let points = (hr["points"] as? [[String: Any]] ?? []).compactMap(harnessPointOf)
         let seed: [String: Any] = ["repo": x.repo, "branch": work, "base": x.base, "base_head": baseHead, "head": head, "worktree": wt,
                                    "skeleton": res.done, "skeleton_commit": res.commit ?? NSNull(), "first_unit": plan.firstUnit, "at": r3(now())]
         writeSeed(x, seed)
@@ -6674,6 +6831,32 @@ func cmdSeed(_ args: [String]) {
         let note = dropSeed(x)
         if headOf(x.repo, "refs/heads/" + work) == nil { writeSeed(x, nil) }
         reply(["ok": true, "note": note], true)
+    case "recover":
+        // 이어 가기(7단계 ⑫-7b): 이어 갈 단위의 시나리오가 출발 가지·작업 폴더·출발 전 자율주행 가지 어디에도 없으면(지난 실행을 버려 그 가지와 함께 사라짐),
+        // 지난 실행이 출발 때 뜬 고정본(pinned/checks/scenarios, 지문이 고정 설정과 맞을 때만)에서 되살려 출발 전 자율주행 가지에 커밋한다
+        guard let past = x.run["continues"] as? String, validName(past) else { reply(["ok": true, "recovered": 0, "note": "이어 간 실행이 없습니다"], true) }
+        let pastDir = autopilotRoot(dev: x.dev) + "/runs/" + past
+        let frozen = (readJSON(pastDir + "/pinned/frozen.json") as? [String: Any])?["units"] as? [[String: Any]] ?? []
+        let q = readJSON(x.dir + "/queue.json") as? [[String: Any]] ?? []
+        var items: [(rel: String, data: Data)] = [], missing: [String] = [], recovered: [String] = []
+        for d in q {
+            guard let cwd = d["cwd"] as? String, let scs = d["scenarios"] as? [[String: Any]], !scs.isEmpty else { continue }
+            for sc in scs {
+                guard let file = sc["file"] as? String, scenarioSourceSeeded(cwd, file, seedOf(x.run)).data == nil else { continue }
+                // 지난 실행의 같은 단위(원천 항목 키, 없으면 id)·같은 파일의 고정본
+                let key = d["source_key"] as? String, uid = d["id"] as? String
+                let fu = frozen.first { f in (key != nil && f["source_key"] as? String == key) || (key == nil && f["id"] as? String == uid) }
+                guard let ps = (fu?["scenarios"] as? [[String: Any]])?.first(where: { $0["file"] as? String == file }),
+                      let pinned = ps["pinned"] as? String, pinned.hasPrefix(pastDir + "/pinned/checks/scenarios/"), let sha = ps["sha256"] as? String,
+                      case .data(let data)? = readHarnessFile(pinned, budget: 1 << 20), sha256(data) == sha,
+                      let rel = repoRelative(x.repo, cwd: cwd, file: file) else { missing.append("\(uid ?? "?") \(file)"); continue }
+                items.append((rel, data)); recovered.append("\(uid ?? "?") \(file)")
+            }
+        }
+        guard !items.isEmpty else { reply(["ok": missing.isEmpty, "recovered": 0, "missing": missing, "note": missing.isEmpty ? "되살릴 시나리오가 없습니다" : "고정본을 찾지 못한 시나리오가 있습니다"], missing.isEmpty) }
+        let c = seedCommitFiles(x, items, message: "판정 시나리오 되살리기: 지난 실행(\(past))의 고정본 \(items.count)개 (출발 뒤에는 고정본으로 판정)")
+        guard let head = c.head else { reply(["ok": false, "problems": [c.problem ?? "커밋하지 못했습니다"]], false) }
+        reply(["ok": missing.isEmpty, "recovered": items.count, "files": recovered, "missing": missing, "head": head, "branch": work], missing.isEmpty)
     default: usage()
     }
 }
@@ -6752,6 +6935,7 @@ func draftReport(_ x: TopicPrep, folder: String, note: String, cost: Double?, se
     let points = (readJSON(x.dir + "/harness-points.json") as? [[String: Any]] ?? []).compactMap(harnessPointOf)
     let firstUnit = (x.run["seed"] as? [String: Any])?["first_unit"] as? Bool ?? false
     let chk = apDraftCheck(files: EngineDraftFiles(root: folder), harness: points, firstUnit: firstUnit)
+    if chk.ok { cleanInstructionFile(folder, chk.instruction) }
     let ctx = bundleFiles.isEmpty ? nil : canonical(bundle)
     let queue = chk.units.map { apDraftQueueUnit($0, repo: x.repo, context: ctx, prep: x.id, stack: x.stack) }
     let cards = chk.cards.map { c -> [String: Any] in
@@ -7041,8 +7225,10 @@ func cmdMisses(_ args: [String]) -> Never {
     print(jsonText(o)); exit(0)
 }
 
-// 세트 이어 쓰기 세션(5단계 ⑪-3, 이어 가기 길): 판정 놓침이 있으면(규칙 apSetRewrite) 작성 쪽 모델(실행 설정의 모델)이 이어 갈 단위의 판정 명령·지난 지시·
-// 놓친 기록만 읽고 고친 판정 명령과 지시를 revise/ 에 쓴다. 결과 검사(판정 명령만, 지우기 막음)를 지난 것만 보드가 출발 확인에 판정 차이로 보인다
+// 세트 이어 쓰기 세션(5단계 ⑪-3, 이어 가기 길): 판정 놓침이 있거나 하네스가 지난 세트 기준과 달라졌으면(규칙 apSetRewrite, 하네스 바뀜은 7단계 ⑫-7b 의
+// 준비 폴더 harness.json) 작성 쪽 모델(실행 설정의 모델)이 이어 갈 단위의 판정 명령·시나리오 글·지난 지시·놓친 기록과 바뀐 하네스 파일(읽기 전용 사본)만 읽고
+// 고친 판정 명령·시나리오·지시를 revise/ 에 쓴다. 결과 검사(판정 명령·넣어 둔 시나리오만, 지우기 막음)를 지난 것만 받고, 고친 시나리오는 출발 전 자율주행 가지에
+// 커밋한다(⑫-7b, 저장소 하나·출발 가지 하나일 때). 보드가 출발 확인에 판정 차이·지시 차이로 보인다. 가져오기는 대기열 없이 지시만 고친다
 func cmdRevise(_ args: [String]) -> Never {
     let dir = runDir(args.first { !$0.hasPrefix("--") && $0 != "--claude" && $0 != "--max-sec" })
     guard let run = readJSON(dir + "/run.json") as? [String: Any] else { fail("run.json 을 읽지 못했습니다") }
@@ -7053,9 +7239,13 @@ func cmdRevise(_ args: [String]) -> Never {
     func reply(_ o: [String: Any], _ ok: Bool) -> Never { writeJSON(dir + "/revise.json", o); print(jsonText(o)); exit(ok ? 0 : 1) }
     let mj = readJSON(dir + "/misses.json") as? [String: Any] ?? [:]
     let openN = mj["open"] as? Int ?? 0
-    let need = apSetRewrite(harnessChanged: false, newRequest: false, openMisses: openN)
+    let hj = readJSON(dir + "/harness.json") as? [String: Any] ?? [:]
+    let harnessChanged = hj["changed"] as? Bool == true
+    let points = (hj["points"] as? [[String: Any]] ?? []).compactMap(harnessPointOf)
+    let need = apSetRewrite(harnessChanged: harnessChanged, newRequest: false, openMisses: openN)
     guard need.rewrite else { reply(["ok": true, "skipped": true, "note": "판정 놓침·하네스 바뀜·새 요구가 없어 지난 세트를 그대로 씁니다(모델 0)", "changes": []], true) }
-    guard let q = readJSON(dir + "/queue.json") as? [[String: Any]], !q.isEmpty else { reply(["ok": false, "problems": ["이어 갈 단위(queue.json)가 없습니다"]], false) }
+    let q = readJSON(dir + "/queue.json") as? [[String: Any]] ?? []
+    guard !q.isEmpty || harnessChanged else { reply(["ok": false, "problems": ["이어 갈 단위(queue.json)가 없습니다"]], false) }
     let units = q.map { d in APReviseUnit(id: d["id"] as? String ?? "", title: d["title"] as? String ?? "", prompt: d["prompt"] as? String ?? "",
                                            check: d["check"] as? String ?? "", scenarios: (d["scenarios"] as? [[String: Any]] ?? []).compactMap { $0["file"] as? String }) }
     let project = run["project"] as? String ?? ""
@@ -7064,18 +7254,76 @@ func cmdRevise(_ args: [String]) -> Never {
     try? fm.removeItem(atPath: out)
     try? fm.createDirectory(atPath: out, withIntermediateDirectories: true)
     let outC = canonical(out)
+    // 시나리오 글(⑫-7b): 지금 판(출발 전 자율주행 가지가 있으면 그 머리, 아니면 작업 폴더)을 결과 폴더 scenarios/<단위 id>/<이름> 에 넣어 둔다 — 세션은 그 자리만 고친다
+    var originals: [String: Data] = [:], scenarioPlace: [String: (cwd: String, file: String)] = [:]
+    for (u, d) in zip(units, q) {
+        guard let cwd = d["cwd"] as? String else { continue }
+        for name in u.scenarioNames {
+            guard let file = u.scenarios.first(where: { ($0 as NSString).lastPathComponent == name }),
+                  let data = scenarioSourceSeeded(cwd, file, seedOf(run)).data else { continue }
+            try? fm.createDirectory(atPath: out + "/scenarios/" + u.id, withIntermediateDirectories: true)
+            guard fm.createFile(atPath: out + "/scenarios/\(u.id)/\(name)", contents: data) else { continue }
+            originals["\(u.id)/\(name)"] = data; scenarioPlace["\(u.id)/\(name)"] = (cwd, file)
+        }
+    }
+    // 바뀐 하네스 파일(⑫-7b): 읽기 전용 사본을 준비 폴더 revise-in/harness/ 에(링크를 따라가지 않고 보통 파일만), 세션은 그 사본만 읽는다
+    var hz: APReviseHarness?
+    var reads: [String] = []
+    if harnessChanged {
+        let inDir = dir + "/revise-in"
+        try? fm.removeItem(atPath: inDir)
+        let roots = hj["roots"] as? [String] ?? []
+        var files: [APReviseHarnessFile] = []
+        for c in hj["changes"] as? [[String: Any]] ?? [] {
+            guard let path = c["path"] as? String, apScenarioPathOK(path), let change = c["change"] as? String else { continue }
+            var copy: String?
+            if change != "removed" {
+                let (root, rel): (String?, String) = roots.count > 1
+                    ? (roots.first { path.hasPrefix(repoName($0) + "/") }, String(path.drop { $0 != "/" }.dropFirst()))
+                    : (roots.first, path)
+                if let root, case .data(let data)? = readHarnessFile(root + "/" + rel, budget: apHarnessFileBytes) {
+                    let dst = inDir + "/harness/" + path
+                    try? fm.createDirectory(atPath: (dst as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+                    if fm.createFile(atPath: dst, contents: data, attributes: [.posixPermissions: 0o444]) { copy = canonical(dst) }
+                }
+            }
+            files.append(APReviseHarnessFile(path: path, change: change, copy: copy))
+        }
+        if isDir(inDir) { reads.append(canonical(inDir)) }
+        hz = APReviseHarness(files: files, points: points, missing: apHarnessMissing(points, instruction: instruction ?? ""))
+    }
     let model = modelName(run["model"]) ?? apDraftModel
-    let prompt = apRevisePrompt(units: units, instruction: instruction, misses: mj["digest"] as? String ?? "", reasons: need.reasons, out: outC)
-    let paths = APDraftPaths(out: outC, reads: [], denyRead: sessionDenyRead())
+    let prompt = apRevisePrompt(units: units, instruction: instruction, misses: mj["digest"] as? String ?? "", reasons: need.reasons, out: outC, harness: hz)
+    let paths = APDraftPaths(out: outC, reads: reads, denyRead: sessionDenyRead())
     let (sr, problem) = readSession(kind: "revise", id: (dir as NSString).lastPathComponent, dev: dev, claudePath: claudePath, paths: paths, model: model,
                                     budget: apReviseBudgetUSD, prompt: prompt, maxSec: maxSec, envKey: "CLAUDE_BOARD_REVISE")
     guard let sr else { reply(["ok": false, "problems": [problem ?? "세션을 띄우지 못했습니다"]], false) }
     guard sr.note.isEmpty else { reply(["ok": false, "problems": [sr.note], "model": model, "cost_usd": sr.cost ?? NSNull(), "sec": r3(sr.sec)], false) }
-    let r = apReviseCheck(EngineDraftFiles(root: outC), units: units)
+    var r = apReviseCheck(EngineDraftFiles(root: outC), units: units, originals: originals, harness: points)
     var newQ = q
     for i in newQ.indices { if let id = newQ[i]["id"] as? String, let c = r.checks[id] { newQ[i]["check"] = c } }
-    let changes = apJudgeChanges(old: q, new: newQ).map { ["unit": $0.unit, "title": $0.title, "field": $0.field, "old": $0.old, "new": $0.new, "why": r.whys[$0.unit] ?? ""] }
-    reply(["ok": r.ok, "problems": r.problems, "checks": r.checks, "whys": r.whys, "instruction": r.instruction ?? NSNull(), "changes": changes, "reasons": need.reasons,
+    var changes = apJudgeChanges(old: q, new: newQ).map { ["unit": $0.unit, "title": $0.title, "field": $0.field, "old": $0.old, "new": $0.new, "why": r.whys[$0.unit] ?? ""] }
+    // 고친 시나리오를 출발 전 자율주행 가지에 커밋(저장소 하나·출발 가지 하나일 때만, 아니면 받지 않고 까닭)
+    var seedOut: Any = NSNull()
+    if r.ok, !r.scenarios.isEmpty {
+        switch seedPrepOf(dir: dir, run: readJSON(dir + "/run.json") as? [String: Any] ?? run, dev: dev) {
+        case .bad(let why): r.warnings.append("고친 시나리오를 받지 않았습니다: " + why); r.scenarios = [:]
+        case .ok(let x):
+            var items: [(rel: String, data: Data)] = []
+            for (k, data) in r.scenarios.sorted(by: { $0.key < $1.key }) {
+                if let pl = scenarioPlace[k], let rel = repoRelative(x.repo, cwd: pl.cwd, file: pl.file) { items.append((rel, data)) }
+            }
+            let c = seedCommitFiles(x, items, message: "판정 시나리오 고침: 세트 이어 쓰기 · 시나리오 \(items.count)개 (출발 뒤에는 고정본으로 판정)")
+            if let h = c.head { seedOut = ["head": h, "branch": "autopilot/" + x.id, "files": items.map(\.rel)] }
+            else { r.problems.append("고친 시나리오를 출발 전 자율주행 가지에 커밋하지 못했습니다: " + (c.problem ?? "?")); r.scenarios = [:] }
+        }
+        let titles = Dictionary(units.map { ($0.id, $0.title) }, uniquingKeysWith: { a, _ in a })
+        changes += apScenarioTextChanges(old: originals.mapValues { String(decoding: $0, as: UTF8.self) }, new: r.scenarios.mapValues { String(decoding: $0, as: UTF8.self) }, titles: titles)
+            .map { ["unit": $0.unit, "title": $0.title, "field": $0.field, "old": $0.old, "new": $0.new, "why": ""] }
+    }
+    reply(["ok": r.ok, "problems": r.problems, "warnings": r.warnings, "checks": r.checks, "whys": r.whys, "instruction": r.instruction ?? NSNull(), "changes": changes,
+           "reasons": need.reasons, "harness_changed": harnessChanged, "harness_files": hz?.files.map { ["path": $0.path, "change": $0.change, "copied": $0.copy != nil] } ?? [],
+           "harness_missing": r.instruction == nil ? [] : r.harnessMissing.map(harnessPointJSON), "seed": seedOut,
            "misses": (mj["rows"] as? [[String: Any]] ?? []).compactMap { $0["id"] as? String }, "model": model, "args": sr.argv,
            "cost_usd": sr.cost ?? NSNull(), "sec": r3(sr.sec), "at": r3(now())], r.ok)
 }
@@ -7284,8 +7532,8 @@ func cmdImport(_ args: [String]) {
             out.append(d)
         }
         writeJSON(work + "/items.json", prompt)
-        let points = apHarnessPoints(harnessTexts(x.repo))
-        writeJSON(x.dir + "/harness-points.json", points.map(harnessPointJSON))
+        let hr = harnessReadPrep(dir: x.dir, roots: [x.repo], project: x.project, dev: x.dev)
+        let points = (hr["points"] as? [[String: Any]] ?? []).compactMap(harnessPointOf)
         let setText = setInstructionText(project: x.project, dev: x.dev)
         var hidden: [String: Int] = [:]
         for g in decided { if let h = g.hide { hidden[h.rawValue, default: 0] += 1 } }
@@ -7294,7 +7542,8 @@ func cmdImport(_ args: [String]) {
                                            "continue": decided.filter { $0.decision == "continue" }.count,
                                            "changed": decided.filter { !$0.changed.isEmpty }.count, "hidden": hidden],
                                 "evidence_refused": refused, "legacy_skipped": legacy?.skipped ?? [], "notes": notes,
-                                "harness_points": points.count, "need_instruction": setText == nil, "bundle": canonical(bundleDir),
+                                "harness_points": points.count, "harness_note": hr["note"] ?? "", "harness_changed": hr["changed"] ?? false,
+                                "need_instruction": setText == nil, "bundle": canonical(bundleDir),
                                 "manifest": apManifestParse(store.read(apManifestName)).count, "sec": r3(now() - t0), "at": r3(now())]
         reply(o, true, to: "import/gather.json")
     case "session":
@@ -7326,6 +7575,7 @@ func cmdImport(_ args: [String]) {
                                         prompt: apImportPrompt(input), maxSec: maxSec, envKey: "CLAUDE_BOARD_IMPORT")
         guard let sr else { reply(["ok": false, "session": false, "problems": [problem ?? "세션을 띄우지 못했습니다"]], false, to: "import-check.json") }
         let chk = apImportCheck(files: EngineDraftFiles(root: out), items: pitems, storyItems: storyItems, harness: points, needInstruction: setText == nil, setInstruction: setText)
+        if chk.ok, setText == nil { cleanInstructionFile(out, chk.instruction) }
         // 대기열 단위 — 항목 id 로 모은 항목을 찾아 원천 항목 키·지문·티켓을 붙인다
         var byId: [String: APImportItem] = [:]
         for d in g["items"] as? [[String: Any]] ?? [] {
@@ -7338,7 +7588,7 @@ func cmdImport(_ args: [String]) {
         let digests = Dictionary((g["items"] as? [[String: Any]] ?? []).compactMap { d in (d["id"] as? String).map { ($0, d["digest"] as? String ?? "") } }, uniquingKeysWith: { a, _ in a })
         let queue = chk.units.compactMap { u -> [String: Any]? in
             guard let it = byId[u.item] else { return nil }
-            var q = apImportQueueUnit(u, item: it, repo: x.repo, context: isDir(bundle) ? bundle : nil)
+            var q = apImportQueueUnit(u, item: it, repo: x.repo, context: isDir(bundle) ? bundle : nil, prep: x.id)
             q["source_digest"] = digests[u.item] ?? it.digest   // 모은 때의 지문(제목·본문 원문으로 낸 것)
             return q
         }
@@ -7353,9 +7603,23 @@ func cmdImport(_ args: [String]) {
             return harnessPointJSON(p).merging(["card": apHarnessCardId(p), "title": t.title, "why": t.why, "recommended": t.recommended,
                                                 "options": t.options.map { ["key": $0.key, "label": $0.label, "note": $0.note] }]) { a, _ in a }
         }
-        let ok = sr.note.isEmpty && chk.ok
-        reply(["ok": ok, "session": sr.note.isEmpty, "note": sr.note.isEmpty ? (chk.ok ? "기계 검사를 지났습니다" : "기계 검사에 걸렸습니다") : sr.note,
-               "problems": (sr.note.isEmpty ? [] : [sr.note]) + chk.problems, "warnings": chk.warnings, "cost_usd": sr.cost ?? NSNull(), "sec": r3(sr.sec),
+        // 판정 시나리오(⑫-7b): 기계 검사를 지난 단위의 시나리오를 .autopilot/scenarios/<준비 id>/<단위 id>/ 로 출발 전 자율주행 가지에 커밋(주제로 시작의 seed 와 같은 길)
+        var seedProblems: [String] = [], seedOut: Any = NSNull()
+        let scenItems: [(rel: String, data: Data)] = chk.ok && sr.note.isEmpty ? chk.units.flatMap { u in
+            u.unit.scenarios.compactMap { sc in EngineDraftFiles(root: out).read("scenarios/\(u.unit.id)/\(sc.file)").map { (apImportScenarioPath(prep: x.id, unit: u.unit.id, file: sc.file), $0) } }
+        } : []
+        if !scenItems.isEmpty {
+            switch seedPrepOf(dir: x.dir, run: readJSON(x.dir + "/run.json") as? [String: Any] ?? x.run, dev: x.dev) {
+            case .bad(let why): seedProblems.append("판정 시나리오를 커밋하지 못했습니다: " + why)
+            case .ok(let sp):
+                let c = seedCommitFiles(sp, scenItems, message: "판정 시나리오: 가져오기 세션 · 시나리오 \(scenItems.count)개 (출발 뒤에는 고정본으로 판정)")
+                if let h = c.head { seedOut = ["head": h, "branch": "autopilot/" + x.id, "files": scenItems.map(\.rel)] } else { seedProblems.append("판정 시나리오를 커밋하지 못했습니다: " + (c.problem ?? "?")) }
+            }
+        }
+        let ok = sr.note.isEmpty && chk.ok && seedProblems.isEmpty
+        reply(["ok": ok, "session": sr.note.isEmpty, "note": sr.note.isEmpty ? (chk.ok ? (seedProblems.isEmpty ? "기계 검사를 지났습니다" : seedProblems[0]) : "기계 검사에 걸렸습니다") : sr.note,
+               "seed": seedOut, "scenarios": scenItems.count,
+               "problems": (sr.note.isEmpty ? [] : [sr.note]) + chk.problems + seedProblems, "warnings": chk.warnings, "cost_usd": sr.cost ?? NSNull(), "sec": r3(sr.sec),
                "units": queue, "cards": cards, "skipped": chk.skipped.map { ["item": $0.item, "key": byId[$0.item]?.key ?? "", "why": $0.why] },
                "harness_points": points.count, "harness_missing": missing, "need_instruction": setText == nil, "instruction_chars": chk.instruction.count,
                "model": model, "items": pitems.count, "at": r3(now())], ok, to: "import-check.json")
@@ -7384,5 +7648,6 @@ case "critic": cmdCritic(Array(argv.dropFirst()))
 case "misses": cmdMisses(Array(argv.dropFirst()))
 case "revise": cmdRevise(Array(argv.dropFirst()))
 case "import": cmdImport(Array(argv.dropFirst()))
+case "harness": cmdHarness(Array(argv.dropFirst()))
 default: usage()
 }
