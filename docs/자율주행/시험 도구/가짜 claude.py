@@ -106,6 +106,8 @@ if not ({"-p", "--print", "--input-format", "--tools", "--mcp-config"} & set(arg
         with open(os.path.join(home, "interactive.log"), "a", encoding="utf-8") as f:
             f.write("%s pid %d %s\n" % (time.strftime("%H:%M:%S"), os.getpid(), t))
     ilog("뜸 세션 %s 이름 %s 작업 폴더 %s 인자 %s" % (sid, name, os.getcwd(), json.dumps(args, ensure_ascii=False)))
+    # 보드가 명령 앞에 붙인 git 보호 환경(⑫-8 보안 검토 고침)을 받았는지
+    ilog("git 환경 " + json.dumps({k: v for k, v in os.environ.items() if k.startswith("GIT_CONFIG_") or k == "GIT_CEILING_DIRECTORIES"}, ensure_ascii=False, sort_keys=True))
     print("가짜 claude(대화형) · 세션 %s · 이름 %s" % (sid[:8], name), flush=True)
     written = []
     def turn(text, how):
