@@ -2854,6 +2854,10 @@ extension APRecords {
     @Published private(set) var topicReseeding = false
     private(set) var draftCards: [APCard] = []
     private(set) var harnessCards: [APCard] = []
+    // 7단계 ⑫-7b 하네스 읽기: 준비 폴더 harness.json(엔진 harness·import gather·seed base 가 씀)과 그 확인 지점, 출발할 때 세트의 하네스 기준(set/harness.json)을 새로 쓸지
+    @Published private(set) var harnessInfo: [String: Any] = [:]
+    private(set) var harnessPoints: [APHarnessPoint] = []
+    private(set) var harnessRebase = false
     private var topicKey = ""            // 준비한 주제 입력(같으면 1단계 "다음"이 다시 준비하지 않는다)
     private var linkURLs: [String: String] = [:]     // 준비 줄 id(link-<n>) → 주소
     @Published var stories: [APStory] = []
@@ -3106,7 +3110,7 @@ extension APRecords {
         missesUsed = []; pendingSet = nil; critRound = 0; keepHistory = false
         epic = ""; stories = []; estimates = [:]; starting = false; startError = nil; changedBy = nil; leftBranches = []
         epicInfo = nil; topicOtherDone = false; topicBundle = ""; linkURLs = [:]
-        draftResult = [:]; topicStack = APStackSet(); topicNew = false; topicLayout = "dlm"; topicReseeding = false; draftCards = []; harnessCards = []; topicKey = ""
+        draftResult = [:]; topicStack = APStackSet(); topicNew = false; topicLayout = "dlm"; topicReseeding = false; draftCards = []; harnessCards = []; harnessInfo = [:]; harnessPoints = []; harnessRebase = false; topicKey = ""
         ticketBook = APTicketBook(); ticketConfirm = []; ticketNote = nil; ticketFrom = nil
         id = ""; dir = ""; settings = [:]; tickets = [:]; needNewId = false; proposedOnce = false
         settingsFrom = "past"; settingsEdited = false; settingsProblems = []; promotionEdited = false; promotionBefore = []
@@ -3322,7 +3326,7 @@ extension APRecords {
         guard !preparing, let run = pastRun else { return }
         step = 2
         preparing = true; prepared = false
-        problems = []; prerunPassed = []
+        problems = []; prerunPassed = []; harnessCards = []; harnessInfo = [:]; harnessPoints = []; harnessRebase = false
         let cand = units.filter { $0.excluded == nil }
         let gone = units.filter { $0.excluded != nil }
         lines = [
@@ -3335,7 +3339,9 @@ extension APRecords {
             APPrepLine(id: "set", title: "지난 자율주행 세트", state: "done", sec: 0,
                        note: setText.map { "지시 \($0.count)자를 불러왔습니다(\(apDay(setAt))). 출발 때 엔진이 고정해 자율주행 세션에만 얹습니다" }
                         ?? "이 프로젝트의 세트에 지시(autopilot.md)가 없어 공통 규칙만으로 돕니다"),
+            APPrepLine(id: "harness", title: "하네스 읽기"),
             APPrepLine(id: "misses", title: "판정 놓침(이 프로젝트)"),
+            APPrepLine(id: "recover", title: "판정 시나리오 자리"),
             APPrepLine(id: "revise", title: "세트 이어 쓰기"),
             APPrepLine(id: "check", title: "단위마다 기계 검사 · 엔진 출발 전 확인"),
             APPrepLine(id: "env", title: "시험 실행기 환경 확인"),
@@ -3345,7 +3351,7 @@ extension APRecords {
             APPrepLine(id: "critic", title: "판정 비판 세션"),
         ]
         if cand.isEmpty {
-            for l in ["misses", "revise", "env", "where", "prerun", "probe", "critic"] { setLine(l, "skip", note: "") }
+            for l in ["harness", "misses", "recover", "revise", "env", "where", "prerun", "probe", "critic"] { setLine(l, "skip", note: "") }
             setLine("check", "skip", note: "이어 갈 단위가 없습니다")
             preparing = false; prepared = true
             buildCards()
@@ -3360,11 +3366,16 @@ extension APRecords {
                     self.repos = info.repos; self.repoInfo = info.info
                     self.pickDefaultBases(projectNow, settingsNow)
                     self.writeDraft(cand.filter { $0.blocked == nil })
-                    // 판정 놓침(⑪-3) → 있으면 세트 이어 쓰기(판정 명령·지시를 고침) → 엔진 확인·판정 미리 돌리기·반대 탐침·비판 세션
-                    self.runMisses {
-                        self.runRevise {
-                            self.writeDraft(self.units.filter { u in cand.contains { $0.id == u.id } && u.blocked == nil })
-                            self.runStatus(prerun: true, ids: Set(cand.filter { $0.blocked == nil }.map(\.id)), critic: true)
+                    // 하네스 읽기(⑫-7b) → 판정 놓침(⑪-3) → 사라진 판정 시나리오 되살리기(⑫-7b) → 하네스가 바뀌었거나 놓침이 있으면 세트 이어 쓰기(판정 명령·시나리오·지시를 고침)
+                    // → 엔진 확인·판정 미리 돌리기·반대 탐침·비판 세션
+                    self.runHarness {
+                        self.runMisses {
+                            self.runRecover(cand) {
+                                self.runRevise {
+                                    self.writeDraft(self.units.filter { u in cand.contains { $0.id == u.id } && u.blocked == nil })
+                                    self.runStatus(prerun: true, ids: Set(cand.filter { $0.blocked == nil }.map(\.id)), critic: true)
+                                }
+                            }
                         }
                     }
                 }
@@ -3436,9 +3447,10 @@ extension APRecords {
         let prev = apRead(dir + "/run.json") as? [String: Any]
         var run = settings
         for (k, v) in extra { run[k] = v }
+        // 엔진(seed)이 쓴 출발 전 자율주행 가지 기록은 그대로 잇는다(5단계 ⑪-2 주제로 시작, 7단계 ⑫-7b 이어 가기·가져오기의 시나리오 커밋)
+        if let sd = prev?["seed"] { run["seed"] = sd }
         if source == "topic" {
             run["source"] = "topic"
-            if let sd = prev?["seed"] { run["seed"] = sd }   // 엔진(seed)이 쓴 출발 전 자율주행 가지 기록은 그대로 잇는다(5단계 ⑪-2)
         } else if isImport {
             run["source"] = source   // 가져오기(7단계 ⑫-7a): todo·list·legacy, 이어 간 실행은 없다
         } else {
@@ -3681,7 +3693,9 @@ extension APRecords {
         let live = Set(units.filter { $0.excluded == nil && $0.blocked == nil }.map(\.id))
         out += (probeCards + criticCards).filter { $0.unit.map { live.contains($0) } ?? true }
         if let w = weakCard { out.append(w) }
-        if source == "topic" || isImport { out += draftCards + harnessCards }   // 주제로 시작(⑪-2)·가져오기(⑫-7a): 세션이 물은 것·지시가 다루지 않은 하네스 확인 지점
+        if source == "topic" || isImport { out += draftCards }   // 주제로 시작(⑪-2)·가져오기(⑫-7a): 세션이 물은 것
+        rebuildHarnessCards()
+        out += harnessCards   // 하네스 정책 카드·지시가 다루지 않은 확인 지점(⑫-7b: 이어 가기도)
         let outside = openParked.filter { includeParked.contains($0.id) }.map { APCarry(id: $0.id, unit: $0.unit, kind: $0.kind, title: $0.title, why: $0.why) }
         for c in carryPark + outside {
             out.append(APCard(id: c.id, kind: "next_start", label: carryPark.contains(c) ? "지난 실행에서 미룬 사람 몫" : "이어 간 줄 밖에서 미룬 사람 몫", title: c.title,
@@ -3976,6 +3990,8 @@ extension APRecords {
             setText = setDraft.trimmingCharacters(in: .whitespacesAndNewlines)
             editingSet = false
             setNote = "저장했습니다. 출발을 누를 때 이 글을 세트에 씁니다(지금 세트는 그대로입니다)."
+            harnessRebase = true
+            if prepared { buildCards() }
             return
         }
         let dirSet = autopilotRoot + "/private/projects/\(p)/set", path = dirSet + "/autopilot.md"
@@ -3997,6 +4013,8 @@ extension APRecords {
         setAt = mtime(path)?.timeIntervalSince1970
         editingSet = false
         setNote = "저장했습니다. 이 판이 다음 출발의 기준이 됩니다(출발할 때 엔진이 고정하고 기록 저장소에 남깁니다)."
+        harnessRebase = true   // 사람이 지금 하네스를 보고 고친 판(⑫-7b)
+        if prepared { buildCards() }
     }
 
     // MARK: 주제로 시작의 2단계 "보드가 준비"(2단계 5-2b → 5단계 ⑪-2) — 링크 읽기(4단계 ⑩-2) → 버전 목록·스택 → 새 폴더 만들기 →
@@ -4017,7 +4035,7 @@ extension APRecords {
         topicKey = key
         step = 2
         preparing = true; prepared = false
-        problems = []; prerunPassed = []; units = []; cards = []; draftResult = [:]; draftCards = []; harnessCards = []; scenarioCards = []; criterionCards = []
+        problems = []; prerunPassed = []; units = []; cards = []; draftResult = [:]; draftCards = []; harnessCards = []; harnessInfo = [:]; harnessPoints = []; harnessRebase = false; scenarioCards = []; criterionCards = []
         probeCards = []; criticCards = []; criticSummary = [:]; weakCard = nil; fixRound = 0; fixing = false; missInfo = [:]; judgeChanges = []; judgeChangeFrom = ""
         missesUsed = []; pendingSet = nil; critRound = 0; keepHistory = false
         let new = t.pathMode == "new"
@@ -4246,8 +4264,8 @@ extension APRecords {
                                      detail: detail + ["바깥 요청을 한 걸음 \((o?["external"] as? NSNumber)?.intValue ?? 0)개 · 모델 0"])
                     } else {
                         self.setLine("skeleton", "done", note: "출발 가지 \(self.bases[self.root] ?? "?")(\(head))에서 autopilot/\(self.id) 를 만들어 읽기 전용 보기로 둡니다", detail: detail)
-                        let n = (o?["harness_points"] as? NSNumber)?.intValue ?? 0
-                        self.setLine("harness", n > 0 ? "done" : "skip", note: n > 0 ? "확인 지점 \(n)곳을 찾았습니다(초안 지시가 모두 다뤄야 합니다)" : "하네스 확인 지점이 없습니다")
+                        self.loadHarness()
+                        self.noteHarness()
                     }
                     then(true)
                 }
@@ -4290,6 +4308,7 @@ extension APRecords {
                     // 지시 글은 기계 검사가 돌려준 글(금지 꼴이 섞인 확인 지점 줄을 뺀 것)을 쓴다. 세션이 쓰는 결과 폴더의 파일은 다시 읽지 않는다(⑫-7b 보안 검토)
                     self.setText = (o["instruction"] as? String).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.flatMap { $0.isEmpty ? nil : $0 }
                     self.setAt = Date().timeIntervalSince1970
+                    self.harnessRebase = true   // 초안 세션이 지금 하네스를 보고 새 지시를 씀(⑫-7b)
                     // 지금 세트에 지시가 있으면 그것과 견준다(출발을 눌러야 세트를 바꾸므로, 무엇이 바뀌는지 출발 확인에서 본다. ⑪-2 보안 검토)
                     let cur = autopilotRoot + "/private/projects/\(self.project ?? "")/set/autopilot.md"
                     if let t = (try? String(contentsOfFile: cur, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty {
@@ -4503,6 +4522,7 @@ extension APRecords {
             if importDraftedSet, let t = setText, !t.isEmpty, let why = writeSetFiles([("autopilot.md", Data((t + "\n").utf8))]) { starting = false; startError = why; return }
             writeImportQueue()
         }
+        if let why = writeHarnessBaseline() { starting = false; startError = why; return }
         let src = dir, dst = autopilotRoot + "/runs/" + id, dev = apDevBuild, runId = id, topicRun = source == "topic" || isImport
         queue.async {
             var moved = src == dst
@@ -4542,6 +4562,18 @@ extension APRecords {
         var files: [(String, Data)] = [("spec.md", Data(spec.utf8)), ("stack.json", stack + Data("\n".utf8))]
         if let t = setText, !t.isEmpty { files.append(("autopilot.md", Data((t + "\n").utf8))) }
         return writeSetFiles(files)
+    }
+    // 세트의 하네스 기준(set/harness.json, 7단계 ⑫-7b): 출발할 때 지시가 지금 하네스에 맞춰졌으면(기준이 없음·세트 이어 쓰기를 지남·초안·가져오기 세션이 새 지시를 씀·사람이 고침)
+    // 지금 지문을 기준으로 남긴다. 하네스가 바뀌었는데 세트 이어 쓰기를 지나지 못했으면 남기지 않는다(다음 출발에 다시 견줘 이어 쓰게)
+    private func writeHarnessBaseline() -> String? {
+        guard harnessWillRebase else { return nil }
+        let marks = (harnessInfo["files"] as? [[String: Any]] ?? []).compactMap { f -> APHarnessFileMark? in
+            guard let p = f["path"] as? String, let g = f["digest"] as? String else { return nil }
+            return APHarnessFileMark(path: p, digest: g, size: (f["size"] as? NSNumber)?.intValue ?? 0)
+        }
+        let b = APHarnessBaseline(marks: marks, points: harnessPoints.count, at: Date().timeIntervalSince1970, run: id)
+        guard let d = try? JSONSerialization.data(withJSONObject: apHarnessBaselineJSON(b), options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]) else { return "하네스 기준을 만들지 못해 출발하지 않았습니다" }
+        return writeSetFiles([("harness.json", d + Data("\n".utf8))])
     }
     // 세트 파일 쓰기(주제로 시작·가져오기 세션 초안 지시) — 0600, 고치기 전 글은 set-backup/, 임시 파일 + rename. 못 쓰면 까닭
     private func writeSetFiles(_ files: [(String, Data)]) -> String? {
@@ -4722,13 +4754,23 @@ extension APStart {
         }
     }
 
-    // 세트 이어 쓰기(이어 가기, 규칙 apSetRewrite): 하네스 그대로·새 요구 없음·판정 놓침 없음이면 그대로(모델 0), 판정 놓침이 있으면 엔진 revise
-    func runRevise(_ then: @escaping @MainActor () -> Void) {
-        let open = (missInfo["open"] as? NSNumber)?.intValue ?? 0
-        let need = apSetRewrite(harnessChanged: false, newRequest: false, openMisses: open)
-        guard need.rewrite else { setLine("revise", "done", note: "하네스 그대로 · 새 요구 없음 · 판정 놓침 없음: 지난 세트를 그대로 씁니다(모델 0)"); then(); return }
+    // 세트 이어 쓰기(규칙 apSetRewrite): 하네스 그대로(지난 세트 기준과 같음)·새 요구 없음·판정 놓침 없음이면 그대로(모델 0), 하네스가 바뀌었거나(⑫-7b) 판정 놓침이 있으면 엔진 revise.
+    // harnessOnly: 가져오기(⑫-7b) — 판정 놓침은 가져오기 세션에 근거로 넘기므로 하네스 바뀜만 본다(대기열 없이 지시만 고침)
+    func runRevise(harnessOnly: Bool = false, _ then: @escaping @MainActor () -> Void) {
+        let open = harnessOnly ? 0 : ((missInfo["open"] as? NSNumber)?.intValue ?? 0)
+        let hasSet = (setText ?? "").isEmpty == false
+        let need = apSetRewrite(harnessChanged: harnessChanged && hasSet, newRequest: false, openMisses: open)
+        guard need.rewrite else {
+            let h = harnessInfo.isEmpty ? "" : !hasSet ? "세트에 지시가 없어 이어 쓸 지시가 없음" + (isImport ? "(가져오기 세션이 초안을 씀)" : "")
+                : harnessInfo["baseline"] is [String: Any] ? "하네스 그대로(지난 세트 기준과 같음)" : "지난 세트의 하네스 기준이 없어 그대로로 봄(이번 출발 때 기준을 남김)"
+            setLine("revise", "done", note: [h, "새 요구 없음", harnessOnly ? "" : "판정 놓침 없음"].filter { !$0.isEmpty }.joined(separator: " · ")
+                        + (hasSet ? ": 지난 지시를 그대로 씁니다(모델 0)" : ": 세트 이어 쓰기는 하지 않습니다(모델 0)"))
+            then(); return
+        }
         let d = dir, dev = apDevBuild, devClaude = APTopic.devClaudeArgs
-        setLine("revise", "run", note: need.reasons.joined(separator: " · ") + ": 지난 판정·놓친 기록·지난 지시만 읽고 고친 초안을 씁니다(모델 \(model), 읽기 도구만, 저장소·하네스는 읽지 않음)")
+        let nChanged = (harnessInfo["changes"] as? [Any])?.count ?? 0
+        setLine("revise", "run", note: need.reasons.joined(separator: " · ") + ": " + (harnessChanged && hasSet ? "바뀐 하네스 파일 \(nChanged)개(읽기 전용 사본)와 " : "")
+                    + "지난 판정·놓친 기록·지난 지시만 읽고 고친 초안을 씁니다(모델 \(model), 읽기 도구만, 저장소는 읽지 않음)")
         queue.async {
             let r = apEngine(["revise", d] + (dev ? ["--dev"] + devClaude : []))
             let o = (try? JSONSerialization.jsonObject(with: Data(r.out.utf8))) as? [String: Any] ?? [:]
@@ -4736,7 +4778,7 @@ extension APStart {
                 MainActor.assumeIsolated {
                     guard self.dir == d else { return }
                     guard o["ok"] as? Bool == true else {
-                        self.setLine("revise", "warn", note: "세트 이어 쓰기가 끝나지 않았거나 검사에 걸려 지난 세트를 그대로 씁니다",
+                        self.setLine("revise", "warn", note: "세트 이어 쓰기가 끝나지 않았거나 검사에 걸려 지난 세트를 그대로 씁니다" + (self.harnessChanged ? "(하네스 기준은 그대로 두어 다음 출발에 다시 씁니다)" : ""),
                                      detail: apStrings(o["problems"]).isEmpty ? [apShort(r.out, 300)] : apStrings(o["problems"]))
                         then(); return
                     }
@@ -4750,10 +4792,100 @@ extension APStart {
                     }
                     self.judgeChanges = changes; self.judgeChangeFrom = "revise"
                     if let ins = o["instruction"] as? String, !ins.isEmpty { self.pendingSet = ins; self.setText = ins; self.setAt = Date().timeIntervalSince1970 }
-                    self.setLine("revise", "done", note: "판정 명령 \(changes.count)곳을 고쳤습니다" + (self.pendingSet != nil ? " · 지시도 고침" : "")
+                    if self.harnessChanged { self.harnessRebase = true }   // 지시가 바뀐 하네스에 맞춰졌다(출발할 때 지금 지문을 세트의 기준으로)
+                    let scen = changes.filter { ($0["field"] as? String ?? "").hasPrefix("scenario:") }.count
+                    let seed = o["seed"] as? [String: Any]
+                    self.setLine("revise", "done", note: "판정 명령 \(changes.count - scen)곳" + (scen > 0 ? " · 시나리오 \(scen)곳" : "") + "을 고쳤습니다" + (self.pendingSet != nil ? " · 지시도 고침" : "")
+                                    + (seed != nil ? " · 고친 시나리오는 출발 전 자율주행 가지 \(seed?["branch"] as? String ?? "")에 커밋" : "")
                                     + " · 출발 확인에서 지난 판과의 차이로 보입니다(출발할 때 세트에 씀)",
-                                 detail: changes.map { "\($0["title"] as? String ?? ""): \($0["old"] as? String ?? "") → \($0["new"] as? String ?? "")" }
+                                 detail: changes.map { "\($0["title"] as? String ?? ""): \(apJudgeFieldLabel($0["field"] as? String ?? "")) \($0["old"] as? String ?? "") → \($0["new"] as? String ?? "")" }
+                                    + (o["harness_files"] as? [[String: Any]] ?? []).map { "넘긴 하네스 파일 · \($0["path"] as? String ?? "")" }
+                                    + apStrings(o["warnings"])
                                     + ["모델 \(o["model"] as? String ?? "?") · " + String(format: "%.0f초", (o["sec"] as? NSNumber)?.doubleValue ?? 0)])
+                    then()
+                }
+            }
+        }
+    }
+
+    // 하네스 읽기(7단계 ⑫-7b) — 엔진 harness(이어 가기). 가져오기는 import gather, 주제로 시작은 seed base 가 같은 harness.json 을 쓴다
+    func runHarness(_ then: @escaping @MainActor () -> Void) {
+        let d = dir, dev = apDevBuild
+        setLine("harness", "run")
+        queue.async {
+            let r = apEngine(["harness", d] + (dev ? ["--dev"] : []))
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard self.dir == d else { return }
+                    self.loadHarness()
+                    if r.code != 0 || self.harnessInfo.isEmpty { self.setLine("harness", "warn", note: "하네스를 읽지 못했습니다: " + apShort(r.out, 200)) } else { self.noteHarness() }
+                    then()
+                }
+            }
+        }
+    }
+    func loadHarness() {
+        harnessInfo = apRead(dir + "/harness.json") as? [String: Any] ?? [:]
+        harnessPoints = (harnessInfo["points"] as? [[String: Any]] ?? []).compactMap { o in
+            guard let f = o["file"] as? String, let l = (o["line"] as? NSNumber)?.intValue else { return nil }
+            return APHarnessPoint(file: f, line: l, kind: o["kind"] as? String ?? "", text: o["text"] as? String ?? "")
+        }
+    }
+    func noteHarness() {
+        let changes = harnessInfo["changes"] as? [[String: Any]] ?? []
+        let label = ["added": "더함", "removed": "지움", "changed": "바뀜"]
+        setLine("harness", harnessPoints.isEmpty && changes.isEmpty ? "skip" : "done", note: harnessNote,
+                detail: changes.map { "\(label[$0["change"] as? String ?? ""] ?? "") · \($0["path"] as? String ?? "")" } + apStrings(harnessInfo["skipped"]).map { "읽지 않음 · " + $0 })
+    }
+    var harnessChanged: Bool { harnessInfo["changed"] as? Bool == true }
+    var harnessNote: String { harnessInfo["note"] as? String ?? "" }
+    var harnessMissing: [APHarnessPoint] { apHarnessMissing(harnessPoints, instruction: setText ?? "") }
+    func harnessCardId(_ p: APHarnessPoint) -> String { apHarnessPolicyClass(p) != nil ? apHarnessPolicyId(p) : apHarnessCardId(p) }
+    // 출발할 때 세트의 하네스 기준을 새로 쓸지: 지시가 있고, 기준이 없거나 지시가 지금 하네스에 맞춰졌을 때(세트 이어 쓰기를 지남·세션이 새 지시를 씀·사람이 고침)
+    var harnessWillRebase: Bool { !harnessInfo.isEmpty && (setText ?? "").isEmpty == false && (!(harnessInfo["baseline"] is [String: Any]) || harnessRebase) }
+    // 근거 묶음(고른 단위의 context)
+    var bundleDirs: [String] { Array(Set(chosen.compactMap { u in ((try? JSONSerialization.jsonObject(with: u.def)) as? [String: Any])?["context"] as? String })).sorted() }
+    // 하네스 카드(⑫-7b): 정책 카드(바깥 쓰기·배포 확인, 지시가 다뤄도 묻고 답은 프로젝트 설정에 남음)와 지시가 다루지 않은 확인 지점 카드. harness.json 이 없으면(옛 준비) 엔진이 낸 카드 그대로
+    private func rebuildHarnessCards() {
+        guard !harnessInfo.isEmpty else { return }
+        let missing = Set(harnessMissing.map(\.place))
+        var out: [APCard] = [], seen = Set<String>()
+        for p in harnessPoints {
+            if let t = apHarnessPolicyCard(p, missing: missing.contains(p.place)) {
+                let id = apHarnessPolicyId(p)
+                guard seen.insert(id).inserted else { continue }
+                out.append(APCard(id: id, kind: "harness_policy", label: t.label, title: t.title, why: t.why,
+                                  options: t.options.map { APOption(key: $0.key, label: $0.label, note: $0.note) }, recommended: t.recommended, policy: true))
+            } else if missing.contains(p.place) {
+                let t = apHarnessCard(p)
+                out.append(APCard(id: apHarnessCardId(p), kind: "harness", label: t.label, title: t.title, why: t.why.replacingOccurrences(of: "초안 세션이 쓴 자율주행 지시", with: "자율주행 지시"),
+                                  options: t.options.map { APOption(key: $0.key, label: $0.label, note: $0.note) }, recommended: t.recommended))
+            }
+        }
+        harnessCards = out
+    }
+    // 판정 시나리오 되살리기(⑫-7b, 이어 가기): 이어 갈 단위의 시나리오가 출발 가지·작업 폴더에 없으면(지난 실행을 버려 함께 사라짐) 엔진이 지난 실행의 고정본에서 되살려
+    // 출발 전 자율주행 가지에 커밋한다(seed recover)
+    func runRecover(_ cand: [APDraftUnit], _ then: @escaping @MainActor () -> Void) {
+        let withScen = cand.filter { u in !APStart.scenarios(u).isEmpty }
+        guard !withScen.isEmpty else { setLine("recover", "skip", note: "시나리오가 있는 단위가 없습니다"); then(); return }
+        let d = dir, dev = apDevBuild
+        setLine("recover", "run")
+        queue.async {
+            let r = apEngine(["seed", d, "recover"] + (dev ? ["--dev"] : []))
+            let o = (try? JSONSerialization.jsonObject(with: Data(r.out.utf8))) as? [String: Any] ?? [:]
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard self.dir == d else { return }
+                    let n = (o["recovered"] as? NSNumber)?.intValue ?? 0, missing = apStrings(o["missing"])
+                    if n > 0 {
+                        self.setLine("recover", missing.isEmpty ? "done" : "warn", note: "출발 가지·작업 폴더에 없는 시나리오 \(n)개(지난 실행을 합치지 않았거나 버림)를 그 실행의 고정본(지문 확인)에서 되살려 출발 전 자율주행 가지 \(o["branch"] as? String ?? "")에 커밋했습니다(모델 0)",
+                                     detail: apStrings(o["files"]) + missing.map { "못 찾음 · " + $0 })
+                    } else if o["ok"] as? Bool == true {
+                        self.setLine("recover", "done", note: "시나리오 \(withScen.count)개 단위 모두 출발 가지·작업 폴더에 있습니다")
+                    } else {
+                        self.setLine("recover", "warn", note: (o["note"] as? String) ?? apStrings(o["problems"]).first ?? apShort(r.out, 200), detail: missing.map { "못 찾음 · " + $0 })
+                    }
                     then()
                 }
             }
@@ -4864,7 +4996,7 @@ extension APStart {
         importKey = key
         step = 2
         preparing = true; prepared = false
-        problems = []; prerunPassed = []; prerunIds = []; units = []; cards = []; draftCards = []; harnessCards = []; scenarioCards = []; criterionCards = []
+        problems = []; prerunPassed = []; prerunIds = []; units = []; cards = []; draftCards = []; harnessCards = []; harnessInfo = [:]; harnessPoints = []; harnessRebase = false; scenarioCards = []; criterionCards = []
         probeCards = []; criticCards = []; criticSummary = [:]; weakCard = nil; fixRound = 0; fixing = false; missInfo = [:]; judgeChanges = []; judgeChangeFrom = ""
         missesUsed = []; pendingSet = nil; critRound = 0; keepHistory = false
         importGather = [:]; importResult = [:]; importChanged = [:]; importDraftedSet = false
@@ -4899,6 +5031,7 @@ extension APStart {
             APPrepLine(id: "set", title: "지난 자율주행 세트"),
             APPrepLine(id: "harness", title: "하네스 읽기"),
             APPrepLine(id: "misses", title: "판정 놓침(이 프로젝트)"),
+            APPrepLine(id: "revise", title: "세트 이어 쓰기"),
             APPrepLine(id: "import", title: "가져오기 세션"),
             APPrepLine(id: "importcheck", title: "가져오기 기계 검사"),
             APPrepLine(id: "check", title: "단위마다 기계 검사 · 엔진 출발 전 확인"),
@@ -4971,10 +5104,9 @@ extension APStart {
                     let need = o["need_instruction"] as? Bool ?? false
                     self.setLine("set", "done", note: need ? "이 프로젝트 세트에 지시(autopilot.md)가 없어 가져오기 세션이 지시 초안을 씁니다(출발할 때만 세트에 씀)"
                                                          : "지시 \(self.setText?.count ?? 0)자를 불러왔습니다(\(apDay(self.setAt))). 출발 때 엔진이 고정해 자율주행 세션에만 얹습니다")
-                    let hp = (o["harness_points"] as? NSNumber)?.intValue ?? 0
-                    self.setLine("harness", hp > 0 ? "done" : "skip", note: hp > 0 ? "확인 지점 \(hp)곳을 찾았습니다(" + (need ? "초안 지시가 모두 다뤄야 합니다)" : "세트의 지시가 다루지 않은 곳은 출발 카드로 묻습니다)")
-                                                                          : "하네스 확인 지점이 없습니다")
-                    self.runMisses { self.runImportSession() }
+                    self.loadHarness()
+                    self.noteHarness()
+                    self.runMisses { self.runRevise(harnessOnly: true) { self.runImportSession() } }
                 }
             }
         }
@@ -5003,7 +5135,8 @@ extension APStart {
                     let sec = (o["sec"] as? NSNumber)?.doubleValue ?? 0, usd = (o["cost_usd"] as? NSNumber)?.doubleValue
                     self.setLine("import", sessionFailed ? "fail" : "done",
                                  note: sessionFailed ? note : "항목 \((o["items"] as? NSNumber)?.intValue ?? 0) → 단위 \(units.count) · 카드 \(cards.count) · 건너뜀 \(skipped.count)"
-                                    + ((o["instruction_chars"] as? NSNumber).map { $0.intValue > 0 ? " · 지시 초안 \($0)자" : "" } ?? ""),
+                                    + ((o["instruction_chars"] as? NSNumber).map { $0.intValue > 0 ? " · 지시 초안 \($0)자" : "" } ?? "")
+                                    + ((o["scenarios"] as? NSNumber).map { $0.intValue > 0 ? " · 판정 시나리오 \($0)개를 출발 전 자율주행 가지 autopilot/\(self.id) 에 커밋" : "" } ?? ""),
                                  detail: [String(format: "%.0f초", sec) + (usd.map { String(format: " · %.3f USD", $0) } ?? "") + " · 모델 \(o["model"] as? String ?? "?")"]
                                     + skipped.map { "건너뜀 · \($0["key"] as? String ?? ""): \($0["why"] as? String ?? "")" })
                     if sessionFailed { self.setLine("importcheck", "skip", note: "가져오기 세션이 결과를 쓰지 못했습니다"); self.importStop("가져오기 세션이 끝나지 않아 여기서 멈춥니다"); return }
@@ -5072,6 +5205,7 @@ extension APStart {
         if importResult["need_instruction"] as? Bool == true,
            let t = (importResult["instruction"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty {   // 기계 검사가 돌려준 글(세션 폴더의 파일은 다시 읽지 않음, ⑫-7b 보안 검토)
             setText = t; setAt = Date().timeIntervalSince1970; importDraftedSet = true
+            harnessRebase = true   // 세션이 지금 하네스를 보고 새 지시를 씀(⑫-7b)
         }
         estimates = calibrate()
         if units.isEmpty {
@@ -5834,16 +5968,24 @@ struct APConfirm: View {
     @State private var editPromo = false
     @State private var card = 0
     @State private var hl = false
+    @State private var jump = 0          // 자율주행 지시 줄의 빠짐 표시에서 카드로 가기(⑫-7b)
+    @State private var cardsHL = false
     private func bind(_ k: String) -> Binding<Bool> { Binding(get: { open.contains(k) }, set: { if $0 { open.insert(k) } else { open.remove(k) } }) }
+    private func jumpToCard(_ id: String) {
+        guard let i = s.cards.firstIndex(where: { $0.id == id }) else { return }
+        card = i; jump += 1; cardsHL = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) { withAnimation(.easeOut(duration: 0.6)) { cardsHL = false } }
+    }
 
     var body: some View {
+        ScrollViewReader { outer in
         VStack(alignment: .leading, spacing: 12) {
             whereBox
             if s.isImport { APImportSourceBox(s: s) }
             if !s.problems.isEmpty { APProblems(problems: s.problems) }
             if let e = s.startError { startErrorBox(e) }
             if s.jira { ticketTree }
-            cardsBox
+            cardsBox.id("ap-cards-anchor")
             dirtyFold
             unitsFold
             if s.source == "topic" { specFold; stackFold }
@@ -5862,6 +6004,8 @@ struct APConfirm: View {
         .onChange(of: s.flash) { _, _ in
             hl = true
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) { withAnimation(.easeOut(duration: 0.6)) { hl = false } }
+        }
+        .onChange(of: jump) { _, _ in withAnimation { outer.scrollTo("ap-cards-anchor", anchor: .top) } }
         }
     }
 
@@ -6043,7 +6187,7 @@ struct APConfirm: View {
     // 출발 카드 — 가로 한 줄로 넘긴다. 위에 지금 카드와 안 고른 수, ‹ ›, 모두 추천대로. 아래에 카드마다 점
     private var cardsBox: some View {
         let left = s.cards.filter { s.answers[$0.id] == nil }.count
-        return APBox(title: "출발 카드 \(s.cards.count)장", note: "객관식, 추천안 표시", axid: "ap-cards") {
+        return APBox(title: "출발 카드 \(s.cards.count)장", note: "객관식, 추천안 표시", tint: cardsHL ? Palette.accent : nil, axid: "ap-cards") {
             critiqueRow
             if s.cards.isEmpty {
                 apNote("이번 출발에는 사람이 정할 카드가 없습니다")
@@ -6068,6 +6212,7 @@ struct APConfirm: View {
                             }
                         }
                     }
+                    .onChange(of: jump) { _, _ in withAnimation { proxy.scrollTo(card, anchor: .leading) } }
                 }
             }
         }
@@ -6308,10 +6453,13 @@ struct APConfirm: View {
         }
     }
 
-    // 자율주행 지시 — 펼치면 그 자리에서 지시 글(읽기만), 나머지 칸은 접혀 있다. 고치기·지난 판 차이·하네스 확인 지점은 뒤 조각(7단계)
+    // 자율주행 지시 — 펼치면 그 자리에서 지시 글, 나머지 칸(확인 지점·출발 확인에 미치는 것·판정 명령·근거 묶음·하네스 지문)은 접혀 있다.
+    // 머리에 지난 판과의 차이와 다룬 확인 지점 수, 빠짐 표시를 누르면 그 카드로(7단계 ⑫-7b, 설계 2장 "하네스 읽기")
     private var instructionFold: some View {
         let diffHead = apInstructionHead(old: s.lastSet?.text, new: s.setText, date: apDay(s.lastSet?.at))
+        let pts = s.harnessPoints, miss = s.harnessMissing
         let head = (s.setText.map { "지시 \($0.count)자 · " } ?? "") + diffHead
+            + (pts.isEmpty ? "" : " · 확인 지점 \(pts.count)곳 중 \(pts.count - miss.count)곳 다룸" + (miss.isEmpty ? "" : " · 빠짐 \(miss.count)"))
         let diff = s.lastSet.map { apLineDiff($0.text, s.setText ?? "") } ?? []
         let counts = apDiffCount(diff)
         return APFold(title: "자율주행 지시", summary: head, axid: "ap-fold-set", open: bind("set"), tag: s.editingSet ? "고치는 중" : nil) {
@@ -6346,6 +6494,8 @@ struct APConfirm: View {
                 APButton(title: "이 자리에서 쓰기", enabled: s.project != nil && !s.starting, help: "이 프로젝트의 자율주행 지시를 새로 씁니다", axid: "ap-set-edit") { s.beginEditSet() }
             }
             if let n = s.setNote { apNote(n, n.hasPrefix("저장했습니다") ? APColor.ok : APColor.fail) }
+            harnessPointsFold
+            harnessEffectsFold
             if let l = s.lastSet, counts.add + counts.del > 0 {
                 APFold(title: "지난 판과 차이 +\(counts.add) −\(counts.del)", summary: l.run == "지금 세트" ? "\(apDay(l.at)) 판 · 지금 세트 파일(출발하면 바뀜)" : "\(apDay(l.at)) 판(실행 \(l.run)) · 기록 저장소", axid: "ap-fold-set-diff", open: bind("setdiff")) {
                     ForEach(Array(diff.prefix(300).enumerated()), id: \.offset) { _, d in
@@ -6383,7 +6533,7 @@ struct APConfirm: View {
             // 판정 차이(⑪-3): 세트 이어 쓰기(판정 놓침이 있어 다시 씀) 또는 판정 고치기로 바뀐 판정. 하네스가 그대로여도 보인다
             if !s.judgeChanges.isEmpty {
                 APFold(title: "판정 차이 \(s.judgeChanges.count)곳",
-                       summary: s.judgeChangeFrom == "revise" ? "세트 이어 쓰기 · 판정 놓침 \((s.missInfo["open"] as? NSNumber)?.intValue ?? 0)건이 있어 다시 씀(하네스 그대로)"
+                       summary: s.judgeChangeFrom == "revise" ? "세트 이어 쓰기 · " + (s.harnessChanged ? "하네스가 지난 세트 기준과 달라 다시 씀(바뀐 파일 \((s.harnessInfo["changes"] as? [Any])?.count ?? 0))" : "판정 놓침 \((s.missInfo["open"] as? NSNumber)?.intValue ?? 0)건이 있어 다시 씀(하네스 그대로)")
                                                               : "판정 고치기 \(s.fixRound)차 · 지난 초안과 견줌",
                        axid: "ap-fold-judge-diff", open: bind("judgediff")) {
                     ForEach(Array(s.judgeChanges.enumerated()), id: \.offset) { _, c in
@@ -6397,15 +6547,89 @@ struct APConfirm: View {
                     }
                 }
             }
-            apNote("하네스 지문: 출발 때 엔진이 하네스 사본과 지문을 남기고, 끝나면 같은지 확인합니다. 저장소 하네스는 고치지 않습니다.")
+            bundleFold
+            harnessPrintFold
             if s.source == "topic" {
                 apNote("주제로 시작: 이 지시는 초안 세션(모델)이 쓴 초안이고 지금은 준비 폴더(drafts/\(s.id)/draft/)에만 있습니다. 출발을 누를 때만 세트(private/projects/\(s.project ?? "")/set/autopilot.md)에 쓰고(고치기 전 글은 set-backup/), 준비를 버리면 세트는 그대로입니다. 하네스 확인 지점 가운데 지시가 다루지 않은 곳은 출발 카드로 묻습니다.")
             } else if s.isImport {
                 apNote(s.importDraftedSet ? "가져오기: 이 프로젝트 세트에 지시가 없어 가져오기 세션(모델)이 쓴 초안입니다. 지금은 준비 폴더(drafts/\(s.id)/import/out/)에만 있고 출발을 누를 때만 세트에 씁니다. 하네스 확인 지점 가운데 지시가 다루지 않은 곳은 출발 카드로 묻습니다."
-                                          : "가져오기: 이 프로젝트 세트의 지시를 그대로 씁니다. 하네스 확인 지점 가운데 그 지시가 다루지 않은 곳은 출발 카드로 묻습니다(하네스가 바뀌면 다시 쓰는 일반판은 7단계 뒤 조각).")
+                                          : "가져오기: 이 프로젝트 세트의 지시를 씁니다. 하네스가 지난 세트 기준과 달라졌으면 세트 이어 쓰기가 바뀐 파일만 읽어 고친 지시이고, 그 지시가 다루지 않은 확인 지점은 출발 카드로 묻습니다.")
             } else {
-                apNote("하네스 확인 지점 읽기와 지시 초안은 하네스 읽기(7단계)에서 엽니다.")
+                apNote("이어 가기: 이 프로젝트 세트의 지시를 씁니다. 하네스가 지난 세트 기준과 같고 판정 놓침이 없으면 그대로(모델 0), 달라졌으면 세트 이어 쓰기가 바뀐 파일만 읽어 고친 지시입니다. 다루지 않은 확인 지점은 출발 카드로 묻습니다.")
             }
+        }
+    }
+
+    // 확인 지점(⑫-7b): 하네스에서 기계로 찾은 자리와 지시가 다뤘는지. 빠진 자리·정책 자리는 누르면 그 출발 카드로
+    @ViewBuilder private var harnessPointsFold: some View {
+        let pts = s.harnessPoints, miss = Set(s.harnessMissing.map(\.place))
+        if !pts.isEmpty {
+            APFold(title: "확인 지점 \(pts.count)곳", summary: miss.isEmpty ? "모두 다룸 · 하네스에서 기계로 찾음" : "빠짐 \(miss.count) · 빠짐 표시를 누르면 그 카드로", axid: "ap-fold-harness-points", open: bind("hpoints")) {
+                ForEach(Array(pts.enumerated()), id: \.offset) { i, p in
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Text(p.place).boardFont(10.5, design: .monospaced).lineLimit(1).truncationMode(.middle).frame(width: 190, alignment: .leading)
+                        APChip(text: apHarnessKindLabels[p.kind] ?? p.kind)
+                        Text(p.text).boardFont(10.5).foregroundStyle(.secondary).lineLimit(2).frame(maxWidth: .infinity, alignment: .leading)
+                        if miss.contains(p.place) {
+                            APButton(title: "빠짐 · 카드로", tint: APColor.limit, axid: "ap-harness-miss-\(i)") { jumpToCard(s.harnessCardId(p)) }
+                        } else if apHarnessPolicyClass(p) != nil {
+                            APButton(title: "다룸 · 정책 카드", axid: "ap-harness-policy-\(i)") { jumpToCard(apHarnessPolicyId(p)) }
+                        } else {
+                            Text("다룸").boardFont(10.5, weight: .semibold).foregroundStyle(APColor.ok)
+                        }
+                    }
+                    .accessibilityElement(children: .contain).accessibilityIdentifier("ap-harness-point-\(i)")
+                }
+            }
+        }
+    }
+    // 출발 확인에 미치는 것(⑫-7b): 하네스에서 나온 출발 카드(정책·빠짐)와 고른 답
+    @ViewBuilder private var harnessEffectsFold: some View {
+        let hc = s.cards.filter { $0.kind == "harness" || $0.kind == "harness_policy" }
+        if !hc.isEmpty {
+            let pol = hc.filter(\.policy).count, left = hc.filter { s.answers[$0.id] == nil }.count
+            APFold(title: "출발 확인에 미치는 것: 출발 카드 \(hc.count)장", summary: "정책 \(pol) · 빠진 확인 지점 \(hc.count - pol) · 안 고른 카드 \(left)", axid: "ap-fold-harness-effects", open: bind("heffects")) {
+                ForEach(hc) { c in
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        APChip(text: c.policy ? "정책" : "빠짐", color: c.policy ? APColor.jira : APColor.limit)
+                        Text(c.title).boardFont(10.5).lineLimit(2).frame(maxWidth: .infinity, alignment: .leading)
+                        Text(s.answers[c.id].flatMap { a in c.options.first { $0.key == a }?.label } ?? "아직 안 고름").boardFont(10.5).foregroundStyle(.secondary)
+                        APButton(title: "카드로", axid: "ap-harness-card-\(c.id)") { jumpToCard(c.id) }
+                    }
+                }
+                apNote("정책 카드(바깥 쓰기·배포·운영 확인)는 지시가 다뤄도 묻고, 답은 출발할 때 프로젝트 설정에 남아 다음 출발에 미리 골라집니다.")
+            }
+        }
+    }
+    // 근거 묶음(⑫-7b): 고른 단위가 받는 믿지 않는 자료 폴더
+    @ViewBuilder private var bundleFold: some View {
+        let b = s.bundleDirs
+        if !b.isEmpty {
+            APFold(title: "근거 묶음 \(b.count)", summary: "믿지 않는 자료 · 출발 때 엔진이 사본을 뜹니다", axid: "ap-fold-bundle", open: bind("bundle")) {
+                ForEach(b, id: \.self) { d in
+                    let n = ((try? FileManager.default.contentsOfDirectory(atPath: d)) ?? []).filter { !$0.hasPrefix(".") }.count
+                    Text(apHome(d) + " · 파일 \(n)").boardFont(10.5, design: .monospaced).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                }
+            }
+        }
+    }
+    // 하네스 지문(⑫-7b): 지난 세트 기준과 같은지, 바뀐 파일, 읽지 않은 파일, 출발 때 기준을 새로 남기는지
+    @ViewBuilder private var harnessPrintFold: some View {
+        let h = s.harnessInfo
+        let ch = h["changes"] as? [[String: Any]] ?? [], base = h["baseline"] as? [String: Any]
+        let files = (h["files"] as? [Any])?.count ?? 0
+        APFold(title: "하네스 지문", summary: h.isEmpty ? "출발 때 엔진이 하네스 사본과 지문을 남깁니다"
+                   : "파일 \(files)개 · " + (base == nil ? "지난 세트 기준 없음" : ch.isEmpty ? "지난 세트 기준(\(apDay((base?["at"] as? NSNumber)?.doubleValue)))과 같음" : "지난 세트 기준과 달라진 파일 \(ch.count)"),
+               axid: "ap-fold-harness-print", open: bind("hprint")) {
+            ForEach(Array(ch.enumerated()), id: \.offset) { _, c in
+                Text("\(["added": "더함", "removed": "지움", "changed": "바뀜"][c["change"] as? String ?? ""] ?? "") · \(c["path"] as? String ?? "")").boardFont(10.5, design: .monospaced).foregroundStyle(APColor.limit)
+            }
+            ForEach(apStrings(h["skipped"]), id: \.self) { k in apNote("읽지 않음 · " + k) }
+            if !h.isEmpty {
+                apNote(s.harnessWillRebase ? "출발할 때 지금 지문을 세트의 하네스 기준으로 남깁니다(다음 출발은 이 기준과 견줍니다)."
+                       : "출발해도 세트의 하네스 기준은 그대로입니다" + (s.harnessChanged ? "(세트 이어 쓰기를 지나지 못해 다음 출발에 다시 견줍니다)." : "."))
+            }
+            apNote("하네스 지문: 출발 때 엔진이 하네스 사본과 지문을 남기고, 끝나면 같은지 확인합니다. 저장소 하네스는 고치지 않습니다.")
         }
     }
 
