@@ -227,7 +227,7 @@ let harnessCoverRows: [HarnessCoverRow] = [
     @Test("지시가 하네스 원래 글을 인용해도 금지 줄로 막지 않는다(인용 밖은 그대로 봄)")
     func 인용() {
         let w = APHarnessPoint(file: ".claude/skills/t/SKILL.md", line: 5, kind: "write", text: "1. mcp__atlassian__createJiraIssue 로 티켓을 만든다.")
-        let ok = apInstructionHeadLine + "\n대답할 사람이 없어 멈추므로 보류합니다.\n- .claude/skills/t/SKILL.md:5 \"mcp__atlassian__createJiraIssue 로 티켓을 만든다.\": 티켓은 만들지 않고 보류합니다(카드 harness-policy).\n끝내기 전에 다시 본다.\n"
+        let ok = apInstructionHeadLine + "\n대답할 사람이 없어 멈추므로 보류합니다.\n- .claude/skills/t/SKILL.md:5 \"mcp__atlassian__createJiraIssue 로 티켓을 만든다.\": 보류합니다(카드 harness-policy-1a2b).\n끝내기 전에 다시 본다.\n"
         let c = apInstructionCheck(ok, harness: [w])
         #expect(c.problems.isEmpty && c.missing.isEmpty, "\(c.problems)")
         let bad = ok + "- 끝나면 mcp__atlassian__createJiraIssue 로 결과 티켓을 만든다.\n"
@@ -251,9 +251,19 @@ let harnessCoverRows: [HarnessCoverRow] = [
         for b in bypass {
             #expect(apInstructionCheck(head + b + "\n끝내기 전에 다시 본다.\n", harness: [w, p]).problems.contains { $0.contains("바깥 쓰기") }, "\(b)")
         }
-        let quoted = head + "- CLAUDE.md:7 \"작업이 끝나면 git push 로 올린다.\": push 는 하지 않고 보류해 next_start 에 남깁니다.\n"
+        let quoted = head + "- CLAUDE.md:7 \"작업이 끝나면 git push 로 올린다.\": 보류해 next_start 에 남깁니다.\n"
             + "- .claude/skills/t/SKILL.md:5 “mcp__atlassian__createJiraIssue 로 티켓을 만든다.”: 보류합니다.\n끝내기 전에 다시 본다.\n"
         #expect(apInstructionCheck(quoted, harness: [w, p]).problems.isEmpty, "\(apInstructionCheck(quoted, harness: [w, p]).problems)")
+        // 보안 검토 지적 둘(⑫-7b 첫 보안 고침 뒤 자동 보안 검토 MEDIUM 2·3): 보류 낱말이 인용 뒤 아무 데서나 맞으면 보류로 보던 것, 인용을 지운 뒤 앞뒤를 이어 부정 창이 인용을 넘던 것
+        let more = [
+            "- CLAUDE.md:7 \"작업이 끝나면 git push 로 올린다.\": 그대로 따른다, 멈추지 않는다.",          // 긍정 + 이중 부정
+            "- CLAUDE.md:7 \"작업이 끝나면 git push 로 올린다.\": 보류 없이 한다.",                       // 보류 낱말만 있음
+            "- CLAUDE.md:7 git push \"작업이 끝나면 git push 로 올린다.\" 않는다.",                      // 인용 앞 금지 동작을 인용 뒤 부정이 덮음
+            "- 먼저 git push 하고 CLAUDE.md:7 \"작업이 끝나면 git push 로 올린다.\": 보류합니다.",          // 인용 앞에 참조 말고 다른 글
+        ]
+        for b in more {
+            #expect(apInstructionCheck(head + b + "\n끝내기 전에 다시 본다.\n", harness: [w, p]).problems.contains { $0.contains("바깥 쓰기") }, "\(b)")
+        }
         let ins = head + "- CLAUDE.md:7 보류\n- 단위마다 작업이 끝나면 git push 로 올린다.\n"
         #expect(apReviseCheck(ReviseOut(files: ["autopilot.md": ins]), units: [], harness: [w, p]).problems.contains { $0.contains("바깥 쓰기") })
     }

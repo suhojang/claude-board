@@ -194,13 +194,18 @@ public func apHarnessMissing(_ points: [APHarnessPoint], instruction: String) ->
 }
 
 // 지시 글의 금지 줄(바깥 쓰기·하네스 고치기·push 를 시키는 줄) — 쓰는 법 ②("확인 지점마다 파일:줄, 원래 글")대로 하네스 줄을 인용한 줄만 뺀다(7단계 ⑫-7b).
-// 하네스가 바깥 쓰기·push 를 시키는 줄을 지시가 인용하면 그 원래 글 때문에 지시가 막히던 것. 뺄 수 있는 줄은 진짜 인용뿐이다(⑫-7b 자동 보안 검토 MEDIUM:
-// 처음 판은 하네스 글을 지시 어디서든 부분 글자로 지워, 금지 줄 안에 하네스 글을 끼워 넣으면 검사를 빠져나갔다):
-//   그 줄에 그 확인 지점의 파일:줄 참조가 있고, 그 확인 지점 글(목록 머리를 뗀 꼴도)이 따옴표 안에 그대로 있고, 따옴표 뒤가 보류·부정이고,
-//   그 인용 한 번을 뺀 나머지 줄에 금지 꼴이 없을 때만. 그 밖의 줄은 apForbiddenLines 그대로
+// 하네스가 바깥 쓰기·push 를 시키는 줄을 지시가 인용하면 그 원래 글 때문에 지시가 막히던 것. 뺄 수 있는 줄은 정한 꼴의 인용 줄 하나뿐이다:
+//   [목록 머리] <그 확인 지점의 파일:줄> "<그 하네스 글>": <정한 보류 글>[(카드 <id>)]
+// 인용 앞에는 목록 머리와 그 파일:줄 참조만, 인용 뒤에는 정한 보류 글만 있어야 한다(쓰는 법 ② 에 이 꼴을 적어 넘긴다. 맞지 않으면 금지 줄로 걸려 준비가 멈춘다).
+// 보안 검토(⑫-7b 자동 보안 검토 MEDIUM 셋): 처음 판은 하네스 글을 지시 어디서든 부분 글자로 지웠고(금지 줄 안에 하네스 글을 끼워 넣으면 빠져나감),
+// 둘째 판은 보류 낱말이 인용 뒤 아무 데서나 맞으면 받았고("그대로 따른다, 멈추지 않는다"·"보류 없이 한다"), 인용을 지운 앞뒤를 이어 검사해 인용 앞의 금지 동작을
+// 인용 뒤 부정이 덮었다. 그래서 앞뒤를 정한 꼴로만 받는다
 private let listHead = try! NSRegularExpression(pattern: "^([-*+]|[0-9]+[.)])\\s+", options: [])
 private let quotePairs: [(String, String)] = [("\"", "\""), ("“", "”"), ("「", "」"), ("『", "』"), ("'", "'"), ("‘", "’")]
-private let deferAfter = try! NSRegularExpression(pattern: "않|말고|보류|금지|멈추|멈춘|next_start|건너뛰|빼고|뺀다|하지 마", options: [.caseInsensitive])
+private let citeBefore = try! NSRegularExpression(pattern: "^\\s*(([-*+]|[0-9]+[.)])\\s+)?[^\\s\"“「『'‘]+:[0-9]+(\\s*[-~–]\\s*[0-9]+)?\\s*$", options: [])
+public let apHarnessDeferPhrases = ["보류해 next_start 에 남깁니다", "보류해 next_start 에 남긴다", "하지 않고 보류합니다", "하지 않고 보류한다", "보류합니다", "보류한다", "하지 않습니다", "하지 않는다"]
+private let citeAfter = try! NSRegularExpression(
+    pattern: "^\\s*[:：]\\s*(" + apHarnessDeferPhrases.joined(separator: "|") + ")(\\s*\\((출발 )?카드 [A-Za-z0-9._,\\- ]{1,80}\\))?\\s*[.。]?\\s*$", options: [])
 private func quotedHarnessLine(_ line: String, harness: [APHarnessPoint]) -> Bool {
     for p in harness where covers(line, file: p.file, line: p.line) {
         var texts = [p.text]
@@ -211,9 +216,8 @@ private func quotedHarnessLine(_ line: String, harness: [APHarnessPoint]) -> Boo
         for q in texts where q.count >= 6 {
             for (o, c) in quotePairs {
                 guard let r = line.range(of: o + q + c) else { continue }
-                let after = String(line[r.upperBound...])
-                let rest = String(line[..<r.lowerBound]) + "…" + after
-                if apForbiddenLines(rest).isEmpty, hits(deferAfter, after) { return true }
+                let before = String(line[..<r.lowerBound]), after = String(line[r.upperBound...])
+                if hits(citeBefore, before), covers(before, file: p.file, line: p.line), hits(citeAfter, after) { return true }
             }
         }
     }
