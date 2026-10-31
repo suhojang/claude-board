@@ -7,13 +7,18 @@ import Foundation
 public let apEndedStates: Set<String> = ["done", "stopped", "error"]
 public func apRunEnded(_ state: String) -> Bool { apEndedStates.contains(state) }
 
-// 보드·엔진 control 명령이 쓰는 요청과 사람이 읽는 이름. restart_from_intake(멈추고 다시 출발)는 2단계 5-4 에서 더함
-public let apControlActions = ["pause", "resume", "stop", "restart_from_intake"]
-public let apControlNames = ["pause": "일시정지", "resume": "재개", "stop": "중단", "restart_from_intake": "멈추고 다시 출발"]
+// 보드·엔진 control 명령이 쓰는 요청과 사람이 읽는 이름. restart_from_intake(멈추고 다시 출발)는 2단계 5-4 에서,
+// takeover(터미널로 이어받기)·giveback(자율주행에 돌려주기)은 8단계 ⑫-8 에서 더함(Takeover.swift)
+public let apControlActions = ["pause", "resume", "stop", "restart_from_intake", "takeover", "giveback"]
+public let apControlNames = ["pause": "일시정지", "resume": "재개", "stop": "중단", "restart_from_intake": "멈추고 다시 출발",
+                             "takeover": "터미널로 이어받기", "giveback": "자율주행에 돌려주기"]
 
-// 보드가 이 요청을 그 실행에 써도 되는가 — 아는 요청이고, 출발한(상태가 있는) 끝나지 않은 실행만
+// 보드가 이 요청을 그 실행에 써도 되는가 — 아는 요청이고, 출발한(상태가 있는) 끝나지 않은 실행만.
+// 이어받은 실행(taken_over)에는 돌려주기·중단·멈추고 다시 출발만, 돌려주기는 이어받은 실행에만(⑫-8). 이어받을 세션이 있는지는 apTakeoverBlock
 public func apBoardCanControl(_ action: String, state: String) -> Bool {
-    apControlActions.contains(action) && !state.isEmpty && !apRunEnded(state)
+    guard apControlActions.contains(action), !state.isEmpty, !apRunEnded(state) else { return false }
+    if state == apTakenOverState { return ["giveback", "stop", "restart_from_intake"].contains(action) }
+    return action != "giveback"
 }
 
 // control.json 하나가 새 요청인가 — action 이 글자일 때만, ts 가 없으면 파일 수정 시각, 이미 받은 ts(control_seen) 보다 클 때만.
@@ -26,12 +31,14 @@ public func apControlNew(_ json: Any?, mtime: Double, seen: Double?) -> (action:
     return (a, ts)
 }
 
-// 받은 요청으로 엔진이 할 일 — 도는 중(paused false)과 일시정지 중(true)
+// 받은 요청으로 엔진이 할 일 — 도는 중·일시정지 중·이어받은 중(APControlMode, ⑫-8)
 public enum APControlStep: Equatable, Sendable {
     case pause      // 지금 하던 일(claude·판정·대기)을 멈추고 일시정지로
     case stop       // 실행을 마친다(사람이 중단)
     case resume     // 일시정지를 풀고 이어 간다
     case restart    // 멈추고 다시 출발 — 언제 멈출지는 apRestartPlan(5-4)
+    case takeover   // 일시정지처럼 멈추고 사람이 이어받은 상태로(⑫-8). 이어받을 세션이 있는지는 엔진이 apTakeoverBlock 으로 먼저 본다
+    case giveback   // 돌려주기 확인(apGivebackCheck) 뒤 같은 세션으로 잇는다(⑫-8)
     case none       // 그대로 간다(진행 기록 한 줄만)
 }
 public struct APControlOutcome: Equatable, Sendable {
@@ -39,8 +46,22 @@ public struct APControlOutcome: Equatable, Sendable {
     public let text: String?    // 진행 기록(events.jsonl, who board) 한 줄. nil 이면 엔진이 그 일을 하며 따로 적는다
     public init(_ step: APControlStep, _ text: String?) { self.step = step; self.text = text }
 }
-public func apControlOutcome(_ action: String, paused: Bool) -> APControlOutcome {
+public func apControlOutcome(_ action: String, paused: Bool) -> APControlOutcome { apControlOutcome(action, mode: paused ? .paused : .running) }
+public func apControlOutcome(_ action: String, mode: APControlMode) -> APControlOutcome {
     if action == "restart_from_intake" { return .init(.restart, nil) }
+    if mode == .takenOver {   // 사람이 이어받은 중(⑫-8): 돌려주기·중단·멈추고 다시 출발만 한다
+        switch action {
+        case "giveback": return .init(.giveback, nil)
+        case "stop": return .init(.stop, nil)
+        case "takeover": return .init(.none, "이미 사람이 이어받았습니다.")
+        case "pause": return .init(.none, "사람이 이어받은 상태라 일시정지를 넘깁니다. 돌려주거나 중단합니다.")
+        case "resume": return .init(.none, "사람이 이어받은 상태라 재개 대신 돌려주기로 잇습니다.")
+        default: return .init(.none, "아직 엔진이 하지 못하는 요청(\(action))이라 넘깁니다.")
+        }
+    }
+    if action == "takeover" { return .init(.takeover, "터미널로 이어받기 요청을 받았습니다.") }
+    if action == "giveback" { return .init(.none, "이어받은 상태가 아니라 돌려주기를 넘깁니다.") }
+    let paused = mode == .paused
     if paused {
         switch action {
         case "resume": return .init(.resume, "재개합니다. 멈춘 자리에서 같은 세션으로 이어 갑니다.")

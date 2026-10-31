@@ -82,6 +82,7 @@ public struct APInboxEntry: Equatable, Sendable, Codable {
     public var units: [Int]          // 넘긴(now)·붙인(next) 단위
     public var done: Double?         // 처음 넘긴·붙인 시각
     public var why: String?          // late·dropped·unused·bad 의 까닭
+    public var source: String?       // 없으면 사람이 보드에서 보낸 말, takeover 면 돌려줄 때 엔진이 만든 이어받기 지시(⑫-8, Takeover.swift). 없는 칸은 옛 꼴 그대로 읽힌다
     public init(file: String, to: String, text: String, sent: Double? = nil, seen: Int? = nil, received: Double, status: String,
                 unit: Int? = nil, from: Int? = nil, units: [Int] = [], done: Double? = nil, why: String? = nil) {
         self.file = file; self.to = to; self.text = text; self.sent = sent; self.seen = seen; self.received = received; self.status = status

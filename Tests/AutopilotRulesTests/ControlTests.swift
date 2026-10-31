@@ -36,11 +36,14 @@ private let outcomeRows: [OutcomeRow] = [
     .init(note: "도는 중 일시정지", action: "pause", paused: false, step: .pause, text: "일시정지 요청을 받았습니다."),
     .init(note: "도는 중 중단", action: "stop", paused: false, step: .stop, text: "중단 요청을 받았습니다."),
     .init(note: "도는 중 재개는 그대로", action: "resume", paused: false, step: .none, text: "재개 요청을 받았지만 일시정지 상태가 아니라 그대로 갑니다."),
-    .init(note: "도는 중 모르는 요청은 넘긴다", action: "takeover", paused: false, step: .none, text: "아직 엔진이 하지 못하는 요청(takeover)이라 넘깁니다."),
+    .init(note: "⑫-8: 도는 중 터미널로 이어받기(전에는 넘김)", action: "takeover", paused: false, step: .takeover, text: "터미널로 이어받기 요청을 받았습니다."),
+    .init(note: "도는 중 모르는 요청은 넘긴다", action: "rewind", paused: false, step: .none, text: "아직 엔진이 하지 못하는 요청(rewind)이라 넘깁니다."),
     .init(note: "일시정지 중 재개", action: "resume", paused: true, step: .resume, text: "재개합니다. 멈춘 자리에서 같은 세션으로 이어 갑니다."),
     .init(note: "일시정지 중 중단은 엔진이 마치며 적는다", action: "stop", paused: true, step: .stop, text: nil),
     .init(note: "일시정지 중 일시정지", action: "pause", paused: true, step: .none, text: "이미 일시정지 상태입니다."),
-    .init(note: "일시정지 중 모르는 요청", action: "giveback", paused: true, step: .none, text: "아직 엔진이 하지 못하는 요청(giveback)이라 넘깁니다."),
+    .init(note: "⑫-8: 일시정지 중 돌려주기는 이어받은 상태가 아니라 넘김(전에는 모르는 요청)", action: "giveback", paused: true, step: .none, text: "이어받은 상태가 아니라 돌려주기를 넘깁니다."),
+    .init(note: "⑫-8: 일시정지 중 터미널로 이어받기", action: "takeover", paused: true, step: .takeover, text: "터미널로 이어받기 요청을 받았습니다."),
+    .init(note: "일시정지 중 모르는 요청", action: "rewind", paused: true, step: .none, text: "아직 엔진이 하지 못하는 요청(rewind)이라 넘깁니다."),
     .init(note: "5-4: 멈추고 다시 출발(전에는 넘김), 언제 멈출지는 apRestartPlan", action: "restart_from_intake", paused: false, step: .restart, text: nil),
     .init(note: "5-4: 일시정지 중 멈추고 다시 출발", action: "restart_from_intake", paused: true, step: .restart, text: nil),
 ]
@@ -58,7 +61,13 @@ private let boardControlRows: [BoardControlRow] = [
     .init(note: "출발하지 않은(상태 없는) 실행에는 쓰지 않는다", action: "pause", state: "", want: false),
     .init(note: "끝난 실행에는 쓰지 않는다", action: "stop", state: "done", want: false),
     .init(note: "중단된 실행에는 쓰지 않는다", action: "resume", state: "stopped", want: false),
-    .init(note: "모르는 요청은 쓰지 않는다", action: "takeover", state: "running", want: false),
+    .init(note: "⑫-8: 도는 실행에 터미널로 이어받기(전에는 쓰지 않음)", action: "takeover", state: "running", want: true),
+    .init(note: "⑫-8: 이어받지 않은 실행에는 돌려주기를 쓰지 않는다", action: "giveback", state: "paused", want: false),
+    .init(note: "⑫-8: 이어받은 실행에 돌려주기", action: "giveback", state: "taken_over", want: true),
+    .init(note: "⑫-8: 이어받은 실행에 중단", action: "stop", state: "taken_over", want: true),
+    .init(note: "⑫-8: 이어받은 실행에 일시정지·재개·다시 이어받기는 쓰지 않는다", action: "resume", state: "taken_over", want: false),
+    .init(note: "⑫-8: 이어받은 실행에 다시 이어받기", action: "takeover", state: "taken_over", want: false),
+    .init(note: "모르는 요청은 쓰지 않는다", action: "rewind", state: "running", want: false),
     .init(note: "5-4: 멈추고 다시 출발(전에는 쓰지 않음)", action: "restart_from_intake", state: "waiting_stopline", want: true),
     .init(note: "5-4: 끝난 실행에는 멈추고 다시 출발도 쓰지 않는다", action: "restart_from_intake", state: "stopped", want: false),
 ]
@@ -83,6 +92,7 @@ private let boardControlRows: [BoardControlRow] = [
     func 이름() {
         #expect(["done", "stopped", "error"].allSatisfy(apRunEnded))
         #expect(!["", "starting", "running", "paused", "waiting_limit", "waiting_stopline", "waiting_precheck"].contains(where: apRunEnded))
-        #expect(apControlActions.map { apControlNames[$0] ?? "" } == ["일시정지", "재개", "중단", "멈추고 다시 출발"])   // 5-4 에서 넷째
+        #expect(apControlActions.map { apControlNames[$0] ?? "" } == ["일시정지", "재개", "중단", "멈추고 다시 출발", "터미널로 이어받기", "자율주행에 돌려주기"])   // 5-4 에서 넷째, ⑫-8 에서 둘
+        #expect(!apRunEnded(apTakenOverState))
     }
 }

@@ -2061,7 +2061,7 @@ final class Engine {
         case .pause: return .pause
         case .stop: return .stop
         case .restart: return askRestart(paused: false) ? .restart : nil
-        case .resume, .none: return nil
+        case .resume, .takeover, .giveback, .none: return nil   // 터미널로 이어받기·돌려주기는 8단계 ⑫-8 엔진 커밋에서
         }
     }
 
@@ -2396,7 +2396,7 @@ final class Engine {
                     return
                 case .stop: stopRun()
                 case .restart: if askRestart(paused: true) { restartStop() }   // 도는 단위가 없는 일시정지만 바로 멈춘다
-                case .pause, .none: break
+                case .pause, .takeover, .giveback, .none: break
                 }
             }
             sleep(1)

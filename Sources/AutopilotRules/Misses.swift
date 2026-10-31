@@ -19,12 +19,13 @@ public enum APMissSignal: String, Equatable, Sendable, CaseIterable {
     case asked                           // 묻기 도구 거부(사람에게 물으려 함)
     case parked                          // 판정을 지나지 못한 단위의 보류 사유
     case decisionBasis = "decision_basis"   // 결정 근거가 지시·카드가 아닌 저장소 규칙
+    case takeover                        // 사람이 터미널로 이어받아 요청·바꾼 파일을 남김(8단계 ⑫-8, 다음 세트 이어 쓰기의 새 요구 근거)
 }
 
 public func apMissSide(_ s: APMissSignal) -> String {
     switch s {
     case .discard, .revert, .nextStart, .probe, .critic: return "judge"
-    case .denial, .asked, .parked, .decisionBasis: return "instruction"
+    case .denial, .asked, .parked, .decisionBasis, .takeover: return "instruction"
     }
 }
 
@@ -39,6 +40,7 @@ public func apMissLabel(_ s: APMissSignal) -> String {
     case .asked: return "사람에게 물으려 함"
     case .parked: return "보류 사유"
     case .decisionBasis: return "지시 밖 근거"
+    case .takeover: return "사람이 이어받음"
     }
 }
 
@@ -83,7 +85,7 @@ private let instructionWords = ["autopilot.md", "자율주행 지시", "출발 �
 // 단위 하나의 신호(엔진이 단위 판정 뒤·끝·합치기 버리기 뒤에 기록 저장소에 쓴다. id 는 같은 신호면 같다 — 두 번 써도 늘지 않음)
 public func apUnitMisses(project: String, run: String, n: Int, unitId: String?, sourceKey: String?, title: String, status: String, story: String?,
                          discardedSources: Set<String>, result: [String: Any]?, denials: [[String: Any]], judge: String?, judgeDigest: String?,
-                         setId: String?, at: Double) -> [APMiss] {
+                         setId: String?, at: Double, takeovers: [[String: Any]] = []) -> [APMiss] {
     var out: [APMiss] = []
     func add(_ s: APMissSignal, _ k: Int, _ why: String, judge j: String? = nil) {
         out.append(APMiss(id: "\(run)/\(n)/\(s.rawValue)/\(k)", project: project, run: run, unitN: n, unitId: unitId, sourceKey: sourceKey, signal: s,
@@ -113,6 +115,18 @@ public func apUnitMisses(project: String, run: String, n: Int, unitId: String?, 
         return harnessWords.contains { b.contains($0) } && !instructionWords.contains { b.contains($0) }
     }) {
         add(.decisionBasis, 1, "결정 근거가 지시·출발 카드가 아닌 저장소 규칙입니다: \((d["what"] as? String ?? "")) · 근거 \((d["basis"] as? String ?? ""))")
+    }
+    // 사람이 이어받아 남긴 것(⑫-8, 단위 기록 takeovers 의 돌려준 줄): 요청·커밋·바뀐 파일·하네스 — 다음 출발의 세트 이어 쓰기가 새 요구로 읽는다.
+    // 사람이 친 글은 «» 로 감싸고 표시 괄호는 바꾼다(세트 이어 쓰기 세션 글은 이 기록을 지시가 아닌 자료로 넘긴다)
+    for (i, t) in takeovers.enumerated() where t["back"] != nil {
+        let turns = (t["turns"] as? [String] ?? []).map { apDefangMarkers($0.replacingOccurrences(of: "\n", with: " ")) }
+        let files = t["files"] as? [String] ?? []
+        let harness = t["harness"] as? [String] ?? []
+        let commits = ((t["commits"] as? [String: Any]) ?? [:]).values.compactMap { ($0 as? NSNumber)?.intValue }.reduce(0, +)
+        var why = "사람이 터미널로 이어받아 요청 \(turns.count)개·커밋 \(commits)개·바뀐 파일 \(files.count)개를 남겼습니다"
+        if !turns.isEmpty { why += ": " + turns.prefix(3).map { "«\($0.count > 80 ? String($0.prefix(80)) + "…" : $0)»" }.joined(separator: " ") }
+        if !harness.isEmpty { why += " · 하네스 바뀜 " + harness.prefix(3).joined(separator: ", ") }
+        add(.takeover, i + 1, why)
     }
     return out
 }
