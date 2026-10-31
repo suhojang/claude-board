@@ -274,6 +274,19 @@ public func apSeedScenarioPathOK(_ rel: String) -> Bool {
     return !apHarnessFileWanted(rel)
 }
 
+// 결과 폴더 안 단위 자리 이름으로 써도 되는 단위 id(⑫-7b 자동 보안 검토 MEDIUM 8: 대기열 단위 id 를 검사 없이 scenarios/<id>/ 로 써서 "../" 로 결과 폴더 밖에 썼다)
+public func apUnitDirOK(_ id: String) -> Bool {
+    id.range(of: "^[A-Za-z0-9._-]{1,60}$", options: .regularExpression) != nil && id != "." && id != ".." && !id.hasPrefix(".")
+}
+// 지난 실행의 시나리오 고정본 자리를 기록 글자가 아니라 조각으로 다시 만든다(⑫-7b 자동 보안 검토 MEDIUM 7: frozen.json 의 pinned 글자에 ".." 를 넣으면
+// 앞자리 검사를 지나 다른 파일을 읽어 커밋에 넣었다). 엔진 start 가 뜨는 자리 그대로: <실행 폴더>/pinned/checks/scenarios/<단위 차례>/<시나리오 차례>/<파일 이름>
+public func apPinnedScenarioPath(runDir: String, unit: Int, scenario: Int, file: String) -> String? {
+    let name = (file as NSString).lastPathComponent
+    guard unit >= 1, scenario >= 1, !name.isEmpty, name.count <= 200, name != ".", name != "..", !name.contains("/"),
+          !name.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7f }) else { return nil }
+    return runDir + "/pinned/checks/scenarios/\(unit)/\(scenario)/" + name
+}
+
 // MARK: - 정책 카드 (7단계 ⑫-7b): 확인 지점 가운데 사람 몫 정책이 필요한 것 — 바깥 쓰기, 배포·운영 확인
 
 // 정책 카드는 프로젝트 설정 policy_answers 에 답이 남아 다음 출발에 미리 골라진다(2단계 정책 답 길). 그래서 id 는 줄 번호가 아니라

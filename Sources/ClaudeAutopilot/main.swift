@@ -6834,10 +6834,15 @@ func cmdSeed(_ args: [String]) {
                 guard let file = sc["file"] as? String, scenarioSourceSeeded(cwd, file, seedOf(x.run)).data == nil else { continue }
                 // 지난 실행의 같은 단위(원천 항목 키, 없으면 id)·같은 파일의 고정본
                 let key = d["source_key"] as? String, uid = d["id"] as? String
-                let fu = frozen.first { f in (key != nil && f["source_key"] as? String == key) || (key == nil && f["id"] as? String == uid) }
-                guard let ps = (fu?["scenarios"] as? [[String: Any]])?.first(where: { $0["file"] as? String == file }),
-                      let pinned = ps["pinned"] as? String, pinned.hasPrefix(pastDir + "/pinned/checks/scenarios/"), let sha = ps["sha256"] as? String,
-                      case .data(let data)? = readHarnessFile(pinned, budget: 1 << 20), sha256(data) == sha,
+                // 고정본 자리는 기록 글자(pinned)를 믿지 않고 단위 차례·시나리오 차례·파일 이름으로 다시 만들고(apPinnedScenarioPath), 기록과 같고
+                // 실제 경로(링크를 푼 자리)가 그 실행의 고정본 폴더 안일 때만 읽는다(⑫-7b 자동 보안 검토 MEDIUM 7)
+                let fi = frozen.firstIndex { f in (key != nil && f["source_key"] as? String == key) || (key == nil && f["id"] as? String == uid) }
+                let fscs = fi.map { frozen[$0]["scenarios"] as? [[String: Any]] ?? [] } ?? []
+                let pinRoot = canonical(pastDir + "/pinned/checks/scenarios")
+                guard let fi, let k = fscs.firstIndex(where: { $0["file"] as? String == file }),
+                      let want = apPinnedScenarioPath(runDir: pastDir, unit: fi + 1, scenario: k + 1, file: file),
+                      fscs[k]["pinned"] as? String == want, canonical(want).hasPrefix(pinRoot + "/"), let sha = fscs[k]["sha256"] as? String,
+                      case .data(let data)? = readHarnessFile(want, budget: 1 << 20), sha256(data) == sha,
                       let rel = repoRelative(x.repo, cwd: cwd, file: file) else { missing.append("\(uid ?? "?") \(file)"); continue }
                 items.append((rel, data)); recovered.append("\(uid ?? "?") \(file)")
             }
@@ -7244,13 +7249,18 @@ func cmdRevise(_ args: [String]) -> Never {
     let outC = canonical(out)
     // 시나리오 글(⑫-7b): 지금 판(출발 전 자율주행 가지가 있으면 그 머리, 아니면 작업 폴더)을 결과 폴더 scenarios/<단위 id>/<이름> 에 넣어 둔다 — 세션은 그 자리만 고친다
     var originals: [String: Data] = [:], scenarioPlace: [String: (cwd: String, file: String)] = [:]
+    var skippedUnits: [String] = []
     for (u, d) in zip(units, q) {
-        guard let cwd = d["cwd"] as? String else { continue }
+        guard let cwd = d["cwd"] as? String, !u.scenarioNames.isEmpty else { continue }
+        // 단위 id 는 결과 폴더 안 자리 이름이 된다 — 꼴을 검사하고 실제 자리가 결과 폴더 안인지 본다(⑫-7b 자동 보안 검토 MEDIUM 8)
+        guard apUnitDirOK(u.id) else { skippedUnits.append("단위 id \(u.id.prefix(40)) 는 자리 이름 꼴이 아니라 시나리오를 넘기지 않았습니다"); continue }
+        let udir = outC + "/scenarios/" + u.id
+        try? fm.createDirectory(atPath: udir, withIntermediateDirectories: true)
+        guard !isLink(udir), canonical(udir) == udir else { skippedUnits.append("단위 \(u.id) 의 시나리오 자리가 결과 폴더 밖입니다"); continue }
         for name in u.scenarioNames {
             guard let file = u.scenarios.first(where: { ($0 as NSString).lastPathComponent == name }),
                   let data = scenarioSourceSeeded(cwd, file, seedOf(run)).data else { continue }
-            try? fm.createDirectory(atPath: out + "/scenarios/" + u.id, withIntermediateDirectories: true)
-            guard fm.createFile(atPath: out + "/scenarios/\(u.id)/\(name)", contents: data) else { continue }
+            guard fm.createFile(atPath: udir + "/" + name, contents: data) else { continue }
             originals["\(u.id)/\(name)"] = data; scenarioPlace["\(u.id)/\(name)"] = (cwd, file)
         }
     }
@@ -7288,6 +7298,7 @@ func cmdRevise(_ args: [String]) -> Never {
     guard let sr else { reply(["ok": false, "problems": [problem ?? "세션을 띄우지 못했습니다"]], false) }
     guard sr.note.isEmpty else { reply(["ok": false, "problems": [sr.note], "model": model, "cost_usd": sr.cost ?? NSNull(), "sec": r3(sr.sec)], false) }
     var r = apReviseCheck(EngineDraftFiles(root: outC), units: units, originals: originals, harness: points)
+    r.warnings += skippedUnits
     var newQ = q
     for i in newQ.indices { if let id = newQ[i]["id"] as? String, let c = r.checks[id] { newQ[i]["check"] = c } }
     var changes = apJudgeChanges(old: q, new: newQ).map { ["unit": $0.unit, "title": $0.title, "field": $0.field, "old": $0.old, "new": $0.new, "why": r.whys[$0.unit] ?? ""] }

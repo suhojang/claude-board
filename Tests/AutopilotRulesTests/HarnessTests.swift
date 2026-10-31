@@ -174,6 +174,17 @@ private struct FakeHarness: APHarnessSource {
         }
     }
 
+    // 보안 검토 지적 둘(⑫-7b 자동 보안 검토 MEDIUM 7·8, 이어 가기 시나리오 길): 고정본 기록 글자의 ".." 로 다른 파일을 읽음, 단위 id 의 "../" 로 결과 폴더 밖에 씀
+    @Test("고정본 자리는 조각으로 다시 만들고, 단위 자리 이름은 검사한다")
+    func 경로넘기() {
+        #expect(apPinnedScenarioPath(runDir: "/R/runs/a", unit: 2, scenario: 1, file: ".autopilot/scenarios/u2/check.sh") == "/R/runs/a/pinned/checks/scenarios/2/1/check.sh")
+        for bad in ["..", ".", "", "a\u{1}b"] { #expect(apPinnedScenarioPath(runDir: "/R", unit: 1, scenario: 1, file: bad) == nil, "\(bad)") }
+        #expect(apPinnedScenarioPath(runDir: "/R", unit: 0, scenario: 1, file: "a.sh") == nil)
+        #expect(apPinnedScenarioPath(runDir: "/R", unit: 1, scenario: 1, file: "x/../../../../private/set/autopilot.md") == "/R/pinned/checks/scenarios/1/1/autopilot.md")
+        for ok in ["u1", "c2", "u-3.b"] { #expect(apUnitDirOK(ok), "\(ok)") }
+        for bad in ["../../zz-escape", "..", ".", ".hidden", "a/b", "", String(repeating: "a", count: 61)] { #expect(!apUnitDirOK(bad), "\(bad)") }
+    }
+
     @Test("지문 견주기: 접은 경로, 바뀜·더함·뺌, 세트 기준 없으면 그대로")
     func 견주기() {
         let a = [APHarnessFileMark(path: "CLAUDE.md", digest: "1", size: 3), APHarnessFileMark(path: ".claude/rules/a.md", digest: "2", size: 3), APHarnessFileMark(path: "x.md", digest: "9", size: 1)]
