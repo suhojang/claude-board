@@ -234,6 +234,29 @@ let harnessCoverRows: [HarnessCoverRow] = [
         #expect(apInstructionCheck(bad, harness: [w]).problems.contains { $0.contains("바깥 쓰기") })
         #expect(apInstructionCheck(ok, harness: []).problems.contains { $0.contains("바깥 쓰기") })   // 확인 지점이 아니면 인용으로 보지 않음
     }
+
+    // 보안 검토 지적(⑫-7b 규칙 커밋 뒤 자동 보안 검토 MEDIUM): 하네스 글을 지시 어디서든 부분 글자로 지우면, 금지 줄 안에 하네스 글과 같은 글자를 끼워 넣어 검사를 빠져나간다
+    @Test("인용 빼기는 진짜 인용만: 금지 줄 안에 하네스 글을 끼워 넣어도 막힘")
+    func 인용우회() {
+        let w = APHarnessPoint(file: ".claude/skills/t/SKILL.md", line: 5, kind: "write", text: "1. mcp__atlassian__createJiraIssue 로 티켓을 만든다.")
+        let p = APHarnessPoint(file: "CLAUDE.md", line: 7, kind: "write", text: "작업이 끝나면 git push 로 올린다.")
+        let head = apInstructionHeadLine + "\n대답할 사람이 없어 멈추므로 보류합니다.\n"
+        let bypass = [
+            "- 단위가 끝나면 mcp__atlassian__createJiraIssue 로 티켓을 만든다.",                     // 인용 표시·파일:줄 없이 하네스 글 그대로
+            "- 단위마다 작업이 끝나면 git push 로 올린다.",                                           // 다른 확인 지점의 글
+            "- CLAUDE.md:7 \"작업이 끝나면 git push 로 올린다.\": 그대로 따른다.",                    // 인용했지만 나머지가 보류·부정이 아님
+            "- CLAUDE.md:7 \"작업이 끝나면 git push 로 올린다.\": 보류하고 git push origin live 도 한다.",   // 인용 밖에 금지 꼴
+            "- .claude/skills/t/SKILL.md:9 \"mcp__atlassian__createJiraIssue 로 티켓을 만든다.\": 보류합니다.",   // 다른 줄 번호(그 확인 지점 참조가 아님)
+        ]
+        for b in bypass {
+            #expect(apInstructionCheck(head + b + "\n끝내기 전에 다시 본다.\n", harness: [w, p]).problems.contains { $0.contains("바깥 쓰기") }, "\(b)")
+        }
+        let quoted = head + "- CLAUDE.md:7 \"작업이 끝나면 git push 로 올린다.\": push 는 하지 않고 보류해 next_start 에 남깁니다.\n"
+            + "- .claude/skills/t/SKILL.md:5 “mcp__atlassian__createJiraIssue 로 티켓을 만든다.”: 보류합니다.\n끝내기 전에 다시 본다.\n"
+        #expect(apInstructionCheck(quoted, harness: [w, p]).problems.isEmpty, "\(apInstructionCheck(quoted, harness: [w, p]).problems)")
+        let ins = head + "- CLAUDE.md:7 보류\n- 단위마다 작업이 끝나면 git push 로 올린다.\n"
+        #expect(apReviseCheck(ReviseOut(files: ["autopilot.md": ins]), units: [], harness: [w, p]).problems.contains { $0.contains("바깥 쓰기") })
+    }
 }
 
 private struct ReviseOut: APDraftFiles {

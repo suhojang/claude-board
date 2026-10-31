@@ -193,6 +193,39 @@ public func apHarnessMissing(_ points: [APHarnessPoint], instruction: String) ->
     points.filter { !covers(instruction, file: $0.file, line: $0.line) }
 }
 
+// 지시 글의 금지 줄(바깥 쓰기·하네스 고치기·push 를 시키는 줄) — 쓰는 법 ②("확인 지점마다 파일:줄, 원래 글")대로 하네스 줄을 인용한 줄만 뺀다(7단계 ⑫-7b).
+// 하네스가 바깥 쓰기·push 를 시키는 줄을 지시가 인용하면 그 원래 글 때문에 지시가 막히던 것. 뺄 수 있는 줄은 진짜 인용뿐이다(⑫-7b 자동 보안 검토 MEDIUM:
+// 처음 판은 하네스 글을 지시 어디서든 부분 글자로 지워, 금지 줄 안에 하네스 글을 끼워 넣으면 검사를 빠져나갔다):
+//   그 줄에 그 확인 지점의 파일:줄 참조가 있고, 그 확인 지점 글(목록 머리를 뗀 꼴도)이 따옴표 안에 그대로 있고, 따옴표 뒤가 보류·부정이고,
+//   그 인용 한 번을 뺀 나머지 줄에 금지 꼴이 없을 때만. 그 밖의 줄은 apForbiddenLines 그대로
+private let listHead = try! NSRegularExpression(pattern: "^([-*+]|[0-9]+[.)])\\s+", options: [])
+private let quotePairs: [(String, String)] = [("\"", "\""), ("“", "”"), ("「", "」"), ("『", "』"), ("'", "'"), ("‘", "’")]
+private let deferAfter = try! NSRegularExpression(pattern: "않|말고|보류|금지|멈추|멈춘|next_start|건너뛰|빼고|뺀다|하지 마", options: [.caseInsensitive])
+private func quotedHarnessLine(_ line: String, harness: [APHarnessPoint]) -> Bool {
+    for p in harness where covers(line, file: p.file, line: p.line) {
+        var texts = [p.text]
+        let ns = p.text as NSString
+        if let m = listHead.firstMatch(in: p.text, range: NSRange(location: 0, length: ns.length)) {
+            texts.append(ns.substring(from: m.range.length).trimmingCharacters(in: .whitespaces))
+        }
+        for q in texts where q.count >= 6 {
+            for (o, c) in quotePairs {
+                guard let r = line.range(of: o + q + c) else { continue }
+                let after = String(line[r.upperBound...])
+                let rest = String(line[..<r.lowerBound]) + "…" + after
+                if apForbiddenLines(rest).isEmpty, hits(deferAfter, after) { return true }
+            }
+        }
+    }
+    return false
+}
+public func apInstructionForbiddenLines(_ t: String, harness: [APHarnessPoint]) -> [String] {
+    t.components(separatedBy: "\n").flatMap { line -> [String] in
+        let bad = apForbiddenLines(line)
+        return bad.isEmpty || quotedHarnessLine(line, harness: harness) ? [] : bad
+    }
+}
+
 // 빠진 확인 지점의 출발 카드(막지 않고 묻는다, 2026-10-21 저녁 사용자 결정). 추천은 보류해 다음 출발로
 public let apHarnessCardPrefix = "harness-"
 public func apHarnessCard(_ p: APHarnessPoint) -> APCardText {

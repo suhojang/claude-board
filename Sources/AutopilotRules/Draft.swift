@@ -390,28 +390,10 @@ public func apInstructionCheck(_ t: String, harness: [APHarnessPoint]) -> (instr
     if apRedact(t).count > 0 { problems.append("자율주행 지시(autopilot.md)에 비밀 꼴(토큰·키 등)이 있습니다") }
     let first = t.components(separatedBy: "\n").map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "# ").union(.whitespaces)) }.first { !$0.isEmpty } ?? ""
     if !first.hasPrefix(apInstructionHeadLine) { problems.append("자율주행 지시의 첫 줄이 \"\(apInstructionHeadLine)\" 가 아닙니다") }
-    for l in apForbiddenLines(apWithoutHarnessQuotes(t, harness: harness)) { problems.append("자율주행 지시에 바깥 쓰기·하네스 고치기·push 를 시키는 줄이 있습니다: \(l)") }
+    for l in apInstructionForbiddenLines(t, harness: harness) { problems.append("자율주행 지시에 바깥 쓰기·하네스 고치기·push 를 시키는 줄이 있습니다: \(l)") }
     let missing = apHarnessMissing(harness, instruction: t)
     if !missing.isEmpty { warnings.append("하네스 확인 지점 \(missing.count)곳을 지시가 다루지 않아 출발 카드로 묻습니다") }
     return (instruction, problems, missing, warnings)
-}
-
-// 쓰는 법 ②("확인 지점마다 파일:줄, 원래 글")대로 하네스 줄을 그대로 옮겨 적은 자리는 금지 줄 검사에서 뺀다(7단계 ⑫-7b): 하네스가 바깥 쓰기·push 를
-// 시키는 줄을 지시가 인용하면 그 원래 글 때문에 지시가 막히던 것. 확인 지점 글(목록 머리 "- "·"1." 를 뗀 꼴도)과 같은 글자만 지우고 나머지 글은 그대로 본다
-private let listHead = try! NSRegularExpression(pattern: "^([-*+]|[0-9]+[.)])\\s+", options: [])
-public func apWithoutHarnessQuotes(_ t: String, harness: [APHarnessPoint]) -> String {
-    var out = t
-    var quotes = Set<String>()
-    for p in harness where p.text.count >= 6 {
-        quotes.insert(p.text)
-        let ns = p.text as NSString
-        if let m = listHead.firstMatch(in: p.text, range: NSRange(location: 0, length: ns.length)) {
-            let bare = ns.substring(from: m.range.length).trimmingCharacters(in: .whitespaces)
-            if bare.count >= 6 { quotes.insert(bare) }
-        }
-    }
-    for q in quotes.sorted(by: { $0.count > $1.count }) { out = out.replacingOccurrences(of: q, with: "…") }
-    return out
 }
 
 // 결과 폴더의 기계 검사(설계 2장 "기계 검사", ⑪-2). 못 지나면 problems(준비 줄 실패와 까닭), 막지 않는 것은 warnings,
