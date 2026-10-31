@@ -3,7 +3,7 @@
 //   명세 spec.md(요구사항과 Given/When/Then 수용 기준) · 단위 목록 units.json(대기열 꼴) · 판정 시나리오 scenarios/<단위 id>/<파일> ·
 //   출발 카드 초안 cards.json(객관식) · 자율주행 지시 초안 autopilot.md
 // 여기는 그 순수 규칙이다: 세션에 줄 글(쓰는 법·입력·결과 꼴), claude 인자와 세션 설정(읽기 도구만, Bash·웹·MCP 없음, 쓰기는 결과 자리만),
-// 결과의 기계 검사(칸·상한·HTML 없음·비밀 꼴 없음·수용 기준마다 시나리오나 카드·하네스 확인 지점을 지시가 모두 다룸), 하네스 확인 지점 찾기,
+// 결과의 기계 검사(칸·상한·HTML 없음·비밀 꼴 없음·수용 기준마다 시나리오나 카드·하네스 확인 지점을 지시가 모두 다룸. 확인 지점 찾기는 Harness.swift),
 // 준비를 버리거나 다시 할 때 남는 drafts/ 정리 판단. 프로세스·파일은 엔진(진짜 어댑터)이, 가짜 어댑터는 Tests/AutopilotRulesTests 에만 둔다.
 // 사람이 읽는 글(준비 화면·모델에게 넘기는 글)에는 긴 줄표를 쓰지 않는다
 import Foundation
@@ -390,10 +390,28 @@ public func apInstructionCheck(_ t: String, harness: [APHarnessPoint]) -> (instr
     if apRedact(t).count > 0 { problems.append("자율주행 지시(autopilot.md)에 비밀 꼴(토큰·키 등)이 있습니다") }
     let first = t.components(separatedBy: "\n").map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "# ").union(.whitespaces)) }.first { !$0.isEmpty } ?? ""
     if !first.hasPrefix(apInstructionHeadLine) { problems.append("자율주행 지시의 첫 줄이 \"\(apInstructionHeadLine)\" 가 아닙니다") }
-    for l in apForbiddenLines(t) { problems.append("자율주행 지시에 바깥 쓰기·하네스 고치기·push 를 시키는 줄이 있습니다: \(l)") }
+    for l in apForbiddenLines(apWithoutHarnessQuotes(t, harness: harness)) { problems.append("자율주행 지시에 바깥 쓰기·하네스 고치기·push 를 시키는 줄이 있습니다: \(l)") }
     let missing = apHarnessMissing(harness, instruction: t)
     if !missing.isEmpty { warnings.append("하네스 확인 지점 \(missing.count)곳을 지시가 다루지 않아 출발 카드로 묻습니다") }
     return (instruction, problems, missing, warnings)
+}
+
+// 쓰는 법 ②("확인 지점마다 파일:줄, 원래 글")대로 하네스 줄을 그대로 옮겨 적은 자리는 금지 줄 검사에서 뺀다(7단계 ⑫-7b): 하네스가 바깥 쓰기·push 를
+// 시키는 줄을 지시가 인용하면 그 원래 글 때문에 지시가 막히던 것. 확인 지점 글(목록 머리 "- "·"1." 를 뗀 꼴도)과 같은 글자만 지우고 나머지 글은 그대로 본다
+private let listHead = try! NSRegularExpression(pattern: "^([-*+]|[0-9]+[.)])\\s+", options: [])
+public func apWithoutHarnessQuotes(_ t: String, harness: [APHarnessPoint]) -> String {
+    var out = t
+    var quotes = Set<String>()
+    for p in harness where p.text.count >= 6 {
+        quotes.insert(p.text)
+        let ns = p.text as NSString
+        if let m = listHead.firstMatch(in: p.text, range: NSRange(location: 0, length: ns.length)) {
+            let bare = ns.substring(from: m.range.length).trimmingCharacters(in: .whitespaces)
+            if bare.count >= 6 { quotes.insert(bare) }
+        }
+    }
+    for q in quotes.sorted(by: { $0.count > $1.count }) { out = out.replacingOccurrences(of: q, with: "…") }
+    return out
 }
 
 // 결과 폴더의 기계 검사(설계 2장 "기계 검사", ⑪-2). 못 지나면 problems(준비 줄 실패와 까닭), 막지 않는 것은 warnings,

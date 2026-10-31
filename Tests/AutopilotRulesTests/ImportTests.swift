@@ -307,7 +307,7 @@ private let importRows: [ImportCheckRow] = [
     .init(note: "넘기지 않은 항목 id", change: ["units.json": goodImportUnits.replacingOccurrences(of: "\"item\":\"i1\"", with: "\"item\":\"i9\"")], problem: "단위 1 의 item(i9)은 넘긴 항목 id 가 아닙니다"),
     .init(note: "판정 명령 없음", change: ["units.json": goodImportUnits.replacingOccurrences(of: "\"check\":\"grep -q 가 app.txt\",", with: "")], problem: "단위 1 에 판정이 없습니다"),
     .init(note: "수용 기준 칸은 받지 않음", change: ["units.json": goodImportUnits.replacingOccurrences(of: "\"why\":\"근거 1-todo 의 본문\"", with: "\"criteria\":[{\"id\":\"AC-1\",\"text\":\"x\"}]")], problem: "단위 1 에 형식 밖 칸 criteria 가 있습니다"),
-    .init(note: "시나리오 칸은 받지 않음", change: ["units.json": goodImportUnits.replacingOccurrences(of: "\"why\":\"근거 1-todo 의 본문\"", with: "\"scenarios\":[]")], problem: "단위 1 에 형식 밖 칸 scenarios 가 있습니다"),
+    .init(note: "시나리오 칸은 받음(⑫-7b), 파일이 없으면 걸림", change: ["units.json": goodImportUnits.replacingOccurrences(of: "\"why\":\"근거 1-todo 의 본문\"", with: "\"scenarios\":[{\"file\":\"a.sh\",\"kind\":\"shell\"}]")], problem: "단위 1 의 시나리오 파일 scenarios/u1/a.sh 가 없습니다"),
     .init(note: "샌드박스 밖 칸(precheck)", change: ["units.json": goodImportUnits.replacingOccurrences(of: "\"why\":\"근거 1-todo 의 본문\"", with: "\"precheck\":\"touch /tmp/x\"")], problem: "단위 1 의 precheck 는 가져오기 세션이 쓸 수 없는 칸입니다"),
     .init(note: "티켓·스토리는 모델이 쓰지 않음", change: ["units.json": goodImportUnits.replacingOccurrences(of: "\"why\":\"근거 1-todo 의 본문\"", with: "\"tickets\":[\"TOY-1\"]")], problem: "단위 1 의 tickets 는 가져오기 세션이 쓸 수 없는 칸입니다"),
     .init(note: "push 를 시키는 할 일", change: ["units.json": goodImportUnits.replacingOccurrences(of: "가를 한다", with: "가를 하고 git push origin live 한다")], problem: "단위 1 할 일에 다른 가지 맞추기·push·바깥 쓰기를 시키는 줄이 있습니다"),

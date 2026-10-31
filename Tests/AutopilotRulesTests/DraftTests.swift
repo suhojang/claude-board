@@ -150,19 +150,20 @@ private let checkRows: [DraftCheckRow] = [
 }
 
 @Suite("자율주행 주제로 시작: 하네스 확인 지점") struct HarnessPointTests {
-    @Test("확인 지점 찾기: 하네스 파일만, 줄마다 한 종류, 대기열 같은 낱말은 지남")
+    @Test("확인 지점 찾기: 하네스 파일만, 줄마다 한 종류, 대기열 같은 낱말은 지남(⑫-7b 일반판: 깊이 4 까지, 빌드 기다리기는 지나침)")
     func 찾기() {
         let files: [(path: String, text: String)] = [
             ("CLAUDE.md", "# 규칙\n작업 전에 사람에게 묻고 진행한다\n배포는 승인 뒤에\n대기열 파일을 읽는다\nPR 은 미리보기로 보여 준다"),
             (".claude/skills/deploy/SKILL.md", "AskUserQuestion 으로 고른다\n빌드가 끝날 때까지 기다린다"),
             (".claude/rules/jira.md", "createJiraIssue 로 티켓을 만든다\n확인받고 머지"),
             ("src/README.md", "묻는다"),            // 하네스 파일이 아님
-            ("a/b/c/d/CLAUDE.md", "묻는다"),        // 깊이 4 는 보지 않음
+            ("a/b/c/d/CLAUDE.md", "묻는다"),        // 깊이 4 까지는 본다(엔진 하네스 지문과 같은 자리, ⑫-7b)
+            ("a/b/c/d/e/CLAUDE.md", "묻는다"),      // 깊이 5 는 보지 않음
         ]
         let p = apHarnessPoints(files)
-        #expect(p.map(\.place) == [".claude/rules/jira.md:1", ".claude/rules/jira.md:2", ".claude/skills/deploy/SKILL.md:1", ".claude/skills/deploy/SKILL.md:2",
-                                   "CLAUDE.md:2", "CLAUDE.md:3", "CLAUDE.md:5"])
-        #expect(p.map(\.kind) == ["write", "confirm", "ask", "wait", "ask", "approve", "preview"])
+        #expect(p.map(\.place) == [".claude/rules/jira.md:1", ".claude/rules/jira.md:2", ".claude/skills/deploy/SKILL.md:1",
+                                   "a/b/c/d/CLAUDE.md:1", "CLAUDE.md:2", "CLAUDE.md:3", "CLAUDE.md:5"])
+        #expect(p.map(\.kind) == ["write", "confirm", "ask", "ask", "ask", "approve", "preview"])
         #expect(apHarnessMissing(p, instruction: "CLAUDE.md:2 와 CLAUDE.md:3 은 보류").count == 5)
         #expect(apHarnessCardId(p[2]) == "harness--claude-skills-deploy-SKILL-md-1")
         #expect(apHarnessCard(p[0]).recommended == "defer")

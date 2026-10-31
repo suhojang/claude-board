@@ -167,6 +167,12 @@ public protocol APHarnessSource {
     func walk(_ visit: (String) -> APWalkStep)
     /// 보통 파일이고 max 바이트 안일 때만 글(아니면 nil)
     func read(_ relative: String, max: Int) -> Data?
+    /// 지문까지 볼 때(⑫-7b): 보통 파일이고 상한 안이면 글, 아니면 종류(link:<대상>·fifo·large:<크기> 등), 없으면 nil.
+    /// 진짜 어댑터는 lstat·O_NOFOLLOW 로 연다. 기본 구현은 read 를 감싼다(종류를 모름)
+    func readFile(_ relative: String, max: Int) -> APHarnessFileRead?
+}
+extension APHarnessSource {
+    public func readFile(_ relative: String, max: Int) -> APHarnessFileRead? { read(relative, max: max).map { .data($0) } }
 }
 
 // 초안 세션 결과 폴더 — 규칙이 고른 상대 경로만 읽는다(링크·폴더가 아닌 보통 파일, 크기 상한 아래일 때만. 어댑터 몫)

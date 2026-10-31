@@ -743,8 +743,10 @@ public func apImportPrompt(_ x: APImportInput) -> String {
     결과 파일(결과 폴더 안, 이름 그대로)
     1) units.json: 단위 목록(JSON 배열, \(apImportUnitMax)개까지). 단위 하나는 항목 하나에서 나온 2시간 안에 끝날 일 하나입니다. 큰 항목은 여러 단위로 쪼개고(같은 item, 앞뒤는 depends), 항목 여럿을 한 단위로 묶지 않습니다.
        {"id":"u1","item":"i1","title":"쉬운 말 제목","kind":"dev|fix|test|docs|setup","folder":"저장소 안 작업 폴더(뿌리면 빈 글자)","prompt":"이 단위에서 할 일(8,000자까지)",
-        "check":"판정 명령(필수, 저장소 뿌리에서 돌림, 끝나면 0)","est_min":예상 분(1~120),"depends":["앞선 단위 id"],"why":"근거 한 줄(어느 근거 파일·어느 줄)","check_ports":[판정이 스스로 띄우는 서버 포트]}
-       판정 명령은 결과의 뜻을 봅니다(파일이 있는지·글자 수만 보지 않습니다). 바깥 주소로 요청하지 않습니다. 판정 시나리오 파일은 쓰지 않습니다(이 원천은 판정 명령만 받습니다).
+        "check":"판정 명령(저장소 뿌리에서 돌림, 끝나면 0)","est_min":예상 분(1~120),"depends":["앞선 단위 id"],"why":"근거 한 줄(어느 근거 파일·어느 줄)","check_ports":[판정이 스스로 띄우는 서버 포트],
+        "scenarios":[{"file":"파일 이름","kind":"shell|browser"}]}
+       판정은 판정 명령(check)이나 판정 시나리오 가운데 하나 이상이 있어야 하고, 결과의 뜻을 봅니다(파일이 있는지·글자 수만 보지 않습니다). 바깥 주소로 요청하지 않습니다.
+       판정 시나리오 실행 파일이 맞는 항목은 결과 폴더 scenarios/<단위 id>/<파일> 로 쓰고 그 단위의 scenarios 칸에 적습니다(첫 줄 #!, 저장소 뿌리에서 돌고 맞으면 종료 코드 0, 지금 저장소에서는 아직 실패해야 맞음). 보드가 출발 전 자율주행 가지에 커밋합니다.
     2) cards.json: 출발 카드 초안(JSON 배열, \(apImportCardMax)개까지). {"id":"c1","title":"물음","why":"까닭","options":[{"key":"a","label":"고를 것"}],"recommended":"a","units":["u1"],"item":"i3"}
        선택지는 2~5개이고 추천을 하나 고릅니다. 사람 몫(되돌리기 어려운 바깥 반영·보안과 책임·운영 값·자율주행 자신의 규칙·사람이 손댄 영역)만 남은 항목은 단위 없이 카드로만 두고 item 을 적습니다.
     3) skipped.json: 단위도 카드도 만들지 않은 항목(JSON 배열). {"item":"i4","why":"까닭(예: 이미 저장소에 있음, 할 일이 아님)"}
@@ -753,8 +755,9 @@ public func apImportPrompt(_ x: APImportInput) -> String {
     """
 }
 
-// 가져오기 세션이 쓰는 단위 칸(허용 목록) — 초안 단위 칸에서 수용 기준·시나리오를 빼고 항목(item)·근거(why)를 더한다(⑫-7a 설계 판단: 이 원천은 판정 명령만)
-public let apImportUnitKeys: Set<String> = apDraftUnitKeys.subtracting(["criteria", "scenarios"]).union(["item", "why"])
+// 가져오기 세션이 쓰는 단위 칸(허용 목록) — 초안 단위 칸에서 수용 기준을 빼고 항목(item)·근거(why)를 더한다. 판정 시나리오는 7단계 ⑫-7b 에서 받는다
+// (⑫-7a 는 판정 명령만: 시나리오는 출발 전 자율주행 가지가 있어야 해서. ⑫-7b 에서 엔진 seed 를 가져오기에도 열었다)
+public let apImportUnitKeys: Set<String> = apDraftUnitKeys.subtracting(["criteria"]).union(["item", "why"])
 
 public struct APImportedUnit: Equatable, Sendable {
     public var unit: APDraftedUnit
@@ -804,7 +807,7 @@ public func apImportCheck(files: APDraftFiles, items: [APImportPromptItem], stor
             if why.count > 300 { r.problems.append("단위 \(n) 의 근거(why)가 300자보다 깁니다") }
             if apHasTag(why) { r.problems.append("단위 \(n) 근거 에 HTML 태그가 있습니다") }
             if apRedact(why).count > 0 { r.problems.append("단위 \(n) 근거 에 비밀 꼴(토큰·키 등)이 있습니다") }
-            if u.check.trimmingCharacters(in: .whitespaces).isEmpty { r.problems.append("단위 \(n) 에 판정 명령(check)이 없습니다") }
+            if u.check.trimmingCharacters(in: .whitespaces).isEmpty, u.scenarios.isEmpty { r.problems.append("단위 \(n) 에 판정 명령(check)도 판정 시나리오도 없습니다") }
             unitIds.append(u.id)
             r.units.append(APImportedUnit(unit: u, item: item, why: why))
         }
@@ -874,12 +877,23 @@ public func apImportCheck(files: APDraftFiles, items: [APImportPromptItem], stor
 
 // 가져온 단위 하나 → 대기열 정의. 작업 폴더는 저장소 뿌리(하위 폴더는 할 일 글 첫 줄로), 원천 항목 키는 그 항목 키(쪼갰으면 #조각),
 // Jira 항목은 tickets 그대로(하위 작업이면 story), 근거 묶음은 context, 원천 지문(source_digest)은 기록 저장소가 다음 가져오기에서 바뀐 본문을 보려고
-public func apImportQueueUnit(_ u: APImportedUnit, item it: APImportItem, repo: String, context: String?) -> [String: Any] {
+// 판정 시나리오(⑫-7b)는 저장소 자리 .autopilot/scenarios/<준비 id>/<단위 id>/<파일>(앞 실행의 같은 단위 id 폴더와 겹치지 않게 준비 id 아래)
+public func apImportScenarioPath(prep: String, unit: String, file: String) -> String { "\(apScenarioRoot)/\(prep)/\(unit)/\(file)" }
+public func apImportQueueUnit(_ u: APImportedUnit, item it: APImportItem, repo: String, context: String?, prep: String = "") -> [String: Any] {
     var prompt = u.unit.prompt
     if !u.unit.folder.isEmpty { prompt = "작업 폴더: \(u.unit.folder)/ (저장소 뿌리 기준)\n\n" + prompt }
     prompt += "\n\n원천: \(it.place)" + (u.why.isEmpty ? "" : " · 근거: \(u.why)")
     var d: [String: Any] = ["id": u.unit.id, "title": u.unit.title, "kind": u.unit.kind, "prompt": prompt, "cwd": repo, "est_min": u.unit.estMin,
                             "check": u.unit.check, "source_key": u.piece.map { "\(it.key)#\($0)" } ?? it.key, "source_digest": it.digest]
+    if u.unit.check.isEmpty { d.removeValue(forKey: "check") }
+    if !u.unit.scenarios.isEmpty, !prep.isEmpty {
+        d["scenarios"] = u.unit.scenarios.map { s -> [String: Any] in
+            var o = apScenarioJSON(APScenario(file: apImportScenarioPath(prep: prep, unit: u.unit.id, file: s.file), kind: s.kind, criterion: nil))
+            o.removeValue(forKey: "driver")
+            if s.kind == .browser { o["driver"] = APBrowserDriver.chrome.rawValue }
+            return o
+        }
+    }
     if !u.unit.depends.isEmpty { d["depends"] = u.unit.depends }
     if !u.unit.checkPorts.isEmpty { d["check_ports"] = u.unit.checkPorts }
     if !it.tickets.isEmpty { d["tickets"] = it.tickets }
@@ -890,11 +904,11 @@ public func apImportQueueUnit(_ u: APImportedUnit, item it: APImportItem, repo: 
 
 // 이어 갈 줄의 정의(기록 저장소 queue_items.def) → 이번 대기열 정의. id 는 새로(c1·c2…), 앞뒤는 지우고(앞 실행의 id), 근거 묶음은 이번 것,
 // 지문은 이번 항목 것으로(출발하면 줄의 지문이 새것이 되어 같은 차이를 다시 보이지 않는다). 받는 칸은 대기열 단위 칸 가운데 판정·범위를 넓히지 않는 것만
-public let apCarryDefKeys: Set<String> = ["title", "kind", "prompt", "check", "cwd", "est_min", "source_key", "tickets", "story", "check_ports", "caps", "check_timeout_min"]
+public let apCarryDefKeys: Set<String> = ["title", "kind", "prompt", "check", "cwd", "est_min", "source_key", "tickets", "story", "check_ports", "caps", "check_timeout_min", "scenarios"]
 public func apCarryQueueUnit(def: [String: Any], id: String, item it: APImportItem, context: String?) -> [String: Any]? {
     var d = def.filter { apCarryDefKeys.contains($0.key) }
     guard let key = d["source_key"] as? String, apKeyFamily(it.key, key), d["title"] is String, d["prompt"] is String, d["cwd"] is String,
-          (d["check"] as? String ?? "").isEmpty == false else { return nil }
+          (d["check"] as? String ?? "").isEmpty == false || (d["scenarios"] as? [Any])?.isEmpty == false else { return nil }
     d["id"] = id
     d["source_digest"] = it.digest
     if let context { d["context"] = context } else { d.removeValue(forKey: "context") }
