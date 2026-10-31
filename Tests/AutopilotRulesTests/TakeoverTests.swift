@@ -243,7 +243,7 @@ private func marked(_ w: FakeTakeoverWorld) -> APTakeoverMark {
         let w = world(); let m = marked(w)
         w.scenariosNow[repo + "/.autopilot/scenarios/u1/file.sh"] = "s1-weak"
         let g = apGivebackCheck(mark: m, accepted: [], world: w)
-        #expect(g.cards.map(\.kind) == ["scenarios"] && g.directive.scenarios == [repo + "/.autopilot/scenarios/u1/file.sh"])
+        #expect(g.cards.map(\.kind) == ["scenarios"] && g.directive.scenarios == [".autopilot/scenarios/u1/file.sh"])   // 작업 폴더 안 자리로
         #expect(g.cards[0].why.contains("고정본"))
     }
 

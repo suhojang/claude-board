@@ -274,7 +274,10 @@ public func apGivebackCheck(mark: APTakeoverMark, accepted: Set<String>, world: 
     if d.files.count > apTakeoverFileMax { d.filesMore = d.files.count - apTakeoverFileMax; d.files = Array(d.files.prefix(apTakeoverFileMax)) }
     let hNow = world.harness(), sNow = world.scenarios()
     d.harness = apChangedKeys(mark.harness, hNow).compactMap { apTakeoverPath($0) ?? apTakeoverClean($0, max: 300) }
-    d.scenarios = apChangedKeys(mark.scenarios, sNow).map { apTakeoverClean($0, max: 300) }
+    // 시나리오 원본은 작업 폴더 안 자리로 보인다(카드 id 는 절대 경로 열쇠로)
+    d.scenarios = apChangedKeys(mark.scenarios, sNow).map { k in
+        apTakeoverClean(k.hasPrefix(mark.cwd + "/") ? String(k.dropFirst(mark.cwd.count + 1)) : k, max: 300)
+    }
     let keep = APGivebackOption(key: "keep", label: "그대로 돌려주기", note: "바뀐 채로 자율주행이 잇습니다")
     let wait = APGivebackOption(key: "wait", label: "돌려주지 않고 기다림", note: "사람이 되돌리거나 고친 뒤 다시 돌려줍니다")
     if !d.harness.isEmpty {
