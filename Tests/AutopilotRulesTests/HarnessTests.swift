@@ -258,7 +258,8 @@ let harnessCoverRows: [HarnessCoverRow] = [
             "- .claude/skills/t/SKILL.md:9 \"mcp__atlassian__createJiraIssue 로 티켓을 만든다.\": 보류합니다.",   // 다른 줄 번호(그 확인 지점 참조가 아님)
         ]
         for b in bypass {
-            #expect(apInstructionCheck(head + b + "\n끝내기 전에 다시 본다.\n", harness: [w, p]).problems.contains { $0.contains("바깥 쓰기") }, "\(b)")
+            let c = apInstructionCheck(head + b + "\n끝내기 전에 다시 본다.\n", harness: [w, p])
+            #expect(!c.instruction.contains(b.trimmingCharacters(in: .whitespaces)) && (c.problems.contains { $0.contains("바깥 쓰기") } || c.warnings.contains { $0.contains("지시에서 빼고") }), "\(b)")
         }
         let quoted = head + "- CLAUDE.md:7 \"작업이 끝나면 git push 로 올린다.\": 보류해 next_start 에 남깁니다.\n"
             + "- .claude/skills/t/SKILL.md:5 “mcp__atlassian__createJiraIssue 로 티켓을 만든다.”: 보류합니다.\n끝내기 전에 다시 본다.\n"
@@ -277,9 +278,14 @@ let harnessCoverRows: [HarnessCoverRow] = [
             "- update-ref;CLAUDE.md:7 \"작업이 끝나면 git push 로 올린다.\": 보류합니다.",
             "- createJiraIssue/CLAUDE.md:7 \"작업이 끝나면 git push 로 올린다.\": 보류합니다.",
         ]
-        for b in more + more2 {
-            #expect(apInstructionCheck(head + b + "\n끝내기 전에 다시 본다.\n", harness: [w, p]).problems.contains { $0.contains("바깥 쓰기") }, "\(b)")
+        for b in more + more2 {   // 확인 지점을 가리키는 줄은 지시에서 빠지고(그 지점은 카드), 가리키지 않는 줄은 막힌다 — 어느 쪽이든 지시에 남지 않는다
+            let c = apInstructionCheck(head + b + "\n끝내기 전에 다시 본다.\n", harness: [w, p])
+            #expect(!c.instruction.contains(b.trimmingCharacters(in: .whitespaces)) && (c.problems.contains { $0.contains("바깥 쓰기") } || c.warnings.contains { $0.contains("지시에서 빼고") }), "\(b)")
         }
+        // 하네스 고치기 꼴에 걸리는 인용(확인 지점 줄)은 막지 않고 빼서 카드로, 확인 지점과 상관없는 금지 줄은 막음
+        let edit = APHarnessPoint(file: "a/b/c/d/CLAUDE.md", line: 2, kind: "confirm", text: "여기 파일을 지우기 전에는 확인을 받는다.")
+        let ec = apInstructionCheck(head + "- a/b/c/d/CLAUDE.md:2 \"여기 파일을 지우기 전에는 확인을 받는다.\": 그 폴더 파일은 그대로 둡니다.\n", harness: [edit])
+        #expect(ec.problems.isEmpty && ec.missing.map(\.place) == ["a/b/c/d/CLAUDE.md:2"] && !ec.instruction.contains("a/b/c/d") && ec.warnings.contains { $0.contains("지시에서 빼고") })
         let ins = head + "- CLAUDE.md:7 보류\n- 단위마다 작업이 끝나면 git push 로 올린다.\n"
         #expect(apReviseCheck(ReviseOut(files: ["autopilot.md": ins]), units: [], harness: [w, p]).problems.contains { $0.contains("바깥 쓰기") })
     }

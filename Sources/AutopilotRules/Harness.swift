@@ -231,11 +231,21 @@ private func quotedHarnessLine(_ line: String, harness: [APHarnessPoint]) -> Boo
     }
     return false
 }
-public func apInstructionForbiddenLines(_ t: String, harness: [APHarnessPoint]) -> [String] {
-    t.components(separatedBy: "\n").flatMap { line -> [String] in
+public func apInstructionForbiddenLines(_ t: String, harness: [APHarnessPoint]) -> [String] { apInstructionClean(t, harness: harness).forbidden }
+
+// 지시 글 다듬기(7단계 ⑫-7b): 금지 꼴이 든 줄 가운데 확인 지점(파일:줄)을 가리키는 줄은 지시에서 빼고(그 지점은 다루지 않은 자리가 되어 출발 카드로 묻는다),
+// 확인 지점을 가리키지 않는 금지 줄은 forbidden 으로 돌려준다(준비를 멈춤). 정한 꼴의 인용 줄은 그대로 둔다.
+// 하네스 원래 글을 옮겨 적으면 그 글의 낱말(예: "CLAUDE.md:12 \"스키마를 수정할 때는…\"" 의 수정)이 하네스 고치기 꼴에 걸리기 쉬워, 그 줄로 준비가 멈추지 않게 한다.
+// 뺀 줄은 지시에 남지 않으므로 세션에 닿지 않는다(검사를 빠져나가는 길이 아니다)
+public func apInstructionClean(_ t: String, harness: [APHarnessPoint]) -> (text: String, dropped: [String], forbidden: [String]) {
+    var keep: [String] = [], dropped: [String] = [], forbidden: [String] = []
+    for line in t.components(separatedBy: "\n") {
         let bad = apForbiddenLines(line)
-        return bad.isEmpty || quotedHarnessLine(line, harness: harness) ? [] : bad
+        if bad.isEmpty || quotedHarnessLine(line, harness: harness) { keep.append(line); continue }
+        if harness.contains(where: { covers(line, file: $0.file, line: $0.line) }) { dropped.append(String(line.trimmingCharacters(in: .whitespaces).prefix(160))) }
+        else { forbidden += bad }
     }
+    return (keep.joined(separator: "\n"), dropped, forbidden)
 }
 
 // 빠진 확인 지점의 출발 카드(막지 않고 묻는다, 2026-10-21 저녁 사용자 결정). 추천은 보류해 다음 출발로

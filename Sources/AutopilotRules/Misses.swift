@@ -323,8 +323,13 @@ public func apReviseCheck(_ files: APDraftFiles, units: [APReviseUnit], original
         else if apHasTag(t) { r.problems.append("고친 지시에 HTML 태그가 있습니다") }
         else if apRedact(t).count > 0 { r.problems.append("고친 지시에 비밀 꼴이 있습니다") }
         else if !first.hasPrefix(apInstructionHeadLine) { r.problems.append("고친 지시의 첫 줄이 \"\(apInstructionHeadLine)\" 가 아닙니다") }
-        else if let l = apInstructionForbiddenLines(t, harness: harness).first { r.problems.append("고친 지시에 바깥 쓰기·하네스 고치기·push 를 시키는 줄이 있습니다: \(l)") }
-        else if !t.isEmpty { r.instruction = t; instructionText = t }
+        else if let l = apInstructionClean(t, harness: harness).forbidden.first { r.problems.append("고친 지시에 바깥 쓰기·하네스 고치기·push 를 시키는 줄이 있습니다: \(l)") }
+        else if !t.isEmpty {
+            let c = apInstructionClean(t, harness: harness)
+            for l in c.dropped { r.warnings.append("고친 지시의 이 줄은 바깥 쓰기·하네스 고치기·push 꼴이 섞여 빼고 그 확인 지점은 출발 카드로 묻습니다: \(l)") }
+            let tt = c.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            r.instruction = tt; instructionText = tt
+        }
     }
     // 시나리오: 넣어 둔 자리만 본다
     for (key, orig) in originals.sorted(by: { $0.key < $1.key }) {

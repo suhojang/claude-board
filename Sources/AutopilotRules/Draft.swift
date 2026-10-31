@@ -384,14 +384,17 @@ public func apDraftCardParse(_ v: Any, n: Int, unitIds: [String], units: [APDraf
 // 자율주행 지시 초안(autopilot.md 글)의 기계 검사 — apDraftCheck 의 지시 줄(⑫-7a 에서 그대로 떼어 냄): 상한·HTML·비밀 꼴·첫 줄·금지 줄, 다루지 않은 하네스 확인 지점
 public func apInstructionCheck(_ t: String, harness: [APHarnessPoint]) -> (instruction: String, problems: [String], missing: [APHarnessPoint], warnings: [String]) {
     var problems: [String] = [], warnings: [String] = []
-    let instruction = t.trimmingCharacters(in: .whitespacesAndNewlines)
+    // 금지 꼴이 든 확인 지점 줄은 빼고(그 지점은 출발 카드로), 확인 지점과 상관없는 금지 줄은 준비를 멈춘다(⑫-7b apInstructionClean)
+    let cleaned = apInstructionClean(t, harness: harness)
+    let instruction = cleaned.text.trimmingCharacters(in: .whitespacesAndNewlines)
     if instruction.count > APDraftLimit.instruction { problems.append("자율주행 지시(autopilot.md)가 2만 자보다 깁니다") }
     if apHasTag(t) { problems.append("자율주행 지시(autopilot.md)에 HTML 태그가 있습니다") }
     if apRedact(t).count > 0 { problems.append("자율주행 지시(autopilot.md)에 비밀 꼴(토큰·키 등)이 있습니다") }
     let first = t.components(separatedBy: "\n").map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "# ").union(.whitespaces)) }.first { !$0.isEmpty } ?? ""
     if !first.hasPrefix(apInstructionHeadLine) { problems.append("자율주행 지시의 첫 줄이 \"\(apInstructionHeadLine)\" 가 아닙니다") }
-    for l in apInstructionForbiddenLines(t, harness: harness) { problems.append("자율주행 지시에 바깥 쓰기·하네스 고치기·push 를 시키는 줄이 있습니다: \(l)") }
-    let missing = apHarnessMissing(harness, instruction: t)
+    for l in cleaned.forbidden { problems.append("자율주행 지시에 바깥 쓰기·하네스 고치기·push 를 시키는 줄이 있습니다: \(l)") }
+    for l in cleaned.dropped { warnings.append("자율주행 지시의 이 줄은 바깥 쓰기·하네스 고치기·push 꼴이 섞여 지시에서 빼고 그 확인 지점은 출발 카드로 묻습니다: \(l)") }
+    let missing = apHarnessMissing(harness, instruction: cleaned.text)
     if !missing.isEmpty { warnings.append("하네스 확인 지점 \(missing.count)곳을 지시가 다루지 않아 출발 카드로 묻습니다") }
     return (instruction, problems, missing, warnings)
 }
