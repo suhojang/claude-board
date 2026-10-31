@@ -227,7 +227,7 @@ let harnessCoverRows: [HarnessCoverRow] = [
     @Test("지시가 하네스 원래 글을 인용해도 금지 줄로 막지 않는다(인용 밖은 그대로 봄)")
     func 인용() {
         let w = APHarnessPoint(file: ".claude/skills/t/SKILL.md", line: 5, kind: "write", text: "1. mcp__atlassian__createJiraIssue 로 티켓을 만든다.")
-        let ok = apInstructionHeadLine + "\n대답할 사람이 없어 멈추므로 보류합니다.\n- .claude/skills/t/SKILL.md:5 \"mcp__atlassian__createJiraIssue 로 티켓을 만든다.\": 보류합니다(카드 harness-policy-1a2b).\n끝내기 전에 다시 본다.\n"
+        let ok = apInstructionHeadLine + "\n대답할 사람이 없어 멈추므로 보류합니다.\n- .claude/skills/t/SKILL.md:5 \"mcp__atlassian__createJiraIssue 로 티켓을 만든다.\": 보류합니다(카드 \(apHarnessPolicyId(w))).\n끝내기 전에 다시 본다.\n"
         let c = apInstructionCheck(ok, harness: [w])
         #expect(c.problems.isEmpty && c.missing.isEmpty, "\(c.problems)")
         let bad = ok + "- 끝나면 mcp__atlassian__createJiraIssue 로 결과 티켓을 만든다.\n"
@@ -261,7 +261,14 @@ let harnessCoverRows: [HarnessCoverRow] = [
             "- CLAUDE.md:7 git push \"작업이 끝나면 git push 로 올린다.\" 않는다.",                      // 인용 앞 금지 동작을 인용 뒤 부정이 덮음
             "- 먼저 git push 하고 CLAUDE.md:7 \"작업이 끝나면 git push 로 올린다.\": 보류합니다.",          // 인용 앞에 참조 말고 다른 글
         ]
-        for b in more {
+        // 보안 검토 지적 둘 더(MEDIUM 4·5): 카드 꼴이 넓어 금지 동작을 끼울 수 있던 것, 인용 앞이 그 지점 파일이 아닌 아무 글자 덩어리여도 받던 것
+        let more2 = [
+            "- CLAUDE.md:7 \"작업이 끝나면 git push 로 올린다.\": 보류합니다(카드 x, git push origin live).",
+            "- CLAUDE.md:7 \"작업이 끝나면 git push 로 올린다.\": 보류합니다(카드 harness-CLAUDE-md-8).",     // 다른 지점의 카드 id
+            "- update-ref;CLAUDE.md:7 \"작업이 끝나면 git push 로 올린다.\": 보류합니다.",
+            "- createJiraIssue/CLAUDE.md:7 \"작업이 끝나면 git push 로 올린다.\": 보류합니다.",
+        ]
+        for b in more + more2 {
             #expect(apInstructionCheck(head + b + "\n끝내기 전에 다시 본다.\n", harness: [w, p]).problems.contains { $0.contains("바깥 쓰기") }, "\(b)")
         }
         let ins = head + "- CLAUDE.md:7 보류\n- 단위마다 작업이 끝나면 git push 로 올린다.\n"

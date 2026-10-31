@@ -194,20 +194,22 @@ public func apHarnessMissing(_ points: [APHarnessPoint], instruction: String) ->
 }
 
 // 지시 글의 금지 줄(바깥 쓰기·하네스 고치기·push 를 시키는 줄) — 쓰는 법 ②("확인 지점마다 파일:줄, 원래 글")대로 하네스 줄을 인용한 줄만 뺀다(7단계 ⑫-7b).
-// 하네스가 바깥 쓰기·push 를 시키는 줄을 지시가 인용하면 그 원래 글 때문에 지시가 막히던 것. 뺄 수 있는 줄은 정한 꼴의 인용 줄 하나뿐이다:
-//   [목록 머리] <그 확인 지점의 파일:줄> "<그 하네스 글>": <정한 보류 글>[(카드 <id>)]
-// 인용 앞에는 목록 머리와 그 파일:줄 참조만, 인용 뒤에는 정한 보류 글만 있어야 한다(쓰는 법 ② 에 이 꼴을 적어 넘긴다. 맞지 않으면 금지 줄로 걸려 준비가 멈춘다).
-// 보안 검토(⑫-7b 자동 보안 검토 MEDIUM 셋): 처음 판은 하네스 글을 지시 어디서든 부분 글자로 지웠고(금지 줄 안에 하네스 글을 끼워 넣으면 빠져나감),
-// 둘째 판은 보류 낱말이 인용 뒤 아무 데서나 맞으면 받았고("그대로 따른다, 멈추지 않는다"·"보류 없이 한다"), 인용을 지운 앞뒤를 이어 검사해 인용 앞의 금지 동작을
-// 인용 뒤 부정이 덮었다. 그래서 앞뒤를 정한 꼴로만 받는다
+// 하네스가 바깥 쓰기·push 를 시키는 줄을 지시가 인용하면 그 원래 글 때문에 지시가 막히던 것. 뺄 수 있는 줄은 완전히 고정된 꼴 하나뿐이다:
+//   [목록 머리] <그 지점 파일>:<줄> "<그 지점 글>": <정한 보류 글>[(출발 카드 <그 지점의 실제 카드 id>)][.]
+// 그 밖의 꼴은 금지 줄로 걸린다(초안·가져오기는 준비가 멈추고 사람이 고침, 세트 이어 쓰기는 지난 지시 그대로). 인용 앞·뒤 글은 따로 금지 꼴 검사를 한 번 더 한다.
+// 보안 검토(⑫-7b 자동 보안 검토 MEDIUM 다섯): 하네스 글을 어디서든 부분 글자로 지움 → 보류 낱말이 인용 뒤 아무 데서나 맞음·인용을 지운 앞뒤를 이어 부정 창이 넘음
+// → 카드 꼴이 넓어 금지 동작을 끼울 수 있음·인용 앞이 그 지점 파일이 아닌 아무 글자 덩어리여도 받음. 이 검사는 모델이 쓴 지시 초안을 보는 덧댄 층이고,
+// 실제로 막는 것은 샌드박스·도구 허용 목록(바깥 쓰기 도구 없음, push 거부)·하네스 지문이다
 private let listHead = try! NSRegularExpression(pattern: "^([-*+]|[0-9]+[.)])\\s+", options: [])
 private let quotePairs: [(String, String)] = [("\"", "\""), ("“", "”"), ("「", "」"), ("『", "』"), ("'", "'"), ("‘", "’")]
-private let citeBefore = try! NSRegularExpression(pattern: "^\\s*(([-*+]|[0-9]+[.)])\\s+)?[^\\s\"“「『'‘]+:[0-9]+(\\s*[-~–]\\s*[0-9]+)?\\s*$", options: [])
 public let apHarnessDeferPhrases = ["보류해 next_start 에 남깁니다", "보류해 next_start 에 남긴다", "하지 않고 보류합니다", "하지 않고 보류한다", "보류합니다", "보류한다", "하지 않습니다", "하지 않는다"]
-private let citeAfter = try! NSRegularExpression(
-    pattern: "^\\s*[:：]\\s*(" + apHarnessDeferPhrases.joined(separator: "|") + ")(\\s*\\((출발 )?카드 [A-Za-z0-9._,\\- ]{1,80}\\))?\\s*[.。]?\\s*$", options: [])
+private func esc(_ s: String) -> String { NSRegularExpression.escapedPattern(for: s) }
 private func quotedHarnessLine(_ line: String, harness: [APHarnessPoint]) -> Bool {
-    for p in harness where covers(line, file: p.file, line: p.line) {
+    for p in harness {
+        // 인용 앞: 목록 머리 + 그 지점 파일 경로 그대로 + 그 줄(또는 그 줄을 덮는 범위). 인용 뒤: 정한 보류 글 + 그 지점의 실제 카드 id(선택)
+        guard let before = try? NSRegularExpression(pattern: "^\\s*(([-*+]|[0-9]+[.)])\\s+)?" + esc(p.file) + ":([0-9]+)(\\s*[-~–]\\s*([0-9]+))?\\s*$", options: [.caseInsensitive]),
+              let after = try? NSRegularExpression(pattern: "^\\s*[:：]\\s*(" + apHarnessDeferPhrases.map(esc).joined(separator: "|") + ")(\\s*\\((출발 )?카드 ("
+                                                    + esc(apHarnessCardId(p)) + "|" + esc(apHarnessPolicyId(p)) + ")\\))?\\s*[.。]?\\s*$", options: []) else { continue }
         var texts = [p.text]
         let ns = p.text as NSString
         if let m = listHead.firstMatch(in: p.text, range: NSRange(location: 0, length: ns.length)) {
@@ -216,8 +218,14 @@ private func quotedHarnessLine(_ line: String, harness: [APHarnessPoint]) -> Boo
         for q in texts where q.count >= 6 {
             for (o, c) in quotePairs {
                 guard let r = line.range(of: o + q + c) else { continue }
-                let before = String(line[..<r.lowerBound]), after = String(line[r.upperBound...])
-                if hits(citeBefore, before), covers(before, file: p.file, line: p.line), hits(citeAfter, after) { return true }
+                let b = String(line[..<r.lowerBound]), a = String(line[r.upperBound...])
+                let bn = b as NSString
+                guard let m = before.firstMatch(in: b, range: NSRange(location: 0, length: bn.length)) else { continue }
+                let lo = Int(bn.substring(with: m.range(at: 3))) ?? -1
+                let hi = m.range(at: 5).location != NSNotFound ? (Int(bn.substring(with: m.range(at: 5))) ?? lo) : lo
+                guard min(lo, hi) <= p.line, p.line <= max(lo, hi) else { continue }
+                guard hits(after, a), apForbiddenLines(b).isEmpty, apForbiddenLines(a).isEmpty else { continue }
+                return true
             }
         }
     }
