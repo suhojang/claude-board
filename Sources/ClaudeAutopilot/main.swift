@@ -6570,17 +6570,6 @@ func cmdHarness(_ args: [String]) -> Never {
     let o = harnessReadPrep(dir: dir, roots: roots, project: run["project"] as? String, dev: dev)
     print(jsonText(o)); exit(0)
 }
-// 기계 검사가 금지 꼴이 섞인 확인 지점 줄을 뺀 지시(규칙 apInstructionClean, ⑫-7b)를 결과 파일에 다시 쓴다 — 보드는 이 파일을 지시 글로 읽고 출발 때 세트에 쓴다.
-// 모델이 쓴 원문은 autopilot.raw.md 로 남긴다(뺀 줄을 사람이 볼 수 있게)
-func cleanInstructionFile(_ folder: String, _ cleaned: String) {
-    let path = folder + "/autopilot.md"
-    guard let d = plainFile(path), String(decoding: d, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines) != cleaned, !cleaned.isEmpty else { return }
-    unlink(folder + "/autopilot.raw.md")
-    _ = fm.createFile(atPath: folder + "/autopilot.raw.md", contents: d)
-    let tmp = path + ".tmp"
-    unlink(tmp)
-    if fm.createFile(atPath: tmp, contents: Data((cleaned + "\n").utf8)) { rename(tmp, path) }
-}
 func harnessPointJSON(_ p: APHarnessPoint) -> [String: Any] { ["file": p.file, "line": p.line, "kind": p.kind, "text": p.text] }
 func harnessPointOf(_ o: [String: Any]) -> APHarnessPoint? {
     guard let f = o["file"] as? String, let l = inum(o["line"]) else { return nil }
@@ -6935,7 +6924,6 @@ func draftReport(_ x: TopicPrep, folder: String, note: String, cost: Double?, se
     let points = (readJSON(x.dir + "/harness-points.json") as? [[String: Any]] ?? []).compactMap(harnessPointOf)
     let firstUnit = (x.run["seed"] as? [String: Any])?["first_unit"] as? Bool ?? false
     let chk = apDraftCheck(files: EngineDraftFiles(root: folder), harness: points, firstUnit: firstUnit)
-    if chk.ok { cleanInstructionFile(folder, chk.instruction) }
     let ctx = bundleFiles.isEmpty ? nil : canonical(bundle)
     let queue = chk.units.map { apDraftQueueUnit($0, repo: x.repo, context: ctx, prep: x.id, stack: x.stack) }
     let cards = chk.cards.map { c -> [String: Any] in
@@ -6954,7 +6942,7 @@ func draftReport(_ x: TopicPrep, folder: String, note: String, cost: Double?, se
              "problems": (note.isEmpty ? [] : [note]) + chk.problems, "warnings": chk.warnings, "cost_usd": cost ?? NSNull(), "sec": r3(sec),
              "units": queue, "cards": cards, "harness_points": points.count, "harness_missing": missing,
              "spec": ["requirements": chk.spec.requirements, "criteria": chk.spec.criteria.map(apCriterionJSON), "chars": chk.specText.count],
-             "instruction_chars": chk.instruction.count, "scenarios": chk.scenarioCount, "model": model, "at": r3(now())], ok, chk)
+             "instruction_chars": chk.instruction.count, "instruction": chk.instruction, "scenarios": chk.scenarioCount, "model": model, "at": r3(now())], ok, chk)
 }
 
 // 판정 고치기(⑪-3)에 넘길 고칠 것: 사람이 "판정 고치기"를 고른 카드 id 로 prerun.json(탐침 카드)·critic.json(마지막 차례의 확인된 지적)에서 찾고,
@@ -7575,7 +7563,6 @@ func cmdImport(_ args: [String]) {
                                         prompt: apImportPrompt(input), maxSec: maxSec, envKey: "CLAUDE_BOARD_IMPORT")
         guard let sr else { reply(["ok": false, "session": false, "problems": [problem ?? "세션을 띄우지 못했습니다"]], false, to: "import-check.json") }
         let chk = apImportCheck(files: EngineDraftFiles(root: out), items: pitems, storyItems: storyItems, harness: points, needInstruction: setText == nil, setInstruction: setText)
-        if chk.ok, setText == nil { cleanInstructionFile(out, chk.instruction) }
         // 대기열 단위 — 항목 id 로 모은 항목을 찾아 원천 항목 키·지문·티켓을 붙인다
         var byId: [String: APImportItem] = [:]
         for d in g["items"] as? [[String: Any]] ?? [] {
@@ -7621,7 +7608,7 @@ func cmdImport(_ args: [String]) {
                "seed": seedOut, "scenarios": scenItems.count,
                "problems": (sr.note.isEmpty ? [] : [sr.note]) + chk.problems + seedProblems, "warnings": chk.warnings, "cost_usd": sr.cost ?? NSNull(), "sec": r3(sr.sec),
                "units": queue, "cards": cards, "skipped": chk.skipped.map { ["item": $0.item, "key": byId[$0.item]?.key ?? "", "why": $0.why] },
-               "harness_points": points.count, "harness_missing": missing, "need_instruction": setText == nil, "instruction_chars": chk.instruction.count,
+               "harness_points": points.count, "harness_missing": missing, "need_instruction": setText == nil, "instruction_chars": chk.instruction.count, "instruction": setText == nil ? chk.instruction : "",
                "model": model, "items": pitems.count, "at": r3(now())], ok, to: "import-check.json")
     default: usage()
     }

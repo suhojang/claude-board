@@ -4287,7 +4287,8 @@ extension APRecords {
                                  detail: warns)
                     self.draftCards = cards.filter { $0["criterion"] == nil }.compactMap(APStart.draftCard)
                     self.harnessCards = missing.compactMap(APStart.harnessCard)
-                    self.setText = (try? String(contentsOfFile: d + "/draft/autopilot.md", encoding: .utf8)).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.flatMap { $0.isEmpty ? nil : $0 }
+                    // 지시 글은 기계 검사가 돌려준 글(금지 꼴이 섞인 확인 지점 줄을 뺀 것)을 쓴다. 세션이 쓰는 결과 폴더의 파일은 다시 읽지 않는다(⑫-7b 보안 검토)
+                    self.setText = (o["instruction"] as? String).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.flatMap { $0.isEmpty ? nil : $0 }
                     self.setAt = Date().timeIntervalSince1970
                     // 지금 세트에 지시가 있으면 그것과 견준다(출발을 눌러야 세트를 바꾸므로, 무엇이 바뀌는지 출발 확인에서 본다. ⑪-2 보안 검토)
                     let cur = autopilotRoot + "/private/projects/\(self.project ?? "")/set/autopilot.md"
@@ -5069,7 +5070,7 @@ extension APStart {
         }
         harnessCards = (importResult["harness_missing"] as? [[String: Any]] ?? []).compactMap(APStart.harnessCard)
         if importResult["need_instruction"] as? Bool == true,
-           let t = (try? String(contentsOfFile: dir + "/import/out/autopilot.md", encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty {
+           let t = (importResult["instruction"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty {   // 기계 검사가 돌려준 글(세션 폴더의 파일은 다시 읽지 않음, ⑫-7b 보안 검토)
             setText = t; setAt = Date().timeIntervalSince1970; importDraftedSet = true
         }
         estimates = calibrate()
