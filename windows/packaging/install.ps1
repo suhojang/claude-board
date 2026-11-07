@@ -3,7 +3,9 @@ param([string]$Version, [switch]$Update)
 #   irm https://raw.githubusercontent.com/suhojang/claude-board/main/windows/packaging/install.ps1 | iex
 # 릴리스 목록에서 windows-v 로 시작하는 최신 릴리스(또는 -Version 으로 고른 버전)의 zip 을 받아 SHA256 을 확인하고
 # %LOCALAPPDATA%\Programs\Claude Board 에 바꿔 끼운 뒤, claude-board-hook.exe setup 으로 사용자 설정을 하고 보드를 다시 띄운다.
-# zip 최상위 파일과 plugins\md-render\ 폴더(답변 마크다운 꾸미기 플러그인 다섯 파일)를 함께, 실패하면 모두 되돌린다.
+# zip 최상위 파일(ClaudeBoard.exe·claude-board-hook.exe·자율주행 claude-autopilot.exe·claude-autopilot-engine.exe 등)과
+# plugins\md-render\ 폴더(답변 마크다운 꾸미기 플러그인 다섯 파일)를 함께, 실패하면 모두 되돌린다.
+# 자율주행 명령줄은 자기 exe 옆에서 엔진 exe 를 찾으므로 두 exe 는 같은 앱 폴더에 놓인다(setup.exe 도 같다).
 # 전역 settings.json 에 Claude Board hook 이 없을 때(처음 설치)만 hook 등록을 묻는다. -Update 면 묻지 않는다(보드의 업데이트 단추).
 # /releases/latest 는 macOS 판 릴리스가 쓰므로 절대 쓰지 않는다(windows/docs/SPEC.md 0.1).
 # Windows PowerShell 5.1 에서도 돌게 쓴다 — ??·삼항·&& 같은 PowerShell 7 문법을 쓰지 않는다.
@@ -84,12 +86,16 @@ function Install-ClaudeBoard {
     $Version = ($Version -replace '^windows-v', '') -replace '^v', ''
     if (-not $Version) {
       Write-Host '1) 최신 버전 찾기'
-      $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases?per_page=30" -UserAgent $UserAgent -UseBasicParsing
-      foreach ($r in $releases) {
-        if (-not $r.draft -and -not $r.prerelease -and "$($r.tag_name)".StartsWith('windows-v')) {
-          $Version = "$($r.tag_name)".Substring(9)
-          break
+      # macOS 판 릴리스가 앞에 많이 쌓여도 찾도록 쪽을 넘긴다(쪽당 100개, 최대 5쪽, 덜 찬 쪽이 마지막)
+      for ($page = 1; $page -le 5 -and -not $Version; $page++) {
+        $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases?per_page=100&page=$page" -UserAgent $UserAgent -UseBasicParsing
+        foreach ($r in $releases) {
+          if (-not $r.draft -and -not $r.prerelease -and "$($r.tag_name)".StartsWith('windows-v')) {
+            $Version = "$($r.tag_name)".Substring(9)
+            break
+          }
         }
+        if (($releases | Measure-Object).Count -lt 100) { break }
       }
       if (-not $Version) { throw 'Windows 판 릴리스(windows-v...)를 찾지 못했습니다.' }
     } else {
@@ -115,7 +121,7 @@ function Install-ClaudeBoard {
       $stage = Join-Path $work 'new'
       Expand-Archive -LiteralPath $zip -DestinationPath $stage -Force
       # 아무것도 건드리기 전에 확인한다 - 필요한 파일이 빠졌거나 모르는 위치의 파일이 있으면 멈춘다
-      $needs = @('ClaudeBoard.exe', 'claude-board-hook.exe')
+      $needs = @('ClaudeBoard.exe', 'claude-board-hook.exe', 'claude-autopilot.exe', 'claude-autopilot-engine.exe')
       foreach ($pf in $PluginFiles) { $needs += (Join-Path $PluginRel $pf) }
       foreach ($need in $needs) {
         if (-not (Test-Path -LiteralPath (Join-Path $stage $need) -PathType Leaf)) { throw "받은 zip 에 $need 가 없습니다." }

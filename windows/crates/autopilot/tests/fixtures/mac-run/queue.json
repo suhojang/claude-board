@@ -1,0 +1,54 @@
+[
+  {
+    "caps" : {
+      "minutes" : 60,
+      "usd" : 20,
+      "weekly_pp" : 2
+    },
+    "check" : "npm test --silent",
+    "cwd" : "/Users/demo/toy",
+    "est_min" : 25,
+    "id" : "u1",
+    "kind" : "feature",
+    "prompt" : "할 일 목록 화면을 만든다.\n\n- 항목 추가\n- 항목 완료 표시",
+    "review" : false,
+    "source_key" : "topic/20261021-0900-toy/u1",
+    "status" : "running",
+    "tickets" : [
+
+    ],
+    "title" : "할 일 목록 화면 만들기"
+  },
+  {
+    "branch" : "feature/TOY-12-sort",
+    "check" : "npm test --silent && node scripts/check-sort.js",
+    "check_ports" : [
+      3000
+    ],
+    "cwd" : "/Users/demo/toy",
+    "depends" : [
+      "u1"
+    ],
+    "est_min" : 18.5,
+    "id" : "u2",
+    "kind" : "feature",
+    "prompt" : "목록 정렬을 더한다.",
+    "review" : true,
+    "scenarios" : [
+      {
+        "criterion" : "c1",
+        "file" : "checks/sort.mjs",
+        "kind" : "browser",
+        "pinned" : "/Users/demo/Library/Application Support/Claude Board/autopilot/runs/20261021-0900-toy/pinned/checks/scenarios/2/1/sort.mjs",
+        "sha256" : "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0"
+      }
+    ],
+    "source_key" : "topic/20261021-0900-toy/u2",
+    "status" : "pending",
+    "story" : "TOY-10",
+    "tickets" : [
+      "TOY-12"
+    ],
+    "title" : "목록 정렬"
+  }
+]

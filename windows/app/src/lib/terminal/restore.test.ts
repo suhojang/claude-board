@@ -307,3 +307,57 @@ test("이어 열기: claude 가 아닌 명령은 그대로", () => {
   const launch = launchOf({ cwd: "c", command: "npm run dev" }, { sessions: [], tabName: "a" });
   assert.deepEqual(launch, { command: "npm run dev", sessionId: null });
 });
+
+// ── 셸 기억 ────────────────────────────────────────────────────
+
+test("셸 기억: 화면의 셸 키를 저장하고, 없으면 필드를 두지 않는다", () => {
+  const withShell = surface({ termId: "t1", shell: "git-bash" });
+  const plain = surface({ termId: "t2" });
+  const [a, b] = savedTabs([leafTab(withShell), leafTab(plain)], view([withShell, plain], { t1: term("t1", "/w"), t2: term("t2", "/w") }));
+  assert.equal(a.root.leaf.shell, "git-bash");
+  assert.equal("shell" in b.root.leaf, false);
+});
+
+test("셸 기억: 아직 이어 열지 않은 화면도 셸 키를 그대로 다시 저장한다", () => {
+  const s = surface({ shell: "git-bash", held: { cwd: "/w", command: "claude", session: SID, shell: "git-bash" } });
+  const [entry] = savedTabs([leafTab(s)], view([s]));
+  assert.deepEqual(entry.root, { leaf: { cwd: "/w", command: "claude", sessionId: SID, mdRenderOff: false, shell: "git-bash" } });
+});
+
+test("셸 기억: 옛 저장 항목(shell 없음)은 그대로 읽히고 되살아난다", () => {
+  const entries = parseEntries([{ workspace: "/a", name: null, selected: true, root: claudeLeaf() }]);
+  assert.equal("shell" in entries[0].root.leaf, false);
+  const [s] = planOf(entries).surfaces;
+  assert.equal(s.shell, undefined);
+  assert.deepEqual(s.held, { cwd: entries[0].root.leaf.cwd, command: "claude", session: SID });
+});
+
+test("셸 기억: 모양이 틀린 셸 키는 읽을 때 버린다", () => {
+  const entries = parseEntries([{ workspace: "/a", name: null, selected: true, root: shellLeaf() }].map((e) => ({ ...e, root: { leaf: { ...e.root.leaf, shell: "wsl:bad name" } } })));
+  assert.equal("shell" in entries[0].root.leaf, false);
+});
+
+test("셸 기억: claude 화면은 자기 셸로 되살아나고 held 에 셸 키가 든다", () => {
+  const entries = parseEntries([{ workspace: "/a", name: null, selected: true, root: claudeLeaf({ shell: "git-bash" }) }]);
+  const [s] = planOf(entries).surfaces;
+  assert.equal(s.shell, "git-bash");
+  assert.equal(s.held.shell, "git-bash");
+});
+
+test("셸 기억: WSL 화면은 명령이 있어도 맨 셸로 돌아온다(claude 를 이어 열지 않는다)", () => {
+  const entries = parseEntries([{ workspace: "/a", name: null, selected: true, root: claudeLeaf({ shell: "wsl:Ubuntu" }) }]);
+  const plan = planOf(entries, new Set([SID]), { has: () => false });
+  const [s] = plan.surfaces;
+  assert.equal(s.shell, "wsl:Ubuntu");
+  assert.equal(s.held, null);
+  assert.equal(s.sessionId, null);
+  assert.equal(plan.resumeNow, null);
+  assert.deepEqual(plan.missingDirs, []);
+  assert.deepEqual(savedSessionIds(entries), []);
+});
+
+test("셸 기억: WSL 셸 탭은 경로 없이도 그 셸로 되살아난다", () => {
+  const entries = parseEntries([{ workspace: "~", name: null, selected: true, root: shellLeaf("~") }].map((e) => ({ ...e, root: { leaf: { ...e.root.leaf, shell: "wsl" } } })));
+  const [s] = planOf(entries).surfaces;
+  assert.equal(s.shell, "wsl");
+});

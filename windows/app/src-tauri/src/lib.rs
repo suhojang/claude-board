@@ -5,6 +5,7 @@
 
 mod account_login;
 mod accounts;
+mod autopilot;
 mod autoswitch;
 mod board;
 mod drive;

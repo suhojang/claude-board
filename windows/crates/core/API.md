@@ -13,6 +13,7 @@ Tauri 쪽에서는 `claude-board-core = { path = "../../crates/core" }` 로 넣�
 | `claude_json()` | `~/.claude.json` |
 | `notifier_dir()` | `CLAUDE_BOARD_NOTIFIER_DIR` > `~/.claude/notifier` |
 | `sessions_dir()`, `hook_exe()`, `app_path_file()` | `notifier/sessions`, `notifier/claude-board-hook.exe`, `notifier/app-path` |
+| `autopilot_root(dev)` | 자율주행 데이터 뿌리 `%LOCALAPPDATA%\Claude Board[ Dev]\autopilot`(`CLAUDE_BOARD_HOME` 이 있으면 그 아래 `AppData\Local`). 실행 폴더는 `runs\<실행 id>` |
 | `mute_all_file()`, `notify_position_file()`, `board_theme_file()` | `notifier/mute-all`, `notifier/notify-position`, `notifier/board-theme` |
 | `local_bin()` | `~/.local/bin` |
 | `basename(&str)` | 마지막 이름(Windows 는 `\`·`/` 모두 구분자) — 세션의 `project` 규칙 |
@@ -85,3 +86,18 @@ hook 이 오지 않는 때(Esc 중단, 승인한 도구가 도는 동안)를 메
 
 `state <s>`·`notify <k>`(출력 없음, 늘 0) / `setup --app <ClaudeBoard.exe>` / `uninstall` / `install-hooks` / `uninstall-hooks` / `tui` / `--version`(출력 `claude-board-hook <버전>`).
 Windows 가 아닌 곳에서 `setup`·`uninstall`·`install-hooks`·`uninstall-hooks` 는 `CLAUDE_BOARD_HOME`(또는 `CLAUDE_BOARD_NOTIFIER_DIR`)이 없으면 거부한다 — macOS 판의 `~/.claude` 를 지키기 위해서다.
+
+## 실행 환경 — `envs`
+
+내장 터미널의 새 탭 셸과 자율주행 실행 환경이 함께 쓰는 목록(WSL 배포판별, PowerShell 7, Windows PowerShell, 명령 프롬프트, Git Bash).
+
+| 항목 | 뜻 |
+|---|---|
+| `EnvKind`, `EnvChoice` | 환경 종류와 고른 환경. 키 꼴 `wsl:<배포판>` · `wsl` · `pwsh` · `powershell` · `cmd` · `git-bash` (`EnvChoice::parse`/`key`) |
+| `EnvKind::sandbox_capable()` | Claude Code 샌드박스를 걸 수 있는가(WSL 만 참) |
+| `parse_wsl_list(raw)` | `wsl.exe -l -q` 의 UTF-16 출력 → 배포판 이름 |
+| `detect()` | 이 PC 에 있는 환경 목록. WSL 은 `-l -q` 를 5초 안에 풀 수 있을 때만(VM 을 띄우지 않는다) |
+
+## 시험용 claude 바꿔치기 — `test_claude`
+
+`decide`/`decide_from_process` 가 `CLAUDE_BOARD_CLAUDE` 를 `CLAUDE_BOARD_HOME` 이 함께 있을 때만 켠다(보드와 자율주행 엔진이 같은 판정을 쓴다).

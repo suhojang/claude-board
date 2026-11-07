@@ -1,0 +1,13 @@
+{
+  "format": "claude-board-autopilot-ported",
+  "version": 1,
+  "files": [
+    {"swift": "Sources/AutopilotRules/Control.swift", "sha256": "c84fa09e52cfac24ca334c57b98159daa0afcba98ace9f780a8b3ea1c7ee342a", "rust": "src/rules/control.rs", "chunk": "2.2", "tests": [{"swift": "Tests/AutopilotRulesTests/ControlTests.swift", "sha256": "287da7497bdbe7d42df1c64712cae3346a8a76d4cd293e945ecb48822691d471"}]},
+    {"swift": "Sources/AutopilotRules/Stopline.swift", "sha256": "47fcb9a375424f207444ce8ac589cbb0073f7e09d10077512cfb5dd131e11dc8", "rust": "src/rules/stopline.rs", "chunk": "2.2", "tests": [{"swift": "Tests/AutopilotRulesTests/StoplineTests.swift", "sha256": "00ff13ecc2edb7a84a2d7dc7d626fbe4fd876a794c8993c947dfeca781727dcc"}]},
+    {"swift": "Sources/AutopilotRules/Records.swift", "sha256": "62efecb3a7d2f35e2209d52c53a6c10fca96fd84623f9a2d3c72d95913bfa71a", "rust": "src/rules/records.rs", "chunk": "2.3", "tests": [{"swift": "Tests/AutopilotRulesTests/CritiqueTests.swift", "sha256": "53f067ac172c5b8113f089cb4fd36654fbae4edb2b355a52a0276289fc6b38d2"}, {"swift": "Tests/AutopilotRulesTests/MultirunTests.swift", "sha256": "2c3936375852abe0d26cbfd882167fedafecedb5714dfa9b922c40f2d5bfc202"}]},
+    {"swift": "Sources/AutopilotRules/Checks.swift", "sha256": "4ca03bf24cd78edce16a273a0582a66eeda758e5467d9b9ff8a99bf2a3a30589", "rust": "src/rules/checks.rs", "chunk": "2.5", "tests": [{"swift": "Tests/AutopilotRulesTests/ChecksTests.swift", "sha256": "bb40a668482cecab196f0ddc0396401dbeaf9fd69cff04393dafdfc18521f5ee"}, {"swift": "Tests/AutopilotRulesTests/JudgeMoveTests.swift", "sha256": "b79974912bf8ee500e2d516ef2d236121b29431b339c738581d990e6d8ac8d3b"}]},
+    {"swift": "Sources/AutopilotRules/Evidence.swift", "sha256": "f355f8610b6a588e9de78d3eae940b56280ad5a90e9c48971c86b7f96c7ebd70", "rust": "src/rules/evidence.rs", "chunk": "2.5", "tests": []},
+    {"swift": "Sources/AutopilotRules/EngineGit.swift", "sha256": "48ed03f78ace9d58cfe7b4e5dfeab449016038d1e040b6c6de20cc9054ebabe5", "rust": "src/adapters/git.rs", "chunk": "엔진 git 보호", "tests": [{"swift": "Tests/AutopilotRulesTests/EngineGitTests.swift", "sha256": "f909d6e2e1b7eadd159a255e59515bdc575d6379825034ab24f144cc1e49edc6"}]}
+  ],
+  "windows_only": ["src/rules/env_policy.rs"]
+}

@@ -32,6 +32,7 @@ import { closeSettings } from "$lib/settings/screen.svelte";
 import { hasLeaf, leaves } from "./split";
 import { startTabRenames } from "./renameFlow.svelte";
 import { startSessionFlow } from "./sessionFlow.svelte";
+import { canTypeClaude } from "./shellRules";
 import { TermController } from "./term";
 import { typeCommand } from "./typeCommand";
 
@@ -186,7 +187,7 @@ function isBusy(tab: BoardTab): boolean {
 
 // ── 탭 만들기·찾기 ────────────────────────────────────────────
 
-function newTab(termId: TermId | null, workspace: string): BoardTab {
+function newTab(termId: TermId | null, workspace: string, shell?: string): BoardTab {
   const surface: BoardSurface = {
     id: crypto.randomUUID(),
     termId,
@@ -194,6 +195,7 @@ function newTab(termId: TermId | null, workspace: string): BoardTab {
     command: null,
     held: null,
     mdRenderOff: false,
+    ...(shell ? { shell } : {}),
     title: "",
     typedAt: null,
   };
@@ -291,7 +293,7 @@ export async function startHub() {
   }
   for (const info of list) TerminalHub.terms[info.id] = info;
   for (const info of list.filter((t) => t.status === "running")) {
-    const tab = newTab(info.id, info.cwd);
+    const tab = newTab(info.id, info.cwd, info.shell);
     TerminalHub.tabs.push(tab);
   }
   if (TerminalHub.tabs.length) select(TerminalHub.tabs[TerminalHub.tabs.length - 1].id, false);
@@ -357,8 +359,11 @@ export function stepWorkspace(step: number) {
 
 // ── 열기 ──────────────────────────────────────────────────────
 
-/** 그 폴더(없으면 홈)의 셸 탭을 같은 경로 탭들의 끝에(새 경로면 맨 끝에) 연다. command 는 셸이 뜬 뒤 한 번 칠 명령 */
-export function openShell(dir: string | null = null, opts: { command?: string; sessionId?: string; mdRenderOff?: boolean } = {}): BoardTab | undefined {
+/**
+ * 그 폴더(없으면 홈)의 셸 탭을 같은 경로 탭들의 끝에(새 경로면 맨 끝에) 연다. command 는 셸이 뜬 뒤 한 번 칠 명령.
+ * shell 은 이 탭만 쓸 셸 키(없으면 설정의 기본). 명령을 칠 탭이면 WSL 을 고를 수 없어 셸 지정을 버리고 기본 셸로 띄운다
+ */
+export function openShell(dir: string | null = null, opts: { command?: string; sessionId?: string; mdRenderOff?: boolean; shell?: string } = {}): BoardTab | undefined {
   leaveSettings();
   const tab = newTab(null, dir ?? "~");
   const surface = focusedSurface(tab);
@@ -366,6 +371,7 @@ export function openShell(dir: string | null = null, opts: { command?: string; s
     surface.command = opts.command ?? null;
     surface.sessionId = opts.sessionId ?? null;
     surface.mdRenderOff = opts.mdRenderOff ?? false;
+    if (opts.shell && (!opts.command || canTypeClaude(opts.shell))) surface.shell = opts.shell;
     // 명령을 넣을 화면은 막 claude 가 뜨는 것으로 본다 — 셸이 뜨기 전 스냅샷이 명령을 비우지 않게
     surface.typedAt = opts.command ? Date.now() : null;
   }
@@ -402,7 +408,8 @@ export async function startLeaf(leafId: string) {
       const dims = ctl.dims();
       if (!dims) throw new Error("터미널 크기를 잴 수 없음");
       const cwd = workspaceKey(tab.workspace) === "~" ? undefined : tab.workspace;
-      info = await termSpawn({ cwd, cols: dims.cols, rows: dims.rows });
+      // claude 명령을 칠 화면(새 세션·이어 열기)이면 typesClaude — 백엔드가 WSL 을 기본 셸로 바꿔 띄운다
+      info = await termSpawn({ cwd, cols: dims.cols, rows: dims.rows, shell: leaf.shell, typesClaude: !!(leaf.command || leaf.held) });
       spawnedId = info.id;
       if (closed()) {
         termKill(info.id); // 닫힌 탭의 셸이 남지 않게
@@ -410,6 +417,7 @@ export async function startLeaf(leafId: string) {
       }
       TerminalHub.terms[info.id] = info;
       leaf.termId = info.id;
+      leaf.shell = info.shell; // 실제로 뜬 셸을 기억한다 — 탭을 저장하면 다음에 이 셸로 돌아온다
     }
     await ctl.bind(info);
     if (closed()) {

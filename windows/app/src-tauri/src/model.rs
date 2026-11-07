@@ -309,7 +309,16 @@ pub struct SettingsView {
     pub new_session_command: String,
     pub new_session_md_render: bool,
     pub auto_update_check: bool,
+    /// 새 터미널 탭의 셸 키(`wsl:<배포판>` · `pwsh` …). null 이면 기본 셸(pwsh → powershell → cmd)
+    pub terminal_shell: Option<String>,
     pub notify_position: String,
+}
+
+/// 고를 수 있는 실행 환경 하나 — `list_envs` 의 항목.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct EnvChoiceView {
+    pub key: String,
+    pub label: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -337,6 +346,8 @@ pub struct Snapshot {
     pub runs_claude: Vec<String>,
     /// 셸이 프롬프트에 있는 보드 터미널 `TermId`들.
     pub at_prompt: Vec<String>,
+    /// 자율주행 실행들(최근 것이 앞).
+    pub autopilot: Vec<crate::autopilot::AutopilotRunView>,
 }
 
 #[cfg(test)]

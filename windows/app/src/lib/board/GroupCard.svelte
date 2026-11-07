@@ -3,11 +3,13 @@
   // 안에 터미널/백그라운드 구역과 세션 줄, "종료된 세션 n개"(접기, 마우스를 올리면 휴지통)
   import { cubicOut } from "svelte/easing";
   import { fade, fly, slide } from "svelte/transition";
-  import type { BoardSettings, Group } from "$lib/types";
+  import type { AutopilotRun, BoardSettings, Group } from "$lib/types";
   import { place } from "$lib/terminal/hub.svelte";
   import { startSession } from "$lib/terminal/launch";
   import { defaultNewSessionCommand, defaultNewSessionMdRender } from "$lib/terminal/newSessionDefaults";
   import { hideGroup, removeEnded, toggleEndedOpen, toggleKindCollapsed, togglePinGroup } from "$lib/backend";
+  import AutopilotLine from "./AutopilotLine.svelte";
+  import { runsForGroup } from "./autopilotView";
   import HeaderButton from "./HeaderButton.svelte";
   import Icon from "./Icon.svelte";
   import KindSection from "./KindSection.svelte";
@@ -24,12 +26,23 @@
     toggle,
     settings,
     locked,
-  }: { g: Group; now: number; collapsed: boolean; toggle: () => void; settings: BoardSettings; locked: boolean } = $props();
+    autopilot = [],
+  }: {
+    g: Group;
+    now: number;
+    collapsed: boolean;
+    toggle: () => void;
+    settings: BoardSettings;
+    locked: boolean;
+    autopilot?: AutopilotRun[];
+  } = $props();
 
   const top = $derived(urgent(g));
   const c = $derived(stateRgb(top));
   const busy = $derived(active(g));
   const lead = $derived(busy[0]);
+  // 이 경로에서 도는 자율주행 실행 — 카드가 접혀 있어도 보인다(도는 일은 숨기지 않는다)
+  const runs = $derived(runsForGroup(autopilot, g.path));
   const pinned = $derived(settings.pinnedGroups.includes(g.id));
   const endedOpen = $derived(settings.endedOpen.includes(g.id));
   const live = $derived(g.sessions.filter((s) => s.state !== "ended"));
@@ -121,6 +134,10 @@
     <!-- 접힌 채 작업 중이면 세션 줄처럼 빛이 지나간다 -->
     {#if collapsed && top === "working"}<span class="shimmer"></span>{/if}
   </div>
+
+  {#each runs as run (run.id)}
+    <AutopilotLine {run} {now} />
+  {/each}
 
   {#if !collapsed}
     <div class="body" transition:slide={{ duration: 380, easing: cubicOut }}>

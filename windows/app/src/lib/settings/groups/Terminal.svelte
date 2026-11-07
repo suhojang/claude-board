@@ -1,10 +1,12 @@
 <script lang="ts">
-  // 설정 > 터미널 — 새 세션 기본 명령·답변 꾸미기 기본값(글자·테마·애니메이션은 3단계)
-  import { setNewSessionDefaults } from "$lib/backend";
+  // 설정 > 터미널 — 새 세션 기본 명령·새 탭 셸·답변 꾸미기 기본값(글자·테마·애니메이션은 3단계)
+  import { listEnvs, setNewSessionDefaults, setTerminalShell } from "$lib/backend";
   import { board } from "$lib/board/store.svelte";
   import { DEFAULT_SESSION_COMMAND } from "$lib/terminal/sessionCommand";
   import { currentPluginDir } from "$lib/terminal/mdRender";
   import { defaultNewSessionMdRender, validateDefaultCommand } from "$lib/terminal/newSessionDefaults";
+  import { labelFor, shellChoices } from "$lib/terminal/shellRules";
+  import type { EnvChoice } from "$lib/types";
   import SettingsCard from "../SettingsCard.svelte";
 
   const savedCommand = $derived(board.snap?.settings.newSessionCommand ?? "");
@@ -43,6 +45,22 @@
     }
   }
 
+  // 새 탭 셸 — 이 PC 의 실행 환경 목록은 화면을 열 때 한 번 읽는다(WSL 배포판은 백엔드가 늦게 채울 수 있어 열 때마다 다시 읽는다)
+  let envs = $state<EnvChoice[]>([]);
+  $effect(() => {
+    listEnvs()
+      .then((list) => (envs = list))
+      .catch(() => {});
+  });
+  const savedShell = $derived(board.snap?.settings.terminalShell ?? null);
+  const choices = $derived(shellChoices(envs));
+  // 저장된 셸이 이 PC 에서 사라졌어도(지운 배포판) 고른 칸이 비지 않게 키 그대로 한 줄 보인다
+  const shellMissing = $derived(savedShell !== null && !envs.some((env) => env.key === savedShell));
+
+  function pickShell(value: string) {
+    setTerminalShell(value === "" ? null : value);
+  }
+
   function toggleMdRender(on: boolean) {
     setNewSessionDefaults(savedCommand, on);
   }
@@ -70,6 +88,24 @@
       />
       {#if !check.ok}<div class="error" data-testid="settings-session-command-error">{check.reason}</div>{/if}
     </div>
+  </SettingsCard>
+
+  <SettingsCard
+    title="새 탭 셸"
+    detail="새 탭이 여는 셸. 자동은 PowerShell 7, Windows PowerShell, 명령 프롬프트 순. WSL 은 셸 탭에만 쓰고, 새 세션·이어 열기 탭은 claude 를 칠 수 없어 기본 셸로 열립니다"
+  >
+    <select
+      class="select"
+      value={savedShell ?? ""}
+      onchange={(e) => pickShell(e.currentTarget.value)}
+      aria-label="새 탭 셸"
+      data-testid="settings-terminal-shell"
+    >
+      {#each choices as choice (choice.key ?? "")}
+        <option value={choice.key ?? ""}>{choice.label}</option>
+      {/each}
+      {#if shellMissing && savedShell}<option value={savedShell}>{labelFor(savedShell, envs)} (이 PC 에 없음)</option>{/if}
+    </select>
   </SettingsCard>
 
   <SettingsCard
@@ -116,6 +152,21 @@
   }
   .field.bad {
     border-color: rgb(255 99 99 / 0.8);
+  }
+  .select {
+    box-sizing: border-box;
+    min-width: 200px;
+    height: 22px;
+    padding: 0 6px;
+    border-radius: 5px;
+    border: 0.5px solid rgb(255 255 255 / 0.2);
+    background: rgb(255 255 255 / 0.07);
+    color: var(--fg);
+    font-size: 13px;
+    outline: none;
+  }
+  .select:focus {
+    box-shadow: 0 0 0 3px rgb(var(--working) / 0.45);
   }
   .error {
     font-size: 11px;

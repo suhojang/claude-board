@@ -17,18 +17,25 @@ use serde_json::json;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::State;
 
+use crate::board::Board;
 use crate::pty::{self, Pty};
 use crate::ring::{Out, Sink, Stream, RING_CAP};
 
 /// `term_kill` 이 가짜 콘솔을 닫은 뒤 프로세스가 끝나길 기다리는 시간. 넘으면 강제 종료한다.
 const KILL_GRACE: Duration = Duration::from_secs(6);
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SpawnSpec {
     pub cwd: Option<String>,
     pub cols: u16,
     pub rows: u16,
+    /// 셸 키(`pwsh` · `powershell` · `cmd` · `git-bash` · `wsl` · `wsl:<배포판>`). 없으면 설정의 `terminalShell`, 그것도 없으면 기본 셸.
+    #[serde(default)]
+    pub shell: Option<String>,
+    /// 이 탭에 보드가 `claude …` 명령을 쳐 넣을 것인가(새 세션·이어 열기). 참이면 쳐 넣지 못하는 셸(WSL)은 기본 셸로 바꿔 띄운다.
+    #[serde(default)]
+    pub types_claude: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -36,7 +43,7 @@ pub struct SpawnSpec {
 pub struct TermInfo {
     pub id: String,
     pub pid: u32,
-    /// `pwsh` · `powershell` · `cmd`
+    /// 실제로 띄운 셸 키 — `pwsh` · `powershell` · `cmd` · `git-bash` · `wsl` · `wsl:<배포판>`
     pub shell: String,
     pub cwd: String,
     pub cols: u16,
@@ -113,17 +120,35 @@ impl TermHub {
         lock(&self.terms).iter().find(|t| t.id == id).cloned().ok_or_else(|| format!("없는 터미널: {id}"))
     }
 
-    /// 기본 셸(pwsh → powershell → ComSpec)을 `spec` 의 크기로 띄운다. 시작 폴더는 `spec.cwd`, 없으면 홈 폴더.
+    /// `spec.shell` 이 가리키는 셸(없거나 못 쓰면 기본 셸 pwsh → powershell → ComSpec)을 `spec` 의 크기로 띄운다.
+    /// 시작 폴더는 `spec.cwd`, 없으면 홈 폴더. 인자는 셸 문자열을 거치지 않고 배열로 넘긴다.
     pub fn spawn(&self, spec: SpawnSpec) -> Result<TermInfo, String> {
-        let shell = pty::resolve_shell().ok_or("셸(pwsh·powershell·cmd)을 찾지 못했다")?;
         let cwd = spec.cwd.map(Into::into).filter(|p: &std::path::PathBuf| p.is_dir()).unwrap_or_else(paths::home);
-        self.spawn_program(shell.kind, &shell.path, &shell.args, &cwd, spec.cols, spec.rows)
+        let shell = pick_shell(spec.shell.as_deref(), spec.types_claude, &cwd)?;
+        let process_cwd = pty::process_cwd(&shell.kind, &cwd);
+        self.spawn_program_in(&shell.kind, &shell.path, &shell.args, &cwd, &process_cwd, spec.cols, spec.rows)
     }
 
-    /// 프로그램 하나를 가짜 콘솔에 띄우고 리더·웨이터를 돌린다.
+    /// 프로그램 하나를 가짜 콘솔에 띄우고 리더·웨이터를 돌린다(작업 폴더 = 알리는 폴더). 시험에서 쓴다.
+    #[cfg(test)]
     fn spawn_program(&self, shell: &str, program: &Path, args: &[String], cwd: &Path, cols: u16, rows: u16) -> Result<TermInfo, String> {
+        self.spawn_program_in(shell, program, args, cwd, cwd, cols, rows)
+    }
+
+    /// `spawn_program` 인데 프로세스의 작업 폴더(`process_cwd`)가 터미널이 알리는 폴더(`cwd`)와 다를 수 있다(WSL UNC 폴더).
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_program_in(
+        &self,
+        shell: &str,
+        program: &Path,
+        args: &[String],
+        cwd: &Path,
+        process_cwd: &Path,
+        cols: u16,
+        rows: u16,
+    ) -> Result<TermInfo, String> {
         let (cols, rows) = (cols.max(2), rows.max(1));
-        let pty = Arc::new(Pty::spawn(program, args, cwd, cols, rows).map_err(|e| format!("{} 을(를) 띄우지 못했다: {e}", program.display()))?);
+        let pty = Arc::new(Pty::spawn(program, args, process_cwd, cols, rows).map_err(|e| format!("{} 을(를) 띄우지 못했다: {e}", program.display()))?);
         let stream = Arc::new(Stream::new(RING_CAP));
         let id = format!("t{}", self.next_id.fetch_add(1, Ordering::Relaxed) + 1);
         spawn_reader(&id, &pty, &stream);
@@ -232,6 +257,19 @@ impl TermHub {
     }
 }
 
+/// 띄울 셸을 고른다 — 키가 가리키는 셸(`terminal::shell_key_for` 가 걸러낸 것)이 이 PC 에 있으면 그것, 아니면 기본 셸.
+/// 못 찾아 기본 셸로 돌아갈 때는 보드 기록에 남긴다(설정에 남은 배포판이 지워진 경우).
+fn pick_shell(requested: Option<&str>, types_claude: bool, cwd: &Path) -> Result<pty::Shell, String> {
+    let wanted = crate::terminal::shell_key_for(requested, types_claude);
+    if let Some(key) = wanted {
+        match pty::resolve_shell_for(key, cwd) {
+            Some(shell) => return Ok(shell),
+            None => crate::util::board_log(&format!("셸 {key} 을(를) 찾지 못해 기본 셸로 연다")),
+        }
+    }
+    pty::resolve_shell().ok_or_else(|| "셸(pwsh·powershell·cmd)을 찾지 못했다".to_string())
+}
+
 /// 출력 파이프를 끝까지 비워 고리에 쓴다. 끝(EOF)에 닿으면 `Exit` 이 나갈 수 있게 표시한다.
 fn spawn_reader(id: &str, pty: &Arc<Pty>, stream: &Arc<Stream>) {
     let (pty, stream) = (Arc::clone(pty), Arc::clone(stream));
@@ -281,7 +319,11 @@ fn channel_sink(ch: Channel<InvokeResponseBody>) -> Sink {
 type Hub<'a> = State<'a, TermHub>;
 
 #[tauri::command(async)]
-pub fn term_spawn(hub: Hub<'_>, spec: SpawnSpec) -> Result<TermInfo, String> {
+pub fn term_spawn(hub: Hub<'_>, board: State<'_, Arc<Board>>, mut spec: SpawnSpec) -> Result<TermInfo, String> {
+    // 탭이 셸을 따로 정하지 않았으면 설정에서 고른 셸을 쓴다(null 이면 기본 셸)
+    if spec.shell.is_none() {
+        spec.shell = board.settings.lock().unwrap().terminal_shell.clone();
+    }
     hub.spawn(spec)
 }
 

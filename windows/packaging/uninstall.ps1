@@ -2,7 +2,7 @@
 #   irm https://raw.githubusercontent.com/suhojang/claude-board/main/windows/packaging/uninstall.ps1 | iex
 # 사용자 설정은 claude-board-hook.exe uninstall 이 되돌리고(지금 Claude Code 로그인은 그대로 둔다), 앱 폴더는 이 스크립트가 지운다
 # (실행 중인 자기 exe 는 지울 수 없으므로). setup.exe 로 설치한 폴더면 그 제거 프로그램도 돌려 설정 > 앱 목록에서 뺀다.
-# 앱 폴더의 plugins\md-render\ 는 앱 폴더와 함께 지워지고, 보드가 옮겨 쓴 %USERPROFILE%\.claude\notifier\plugins 도 이 스크립트가 지운다
+# 앱 폴더의 자율주행 claude-autopilot.exe·claude-autopilot-engine.exe 와 plugins\md-render\ 는 앱 폴더와 함께 지워지고, 보드가 옮겨 쓴 %USERPROFILE%\.claude\notifier\plugins 도 이 스크립트가 지운다
 # (macOS Uninstall.command 가 notifier 의 plugins 를 지우는 것과 같다. CLAUDE_BOARD_NOTIFIER_DIR 로 옮긴 실행에서는 plugins 를 두고 hook uninstall 도 같다).
 # install.ps1 과 같이 Windows PowerShell 5.1 에서도 돌게 쓰고, exit 를 쓰지 않으며, BOM 없이 코드는 ASCII 로만 쓴다.
 

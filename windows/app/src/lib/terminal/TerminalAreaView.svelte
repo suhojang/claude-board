@@ -9,6 +9,7 @@
   import { runShortcutAction } from "$lib/shortcuts/run";
   import { currentOverrides, ShortcutSettings } from "$lib/shortcuts/store.svelte";
   import type { BoardSide } from "$lib/types";
+  import { AutopilotStart } from "$lib/autopilot/start.svelte";
   import NewSessionSheet from "./NewSessionSheet.svelte";
   import PaneView from "./PaneView.svelte";
   import TerminalWorkspaceBar from "./TerminalWorkspaceBar.svelte";
@@ -52,7 +53,7 @@
         e.stopPropagation();
         return;
       }
-      const modalOpen = !!(TerminalHub.confirm || TerminalHub.sheet);
+      const modalOpen = !!(TerminalHub.confirm || TerminalHub.sheet || AutopilotStart.shown);
       // 키 표(바꾼 키 포함)는 shortcuts/dispatch.ts 가 쥔다. 수정키가 든 키는 글자 조합이 아니라 단축키라 조합 중이어도 알아본다 — 입력기가 같은 키를 한 번 더 쏘는 것은 위 refire 가 삼킨다
       const composing = (e.isComposing || e.keyCode === 229) && !(e.ctrlKey || e.altKey || e.metaKey);
       const action = dispatch(e, { recording: ShortcutSettings.recording, composing, modalOpen, settingsShown: SettingsScreen.shown, escapeOwned: ownsEscape(e.target), overrides: currentOverrides() });

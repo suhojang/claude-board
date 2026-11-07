@@ -48,7 +48,7 @@ irm https://raw.githubusercontent.com/suhojang/claude-board/main/windows/packagi
 
 ### 💿 설치 프로그램(setup.exe)으로 설치
 
-설치 프로그램 [ClaudeBoard-3.2.3-setup.exe](https://github.com/suhojang/claude-board/releases/download/windows-v3.2.3/ClaudeBoard-3.2.3-setup.exe) 를 받아 실행해도 됩니다([windows-v3.2.3 릴리스](https://github.com/suhojang/claude-board/releases/tag/windows-v3.2.3)).
+설치 프로그램 [ClaudeBoard-3.2.4-setup.exe](https://github.com/suhojang/claude-board/releases/download/windows-v3.2.4/ClaudeBoard-3.2.4-setup.exe) 를 받아 실행해도 됩니다([windows-v3.2.4 릴리스](https://github.com/suhojang/claude-board/releases/tag/windows-v3.2.4)).
 다른 버전은 [릴리스 목록](https://github.com/suhojang/claude-board/releases)에서 `windows-v` 로 시작하는 릴리스를 고르세요. **Latest** 표시가 붙은 것은 macOS 판입니다.
 
 - 🛡️ 코드 서명이 없어 SmartScreen 이 "Windows 의 PC 보호" 창을 띄웁니다. **추가 정보 → 실행** 을 누르면 설치됩니다.
@@ -89,7 +89,7 @@ irm https://raw.githubusercontent.com/suhojang/claude-board/main/windows/packagi
 | 🤏 창을 작게 두기 | 오른쪽 위 최대축소 단추(↘↖)로 미니 화면, 같은 자리의 ⤢ 로 원래 크기 |
 | 🌫️ 마우스가 밖일 때 흐리게 | 오른쪽 아래 투명도 슬라이더: 마우스가 보드 밖에 있으면 보드가 앞에 있어도 그 투명도로 보입니다. 작업 영역 전체를 덮은 창은 불투명합니다 |
 | 🎭 캐릭터 바꾸기 | 캐릭터를 오른쪽 클릭하거나 설정 > 일반 |
-| 🖥️ 터미널 열기 | 창 오른쪽 아래 끝의 탭에 마우스를 대면 Windows Terminal · PowerShell 7 · Windows PowerShell · 명령 프롬프트 · Git Bash 단추가 나옵니다 |
+| 🖥️ 터미널 열기 | 창 오른쪽 아래 끝의 탭에 마우스를 대면 Windows Terminal · PowerShell 7 · Windows PowerShell · 명령 프롬프트 · Git Bash · WSL(배포판마다) 단추가 나옵니다 |
 
 제목 옆에는 Claude Board 버전이, 그 아래 활성 세션 수 옆에는 설치된 Claude Code 버전이 보입니다.
 화면 구성(보드 · 알림 패널 · 중간 화면 · 미니 화면 · 새 버전 알림)은 macOS 판과 같습니다. 그림은 [macOS 판 README](../README.md) 를 보세요.
@@ -115,7 +115,8 @@ irm https://raw.githubusercontent.com/suhojang/claude-board/main/windows/packagi
 ### 🖥️ 내장 터미널
 
 보드 창 안에 터미널 영역이 있습니다. 위에서 아래로 제목 띠 · 경로 줄 · 탭 줄 · 화면입니다.
-세션을 시작하면 그 폴더의 새 탭이 열리고, 탭마다 셸(PowerShell 7 · Windows PowerShell · 명령 프롬프트 중 이 PC 에 있는 것, 이 순서) 하나가 돕니다.
+세션을 시작하면 그 폴더의 새 탭이 열리고, 탭마다 셸 하나가 돕니다. 기본(자동)은 PowerShell 7 · Windows PowerShell · 명령 프롬프트 중 이 PC 에 있는 것(이 순서)이고,
+설정 > 터미널 > **새 탭 셸** 에서 Git Bash 나 WSL 배포판(배포판마다 한 줄, WSL 이 없는 PC 에서는 보이지 않음)으로 바꿀 수 있습니다.
 `claude` 는 그 셸에 보드가 대신 쳐 넣어 실행하므로, Claude Code 를 끝내면(`/exit`) 같은 탭이 셸 프롬프트로 돌아옵니다. 셸을 끝내면 탭이 닫힙니다.
 탭이 하나도 없으면 "보드에서 띄운 세션이 없습니다" 와 **새 세션** 단추가 보입니다.
 보드를 끄고 켜도 탭이 돌아오고(고른 탭은 곧바로 `claude --resume` 으로, 나머지는 그 탭을 누를 때), 트레이 **종료** 는 도는 세션이 있을 때 먼저 묻습니다. 보드 탭에서 띄우는 `claude` 에는 답변 마크다운 꾸미기 플러그인(md-render)이 붙습니다.
@@ -127,6 +128,7 @@ Windows 11 한 대에서 확인했습니다: 탭 · 경로 줄 · 새 세션 · 
 |---|---|
 | 터미널 펼치기 · 접기 | 제목 막대의 터미널 단추, 트레이 아이콘 오른쪽 클릭 > **터미널 펼치기 (Ctrl+Alt+T)**, 또는 어느 앱에서든 **Ctrl+Alt+T** |
 | 새 세션 시작 | 탭 줄의 **+ Ctrl+T**, 빈 화면의 **새 세션**, 또는 터미널이 펼쳐진 동안 **Ctrl+T**. 폴더(보드에 있는 경로 또는 다른 폴더)와 명령을 골라 **새 탭에서 시작** |
+| 이번 탭만 다른 셸로 열기 | 탭 줄 **+** 오른쪽의 **▾**(또는 **+** 오른쪽 클릭) > 셸 고르기: 지금 경로에 그 셸의 빈 탭을 엽니다. 늘 쓸 셸은 설정 > 터미널 > **새 탭 셸** 에서 정합니다 |
 | 경로 카드에서 바로 시작 | 보드 카드 머리의 **+** : 그 경로에서 기본 명령(`claude --dangerously-skip-permissions`)으로 새 탭을 엽니다 |
 | 탭 · 경로 고르기 | 탭이나 경로 줄 항목을 누르기. 키는 **Ctrl+Alt+1~9**(지금 경로의 n 번째 탭), **Ctrl+Alt+← →**(이전/다음 탭), **Ctrl+Alt+↑ ↓**(이전/다음 경로) |
 | 탭 이름 바꾸기 | **Ctrl+Shift+R** (Enter 저장, Esc 취소). 그 탭에서 도는 Claude Code 에는 `/rename` 도 보냅니다 |
@@ -148,6 +150,25 @@ Windows 11 한 대에서 확인했습니다: 탭 · 경로 줄 · 새 세션 · 
 - ⚠️ **Ctrl+Alt+T 는 JetBrains IDE 등 다른 앱의 같은 단축키와 겹칩니다.** 보드가 켜져 있는 동안은 보드가 가져가고, 다른 앱이 먼저 쓰고 있으면 보드 쪽 등록이 실패합니다(`board.log` 에 기록, 단추와 트레이 메뉴는 그대로 됩니다).
   AltGr 로 문자를 치는 키보드 배열에서는 Ctrl+Alt 조합이 그 글자와 겹쳐 입력이 막힐 수 있습니다.
 - 한국어 키보드에서는 **왼쪽** Ctrl+Alt 로 누르세요.
+- **WSL 탭**: `wsl.exe -d <배포판> --cd <폴더>` 로 열립니다(폴더가 `\\wsl.localhost\<배포판>\…` 이면 그 배포판의 리눅스 경로로 시작). 보드는 WSL 탭에 `claude` 를 쳐 넣지 않아서, 새 세션과 이어 열기는 WSL 을 골라 두어도 기본 셸 탭에서 열립니다.
+  WSL 탭에서 손으로 친 `claude` 는 보드에 카드가 생기지 않습니다(알려진 한계). 실제 WSL 배포판에서는 확인하지 않았습니다(미확인).
+
+### 🤖 자율주행 (미리 보기)
+
+> 🧪 **미리 보기입니다.** 보드 머리의 **자율주행** 단추로 여는 시작 준비 화면이나 명령줄로 시작합니다. 명령줄 `claude-autopilot.exe` 와 엔진 `claude-autopilot-engine.exe` 는 zip · setup.exe · install.ps1 에 들어 있고 같은 폴더에 설치됩니다(install.ps1 은 `%LOCALAPPDATA%\Programs\Claude Board\`, setup.exe 는 `%LOCALAPPDATA%\Claude Board\`). PATH 에는 들어가지 않으니 터미널에서는 그 폴더의 전체 경로로 부릅니다.
+
+정해 둔 단위 작업을 사람이 자리를 비운 사이 Claude Code 로 차례로 돌립니다. 단위마다 판정 명령이 통과해야 끝난 것으로 칩니다. 작업 스케줄러가 1분마다 엔진을 살려 두고(관리자 권한 불필요), 보드는 진행을 경로 카드 안의 한 줄로 보여 줍니다.
+
+- 한 줄에는 상태 · 실행 환경 · 지금 단위 · 쓴 시간 · 비용 · 통과 수가 보이고, 일시정지 · 재개 · 중단 단추가 있습니다. 실행 환경을 고를 때 기본값은 없습니다.
+- ⚠️ **WSL 이 아닌 환경(PowerShell · 명령 프롬프트 · Git Bash)에서는 Claude Code 샌드박스가 없습니다.** 모델이 쓰는 도구가 이 PC 에서 그 사용자 권한으로 돕니다. 그래서 출발할 때 `--accept-unsandboxed` 로 직접 동의해야 하고, 줄에는 **샌드박스 없음** 칩이 붙습니다. 샌드박스는 WSL2 에 bubblewrap 과 socat 을 깐 배포판에서만 걸립니다.
+- 그래도 엔진은 하네스 파일 · `.git/config` 와 `.git/hooks` · 로그인 정보 파일 · 시작 프로그램 폴더 · `git push` 를 늘 막고, 실행이 허용 규칙을 적어 주지 않으면 Bash 를 켜지 않습니다. 다만 이 거부 규칙은 도구 권한만 막으므로 Bash 를 허용한 실행이 하는 일까지 막지는 못합니다.
+- 시작 준비 화면에서는 프로젝트 폴더 · 단위(제목 · 목표 · 작업 폴더 · 판정 명령 · 시간과 비용 상한, 최대 30개) · 실행 환경 · 모델을 정합니다. WSL 은 작업 폴더를 `\\wsl.localhost\<배포판>\…` 로 적어야 합니다. 규칙은 명령줄이 갖고, 거절하면 그 글이 화면에 그대로 뜹니다.
+- 아직 없는 것: 합치기 / 승격 화면 · Jira · Notion · Figma 연결 · 보고서 · 터미널로 이어받기 · 여러 실행 자리.
+- 확인한 것은 가짜 claude 로 끝까지 돌린 것, 진짜 claude 로 명령 프롬프트에서 단위 하나가 끝까지 통과한 것(0.04 USD), 실제 WSL 에서 판정 · 준비 확인 · 경로 변환을 돌린 것입니다.
+- 확인하지 않은 것(미확인): 실제 WSL 에서 자율주행을 끝까지 돌리는 것과 WSL 샌드박스, Git Bash · PowerShell 환경의 진짜 claude 실행, 로그오프 · 재부팅 뒤 다시 뜨는 것, 오래 도는 실행, 실제 Windows 10. 시작 준비 화면은 실제 보드 창에서 돌려 보지 않았고(브라우저 모의 화면과 명령줄로만 확인), 두 exe 가 든 실제 setup.exe 설치도 확인하지 않았습니다.
+- 보드를 제거해도 작업 스케줄러에 등록된 자율주행 작업은 남습니다. 제거 전에 `claude-autopilot unregister --all` 을 먼저 실행하세요.
+
+써 보는 방법은 [설치 가이드 4장](docs/설치%20가이드.md), 구조와 확인한 범위는 [SPEC 12장](docs/SPEC.md) 에 있습니다.
 
 ## 🔄 업데이트
 
@@ -172,6 +193,7 @@ irm https://raw.githubusercontent.com/suhojang/claude-board/main/windows/packagi
 앱, `%USERPROFILE%\.claude\notifier\` 의 hook 실행 파일 · 세션 기록 · 보드가 옮겨 둔 답변 꾸미기 플러그인(`plugins\`), settings.json 의 hook 과 환경변수(백업 후), 로그인 자동 실행,
 `claude-board` · `claude-board-tui` 명령, 계정 전환용으로 저장한 로그인 정보와 그 목록의 깨진 백업(`accounts.json.broken-<시각>`)을 지웁니다. 지금 Claude Code 로그인은 그대로 둡니다.
 setup.exe 로 설치했다면 **설정 > 앱 > 설치된 앱** 에서 Claude Board 를 제거해도 같습니다.
+자율주행을 썼다면 제거 전에 `claude-autopilot unregister --all` 을 먼저 실행하세요. 제거는 작업 스케줄러에 등록된 자율주행 작업을 지우지 않습니다.
 
 ## 🍎 macOS 판과 다른 점
 
@@ -180,7 +202,8 @@ setup.exe 로 설치했다면 **설정 > 앱 > 설치된 앱** 에서 Claude Boa
 | hook | python3 스크립트 | 실행 파일 하나(`claude-board-hook.exe`): 셸을 거치지 않는 형식(command + args)으로 등록 |
 | 상태 아이콘 | 메뉴 막대 | 작업 표시줄 알림 영역(트레이) |
 | 보드 단축키 | ⌃⌥B | Ctrl+Alt+B (터미널 펼치기 · 접기는 Ctrl+Alt+T) |
-| 내장 터미널 | 보드 탭 여러 개 · 화면 나누기 · 세션 연결 · 탭 복원 · 끌 때 확인 · 마크다운 꾸미기 · 보드로 옮기기 | 탭 · 경로 줄 · 새 세션 창 · 이름 바꾸기 · 세션 연결 칩 · 일시중지/재개/중단 · 탭 복원 · 끌 때 확인 · 마크다운 꾸미기 · 보드로 옮기기는 있음. 화면 나누기 · 글꼴 크기 · 테마 · 설정 화면 · 단축키 바꾸기는 아직 없음 |
+| 내장 터미널 | 보드 탭 여러 개 · 화면 나누기 · 세션 연결 · 탭 복원 · 끌 때 확인 · 마크다운 꾸미기 · 보드로 옮기기 | 탭 · 경로 줄 · 새 세션 창 · 이름 바꾸기 · 세션 연결 칩 · 일시중지/재개/중단 · 탭 복원 · 끌 때 확인 · 마크다운 꾸미기 · 보드로 옮기기 · 설정 화면 · 단축키 바꾸기 · 새 탭 셸 고르기(Git Bash · WSL 포함)는 있음. 화면 나누기 · 글꼴 크기 · 테마는 아직 없음 |
+| 자율주행 | 보드에서 시작 · 합치기 · 보고서 | 미리 보기: 시작 준비 화면이나 명령줄로 시작, 합치기 · 보고서는 없음, 경로 카드의 실행 줄(상태 · 일시정지/재개/중단). 실행 환경(WSL · 네이티브)을 실행마다 고르고 네이티브는 샌드박스 없음 |
 | 세션으로 이동 · 이어 열기 | Ghostty 1.3 이상 | 보드 탭은 그 탭으로, 다른 터미널은 콘솔 창 + Windows Terminal 탭(최선 노력). 이어 열기는 보드 탭에서 |
 | 일시중지 · 재개 · 중단 · 자동 전환 뒤 이어 가기 | Ghostty 에 키 입력 | 보드 탭에는 탭에 키를 넣고 다른 콘솔에는 콘솔 입력으로 키를 넣기(최선 노력) |
 | 저장한 계정 토큰 | 키체인 | DPAPI 로 암호화한 파일: 이 PC 의 이 Windows 사용자만 풀 수 있습니다 |
@@ -189,7 +212,7 @@ setup.exe 로 설치했다면 **설정 > 앱 > 설치된 앱** 에서 Claude Boa
 | 터미널과 함께 띄우기 | Ghostty 를 열 때(`~/.zshrc` 줄) | Windows Terminal 이 새로 뜨면 숨은 보드를 다시 보이기 |
 | 앱 확인 | 개인 인증서 서명 확인 | 코드 서명 없음: 설치 스크립트가 SHA256 으로 확인, setup.exe 는 SmartScreen 경고 |
 | 새 버전 확인 | 최신(Latest) 릴리스 | 릴리스 목록에서 `windows-v` 로 시작하는 태그 |
-| 터미널 독 | Ghostty · iTerm2 · 터미널 · Orca | Windows Terminal · PowerShell 7 · Windows PowerShell · 명령 프롬프트 · Git Bash |
+| 터미널 독 | Ghostty · iTerm2 · 터미널 · Orca | Windows Terminal · PowerShell 7 · Windows PowerShell · 명령 프롬프트 · Git Bash · WSL 배포판 |
 
 ## 🛠️ 배포 (관리자)
 

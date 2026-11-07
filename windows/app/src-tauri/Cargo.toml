@@ -18,6 +18,8 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 claude-board-core = { path = "../../crates/core" }
+# 자율주행 실행 폴더 모델(model)과 보드가 보낼 수 있는 요청 판정(rules::control)을 다시 쓴다 — 같은 꼴을 두 번 적지 않는다
+claude-board-autopilot = { path = "../../crates/autopilot" }
 # macos-private-api — 개발 기기(macOS)에서 투명 창을 확인하려고 켠다. Windows 빌드에는 영향이 없다
 tauri = { version = "2", features = ["tray-icon", "image-png", "macos-private-api"] }
 tauri-plugin-single-instance = "2"

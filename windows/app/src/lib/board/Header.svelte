@@ -4,6 +4,7 @@
   import { scale } from "svelte/transition";
   import type { Snapshot, State } from "$lib/types";
   import Foreman from "$lib/mascot/Foreman.svelte";
+  import { openAutopilotStart } from "$lib/autopilot/start.svelte";
   import { checkUpdate, reveal, setAllCollapsed, setAllMuted, setMascot, setPinned, setUsageCompact } from "$lib/backend";
   import Fit from "./Fit.svelte";
   import Icon from "./Icon.svelte";
@@ -117,6 +118,10 @@
             <Icon name={allFolded ? "expand" : "compress"} size={17} />
           </button>
         {/if}
+        <button class="pin" onclick={openAutopilotStart} use:hint={"자율주행 시작 준비: 프로젝트와 단위를 정해 자율주행을 출발합니다"} data-testid="autopilot-start-open">
+          <Icon name="plus" size={12} />
+          {#if level === 0}<span>자율주행</span>{/if}
+        </button>
         <button class="pin" class:on={pinned} onclick={() => setPinned(!pinned)} use:hint={pinned ? "항상 위에 표시 끄기" : "항상 위에 표시"}>
           <Icon name={pinned ? "pin" : "pin-slash"} size={14} />
           {#if level === 0}<span>{pinned ? "위에 고정" : "고정 안 함"}</span>{/if}

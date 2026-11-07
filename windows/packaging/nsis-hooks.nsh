@@ -2,7 +2,8 @@
 ; app/src-tauri/tauri.conf.json 의 bundle > windows > nsis > installerHooks 가 이 파일을 가리킨다("../../packaging/nsis-hooks.nsh").
 ; 설치가 끝나면 claude-board-hook.exe setup 으로 install.ps1 과 같은 사용자 설정(hook 등록·명령·로그인 자동 실행)을 하고,
 ; 제거할 때는 claude-board-hook.exe uninstall 로 그 설정을 되돌린다(macOS 의 user-setup.sh·Uninstall.command 대응).
-; claude-board-hook.exe 는 externalBin(sidecar)으로 묶여 $INSTDIR 에 claude-board-hook.exe 로 설치된다.
+; claude-board-hook.exe·claude-autopilot.exe·claude-autopilot-engine.exe 는 externalBin(sidecar)으로 묶여 $INSTDIR 에 그 이름으로 설치되고,
+; 제거할 때 Tauri 제거 프로그램이 함께 지운다(자율주행 명령줄은 자기 exe 옆에서 엔진 exe 를 찾으므로 둘은 같은 폴더에 있어야 한다).
 ; 설치 프로그램은 사용자 단위(installMode currentUser)로 돌아야 한다 — 관리자 권한으로 돌면 setup 이 다른 사용자의 설정에 쓸 수 있다.
 ; Tauri 가 만드는 NSIS 파일처럼 UTF-8(BOM) 으로 저장한다 — 한글 문구가 깨지지 않게.
 

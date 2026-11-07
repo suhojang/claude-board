@@ -116,7 +116,7 @@ pub fn http_get(url: &str, headers: &[(&str, &str)], timeout: Duration) -> Resul
 /// `CREATE_BREAKAWAY_FROM_JOB` (Win32 상수와 같은 값 — 시험이 다른 OS 에서도 돌게 직접 둔다)
 const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
 /// `CREATE_NO_WINDOW`
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+pub(crate) const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// `ERROR_ACCESS_DENIED` — 작업 개체가 떼기를 허락하지 않으면 CreateProcess 가 이것으로 실패한다
 const ERROR_ACCESS_DENIED: i32 = 5;
 

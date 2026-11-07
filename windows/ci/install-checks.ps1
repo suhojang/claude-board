@@ -34,7 +34,7 @@ try {
 
     $inst = Get-InstallLocation
     Test-Value '설치 폴더(Uninstall 키의 InstallLocation) = %LOCALAPPDATA%\Claude Board (installMode currentUser)' $CbSetupDir $inst
-    foreach ($f in @('ClaudeBoard.exe', 'claude-board-hook.exe', 'uninstall.exe')) {
+    foreach ($f in @('ClaudeBoard.exe', 'claude-board-hook.exe', 'claude-autopilot.exe', 'claude-autopilot-engine.exe', 'uninstall.exe')) {
       Test-Value "설치 폴더에 $f" $true (Test-Path -LiteralPath (Join-Path $CbSetupDir $f) -PathType Leaf)
     }
     Test-PluginFiles $CbSetupDir '설치 폴더'
@@ -43,6 +43,9 @@ try {
 
     $ver = Invoke-Native -File (Join-Path $CbSetupDir 'claude-board-hook.exe') -Arguments @('--version') -TimeoutSec 30
     Test-Value 'claude-board-hook.exe --version' "claude-board-hook $CbVersion" ("$($ver.Out)".Trim())
+    # 자율주행 명령줄은 인자 없이 부르면 사용법과 종료 코드 2 를 낸다(--version 은 없다). 엔진은 명령줄 exe 옆에서 찾으므로 같은 폴더에 있다는 위 확인이 그 조건이다
+    $ap = Invoke-Native -File (Join-Path $CbSetupDir 'claude-autopilot.exe') -TimeoutSec 30
+    Test-Value 'claude-autopilot.exe (인자 없음) 종료 코드 = 사용법' 2 $ap.ExitCode
 
     Test-HookRegistration
     Test-PreservedSettings
@@ -197,6 +200,8 @@ try {
     Test-Value '(나) 제자리 제거 종료 코드' 0 $code
     Test-Value '(나) 제거 프로그램이 돌았음 — 설치 폴더의 ClaudeBoard.exe 가 지워짐' $false (Test-Path -LiteralPath (Join-Path $inst 'ClaudeBoard.exe'))
     Test-Value '(나) 설치 폴더의 claude-board-hook.exe 가 지워짐' $false (Test-Path -LiteralPath (Join-Path $inst 'claude-board-hook.exe'))
+    Test-Value '(나) 설치 폴더의 claude-autopilot.exe 가 지워짐' $false (Test-Path -LiteralPath (Join-Path $inst 'claude-autopilot.exe'))
+    Test-Value '(나) 설치 폴더의 claude-autopilot-engine.exe 가 지워짐' $false (Test-Path -LiteralPath (Join-Path $inst 'claude-autopilot-engine.exe'))
     Test-PluginFiles $inst '(나) 지워진 설치 폴더' -Expect $false
     Test-Value '(나) uninstall.exe 는 제자리라 남음' $true (Test-Path -LiteralPath $uninst) -Info
     Test-Value '(나) Uninstall 키가 지워짐' $false (Test-Path -LiteralPath $CbUninstKey) -Info
@@ -344,6 +349,9 @@ try {
     $have = & $tree $CbScriptDir
     Test-Value '(b) %LOCALAPPDATA%\Programs\Claude Board 의 파일 = zip 내용(plugins\md-render 포함, .old-* 없음)' $want $have
     Test-PluginFiles $CbScriptDir '(b) 앱 폴더'
+    foreach ($f in @('claude-autopilot.exe', 'claude-autopilot-engine.exe')) {
+      Test-Value "(b) 앱 폴더에 $f" $true (Test-Path -LiteralPath (Join-Path $CbScriptDir $f) -PathType Leaf)
+    }
     Test-HookRegistration
     Test-PreservedSettings
     $appPath = if (Test-Path -LiteralPath $CbAppPath) { (Read-TextShared $CbAppPath).Trim() } else { $null }

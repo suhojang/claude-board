@@ -132,13 +132,21 @@ jobs:
         working-directory: windows
         run: cargo build --release -p claude-board-hook
 
-      # tauri.conf.json 의 externalBin "binaries/claude-board-hook" 은 대상 이름이 붙은 파일을 찾는다.
-      # Tauri 는 설치할 때 이름에서 대상 이름을 떼어 $INSTDIR\claude-board-hook.exe 로 둔다
-      - name: hook 을 sidecar 자리에 두기
+      # 자율주행 명령줄(claude-autopilot.exe)과 창 없는 엔진(claude-autopilot-engine.exe).
+      # 명령줄은 자기 exe 옆에서 엔진을 찾아 pinned\ 로 복사하므로(cli.rs engine_exe_path) 둘은 같은 폴더에 설치돼야 한다
+      - name: 자율주행 빌드
+        working-directory: windows
+        run: cargo build --release -p claude-board-autopilot
+
+      # tauri.conf.json 의 externalBin "binaries/claude-board-hook"·"binaries/claude-autopilot"·"binaries/claude-autopilot-engine" 은 대상 이름이 붙은 파일을 찾는다.
+      # Tauri 는 설치할 때 이름에서 대상 이름을 떼어 $INSTDIR\claude-board-hook.exe·claude-autopilot.exe·claude-autopilot-engine.exe 로 둔다
+      - name: hook·자율주행을 sidecar 자리에 두기
         run: |
           mkdir -p windows/app/src-tauri/binaries
-          cp windows/target/release/claude-board-hook.exe \
-             windows/app/src-tauri/binaries/claude-board-hook-x86_64-pc-windows-msvc.exe
+          for n in claude-board-hook claude-autopilot claude-autopilot-engine; do
+            cp "windows/target/release/$n.exe" \
+               "windows/app/src-tauri/binaries/$n-x86_64-pc-windows-msvc.exe"
+          done
 
       - name: 프론트엔드 의존성
         working-directory: windows/app
@@ -152,6 +160,9 @@ jobs:
       - name: 프론트엔드 테스트
         working-directory: windows/app
         run: npm test
+
+      - name: 배포물 목록 일치 시험
+        run: node --test windows/ci/packaging-contract.test.cjs
 
       # 버전은 JSON 파일로 넘긴다 — npx 가 Windows 에서 cmd.exe 를 거치므로 따옴표가 든 JSON 문자열은 깨지기 쉽다
       - name: 앱·설치 프로그램(NSIS) 빌드
@@ -188,6 +199,8 @@ jobs:
 
           Copy-Item (Join-Path $ws 'windows\app\src-tauri\target\release\ClaudeBoard.exe') $pkg
           Copy-Item (Join-Path $ws 'windows\target\release\claude-board-hook.exe') $pkg
+          Copy-Item (Join-Path $ws 'windows\target\release\claude-autopilot.exe') $pkg
+          Copy-Item (Join-Path $ws 'windows\target\release\claude-autopilot-engine.exe') $pkg
           Copy-Item (Join-Path $ws 'LICENSE') $pkg
           Copy-Item (Join-Path $ws 'windows\README.md') $pkg
           Copy-Item (Join-Path $ws 'windows\packaging\THIRD_PARTY_NOTICES.txt') $pkg
@@ -352,6 +365,7 @@ jobs:
           # 폴더 항목(끝이 /)은 빼고 파일만 센다
           zip_files="$(unzip -Z1 dist/ClaudeBoard-windows-x64.zip | grep -v '/$' | LC_ALL=C sort)"
           want_zip="$(printf '%s\n' ClaudeBoard.exe LICENSE README.md THIRD_PARTY_NOTICES.txt claude-board-hook.exe \
+            claude-autopilot.exe claude-autopilot-engine.exe \
             plugins/md-render/LICENSE plugins/md-render/README.md plugins/md-render/.claude-plugin/plugin.json \
             plugins/md-render/hooks/hooks.json plugins/md-render/hooks/register.tsx | LC_ALL=C sort)"
           if [ "$zip_files" != "$want_zip" ]; then

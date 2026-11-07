@@ -116,6 +116,19 @@ fn find_claude_exe(path_var: Option<&std::ffi::OsStr>, local_bin: &std::path::Pa
     from_path.or_else(|| Some(local_bin.join(CLAUDE_EXE)).filter(|p| p.is_file()))
 }
 
+/// 자율주행 데이터 뿌리 — macOS `~/Library/Application Support/Claude Board[ Dev]/autopilot` 의 Windows 대응.
+/// 홈을 환경변수로 바꾼 시험·개발 실행은 `<홈>\AppData\Local\Claude Board[ Dev]\autopilot`, 아니면 `%LOCALAPPDATA%\Claude Board[ Dev]\autopilot`
+/// (없으면 홈 아래 같은 자리). 실행 폴더는 보통 `<뿌리>\runs\<실행 id>`, 엔진 전용 자리는 `<뿌리>\private\…`.
+pub fn autopilot_root(dev: bool) -> PathBuf {
+    let under_home = home().join("AppData").join("Local");
+    let local = if overridden() { under_home } else { env_path("LOCALAPPDATA").unwrap_or(under_home) };
+    autopilot_under(&local, dev)
+}
+
+fn autopilot_under(local: &std::path::Path, dev: bool) -> PathBuf {
+    local.join(if dev { "Claude Board Dev" } else { "Claude Board" }).join("autopilot")
+}
+
 /// 경로의 마지막 이름 — Python `os.path.basename` 처럼 끝이 구분자면 빈 문자열.
 /// Windows 는 `\`·`/` 를 모두 구분자로 본다(SPEC §2.1 `project`).
 pub fn basename(path: &str) -> &str {
@@ -155,6 +168,13 @@ mod tests {
         let mark = login_launch_off_file();
         assert_eq!(mark.file_name().and_then(|n| n.to_str()), Some("login-launch-off"));
         assert_eq!(mark.parent(), Some(notifier_dir().as_path()));
+    }
+
+    #[test]
+    fn autopilot_root_names_the_dev_build_apart() {
+        let local = std::path::Path::new("L");
+        assert_eq!(autopilot_under(local, false), local.join("Claude Board").join("autopilot"));
+        assert_eq!(autopilot_under(local, true), local.join("Claude Board Dev").join("autopilot"));
     }
 
     #[test]

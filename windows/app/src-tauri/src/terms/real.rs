@@ -236,7 +236,7 @@ fn default_shell_is_pwsh_and_exit_returns_zero() {
     let shell = pty::resolve_shell().expect("셸을 찾지 못했다");
     eprintln!("기본 셸: {shell:?}");
     assert_eq!(shell.kind, "pwsh", "기본 셸이 pwsh 가 아니다: {shell:?}");
-    let info = hub.spawn(SpawnSpec { cwd: None, cols: 120, rows: 30 }).unwrap();
+    let info = hub.spawn(SpawnSpec { cols: 120, rows: 30, ..Default::default() }).unwrap();
     assert_eq!((info.shell.as_str(), info.status, info.cols, info.rows), ("pwsh", "running", 120, 30));
     assert_eq!(info.cwd, paths::home().to_string_lossy());
     assert_eq!(info.windows_build, pty::windows_build());
@@ -460,4 +460,41 @@ fn exited_terminal_whose_viewer_closed_is_removed() {
     let info = hub.spawn_program("cmd", &cmd, &["/c".into(), "exit 0".into()], &paths::home(), 80, 24).unwrap();
     hub.attach(&info.id, 0, Arc::new(|_| false)).unwrap();
     wait_until("목록에서 빠짐", 20, || hub.list().is_empty());
+}
+
+/// 보드가 claude 를 쳐 넣을 탭이면 WSL 키를 줘도 기본 셸로 뜬다(WSL 은 탭 짝짓기가 안 된다). WSL 을 띄우지 않으므로 VM 은 시작하지 않는다.
+#[test]
+fn claude_typing_tab_falls_back_from_wsl_to_the_default_shell() {
+    let hub = Guard(TermHub::default());
+    let spec = SpawnSpec { cols: 80, rows: 24, shell: Some("wsl:Ubuntu".into()), types_claude: true, ..Default::default() };
+    let info = hub.spawn(spec).unwrap();
+    assert!(!info.shell.starts_with("wsl"), "WSL 로 떴다: {}", info.shell);
+    let v = view(&hub, &info.id);
+    hub.write(&info.id, b"exit\r").unwrap();
+    assert_eq!(v.wait_exit(40), Some(0), "출력: {:?}", v.text());
+}
+
+/// 진짜 WSL 탭 — 배포판(VM)을 띄우므로 평소 시험에서는 뺀다. `cargo test wsl_tab -- --ignored` 로 돌린다.
+/// 첫 배포판에 `wsl.exe -d <이름> --cd <Windows 폴더>` 로 붙어 리눅스 쪽 작업 폴더와 셸 종료 코드를 본다.
+#[test]
+#[ignore = "WSL 배포판(VM)을 띄운다"]
+fn wsl_tab_starts_in_the_given_folder_and_exits() {
+    let Some(entry) = claude_board_core::envs::detect().into_iter().find(|e| e.choice.kind == claude_board_core::envs::EnvKind::Wsl) else {
+        eprintln!("WSL 배포판이 없어 이 시험을 건너뛴다");
+        return;
+    };
+    let key = entry.choice.key();
+    let dir = std::env::temp_dir().join(format!("cb-wsl-tab-{}", crate::util::short_id()));
+    fs::create_dir_all(&dir).unwrap();
+    let hub = Guard(TermHub::default());
+    let spec = SpawnSpec { cwd: Some(dir.to_string_lossy().into_owned()), cols: 120, rows: 30, shell: Some(key.clone()), ..Default::default() };
+    let info = hub.spawn(spec).unwrap();
+    assert_eq!(info.shell, key);
+    let v = view(&hub, &info.id);
+    // 리눅스에서 본 작업 폴더가 `/mnt/<드라이브>/…` 로 시작해야 한다(--cd 가 Windows 경로를 바꿔 읽었다)
+    hub.write(&info.id, b"echo CBWSL_$(pwd)_END\r").unwrap();
+    v.wait_text("CBWSL_/mnt/", 90);
+    hub.write(&info.id, b"exit\r").unwrap();
+    assert_eq!(v.wait_exit(40), Some(0), "출력: {:?}", v.text());
+    let _ = fs::remove_dir_all(&dir);
 }

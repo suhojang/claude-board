@@ -28,7 +28,7 @@ function global:Invoke-RestMethod {
   param([string]$Uri, [string]$UserAgent, [switch]$UseBasicParsing)
   [void]$global:CiCalls.Add("Invoke-RestMethod $Uri")
   Write-Host "   (가로챔) Invoke-RestMethod $Uri (UserAgent $UserAgent)"
-  if ($Uri -ne 'https://api.github.com/repos/suhojang/claude-board/releases?per_page=30') {
+  if ($Uri -ne 'https://api.github.com/repos/suhojang/claude-board/releases?per_page=100&page=1') {
     throw "예상하지 못한 Invoke-RestMethod 주소: $Uri"
   }
   # GitHub 릴리스 목록 API 처럼 최신이 앞 — macOS 판 릴리스(Latest)가 맨 앞이다

@@ -1,0 +1,47 @@
+[package]
+name = "claude-board-autopilot"
+# 실제 버전은 windows/VERSION 한 곳에서 관리한다
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Claude Board 자율주행 엔진 — 규칙·상태 기계·포트(라이브러리)와 claude-autopilot.exe"
+
+[lib]
+name = "claude_board_autopilot"
+
+[[bin]]
+name = "claude-autopilot"
+path = "src/bin/claude-autopilot.rs"
+
+# 작업 스케줄러가 1분마다 띄우는 엔진 — 콘솔 창이 뜨지 않게 창 없는 하위 시스템으로 빌드한다
+[[bin]]
+name = "claude-autopilot-engine"
+path = "src/bin/claude-autopilot-engine.rs"
+
+[dependencies]
+claude-board-core = { path = "../core" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.149", features = ["preserve_order"] }
+# 실행 기록 저장소(판 4). bundled 는 SQLite 를 함께 빌드한다(MSVC 필요, CI 에 있음)
+rusqlite = { version = "0.41.1", features = ["bundled"] }
+sha2 = "0.11.1"
+unicode-normalization = "0.1.26"
+# 사용량 API 호출. 보드(app/src-tauri)와 같은 구성(운영체제 인증서 저장소 사용은 http 어댑터가 맡는다)
+ureq = { version = "3", default-features = false, features = ["native-tls"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Globalization",
+    "Win32_Security",
+    "Win32_Security_Cryptography",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_IO",
+    "Win32_System_JobObjects",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+tempfile = "3.27.0"

@@ -9,17 +9,18 @@ use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use claude_board_core::console;
+use claude_board_core::envs::{self, EnvChoice, EnvEntry, EnvKind};
 use claude_board_core::proc::{self, ProcessTable};
 use claude_board_core::{clock, paths, quote};
 use serde_json::json;
 
 use crate::board::Board;
 use crate::drive::{drive, steps_for, still_same_session, Purpose};
-use crate::model::{Session, TerminalApp};
+use crate::model::{EnvChoiceView, Session, TerminalApp};
 use crate::open_session;
 use crate::session_action::SessionAction;
 use crate::util::board_log;
@@ -292,6 +293,8 @@ pub struct Terminals {
     installed: HashMap<String, PathBuf>,
     checked_at: f64,
     running: HashSet<String>,
+    /// 찾은 WSL 배포판(배포판마다 하나). `wsl.exe -l -q` 가 오래 걸릴 수 있어 따로 스레드에서 채운다.
+    wsl: Arc<Mutex<Vec<EnvEntry>>>,
 }
 
 fn env_dir(key: &str) -> Option<PathBuf> {
@@ -332,6 +335,7 @@ impl Terminals {
         if now - self.checked_at >= 60.0 {
             self.checked_at = now;
             self.installed = DOCK.iter().filter_map(|(id, _, _)| locate(id).map(|p| (id.to_string(), p))).collect();
+            self.refresh_wsl();
         }
         self.running = DOCK
             .iter()
@@ -340,15 +344,29 @@ impl Terminals {
             .collect();
     }
 
+    /// WSL 배포판 목록을 스레드에서 다시 읽는다 — 보드가 목록 읽기를 기다리지 않는다. WSL 이 없으면 빈 목록.
+    fn refresh_wsl(&self) {
+        let slot = Arc::clone(&self.wsl);
+        std::thread::spawn(move || *slot.lock().unwrap() = wsl_entries(envs::detect()));
+    }
+
     pub fn view(&self) -> Vec<TerminalApp> {
-        DOCK.iter()
+        let mut apps: Vec<TerminalApp> = DOCK
+            .iter()
             .map(|(id, name, _)| TerminalApp {
                 id: id.to_string(),
                 name: name.to_string(),
                 installed: self.installed.contains_key(*id),
                 running: self.running.contains(*id),
             })
-            .collect()
+            .collect();
+        apps.extend(wsl_apps(&self.wsl.lock().unwrap()));
+        apps
+    }
+
+    /// 독 id(`wsl:<배포판>`)에 맞는 WSL 환경.
+    fn wsl_entry(&self, id: &str) -> Option<EnvEntry> {
+        self.wsl.lock().unwrap().iter().find(|e| e.choice.key() == id).cloned()
     }
 
     fn path(&self, id: &str) -> Option<PathBuf> {
@@ -358,6 +376,9 @@ impl Terminals {
 
 /// 독 단추: 실행 중이면 그 창으로, 아니면 새로 연다(셸 명령줄 없이 실행 파일만).
 pub fn open_terminal(board: &Arc<Board>, id: String) {
+    if id.starts_with("wsl") {
+        return open_wsl(board, &id);
+    }
     let exe = board.terminals.lock().unwrap().path(&id);
     let Some(exe) = exe else { return };
     std::thread::spawn(move || {
@@ -382,6 +403,53 @@ pub fn open_terminal(board: &Arc<Board>, id: String) {
             board_log(&format!("{} 실행 실패: {e}", exe.display()));
         }
     });
+}
+
+/// WSL 독 단추: 실행 중인지 창 제목으로 확인하지 않고 늘 새 콘솔 창을 연다(`wsl.exe -d <배포판> --cd ~` — 리눅스 홈에서 시작).
+fn open_wsl(board: &Arc<Board>, id: &str) {
+    let Some(entry) = board.terminals.lock().unwrap().wsl_entry(id) else { return };
+    let args = wsl_dock_args(entry.choice.distro.as_deref());
+    std::thread::spawn(move || {
+        if let Err(e) = spawn_console(&entry.program, &args, &paths::home(), &[]) {
+            board_log(&format!("{} 실행 실패: {e}", entry.program.display()));
+        }
+    });
+}
+
+/// 찾은 환경 가운데 WSL 만.
+fn wsl_entries(found: Vec<EnvEntry>) -> Vec<EnvEntry> {
+    found.into_iter().filter(|e| e.choice.kind == EnvKind::Wsl).collect()
+}
+
+/// 독에 보일 WSL 단추 — 배포판마다 하나(`WSL · <이름>`). 있는 것만 보이므로 늘 설치됨이고, 실행 중 표시는 하지 않는다.
+fn wsl_apps(entries: &[EnvEntry]) -> Vec<TerminalApp> {
+    entries.iter().map(|e| TerminalApp { id: e.choice.key(), name: e.label.clone(), installed: true, running: false }).collect()
+}
+
+/// 독 단추가 새 창에서 띄우는 `wsl.exe` 인자 — 배포판을 정하고 리눅스 홈(`~`)에서 시작한다.
+fn wsl_dock_args(distro: Option<&str>) -> Vec<String> {
+    let mut args: Vec<String> = distro.into_iter().flat_map(|d| ["-d".to_string(), d.to_string()]).collect();
+    args.extend(["--cd".to_string(), "~".to_string()]);
+    args
+}
+
+/// 설정 화면이 고르게 하는 실행 환경 목록 — `[{key,label}]`.
+pub fn env_views(found: &[EnvEntry]) -> Vec<EnvChoiceView> {
+    found.iter().map(|e| EnvChoiceView { key: e.choice.key(), label: e.label.clone() }).collect()
+}
+
+// ── 셸 고르기 (§5.12) ────────────────────────────────────────
+
+/// 이 셸 탭에 보드가 `claude …` 명령을 쳐 넣어도 되는가. WSL 은 세션 파일의 tty·pid 로 탭을 짝지을 수 없어 쳐 넣지 않는다
+/// (새 세션·이어 열기는 기본 셸 탭으로 돌아간다).
+pub fn can_type_claude(shell_key: &str) -> bool {
+    !shell_key.starts_with("wsl")
+}
+
+/// 탭을 띄울 셸 키 — 고른 키(설정에서 온 값 포함)를 쓰되, claude 명령을 쳐 넣을 탭인데 그 셸이 못 받으면 None(기본 셸).
+/// 키 모양이 틀린 것도 None. 실제로 이 PC 에 있는지는 셸을 풀 때(`pty::resolve_shell_for`) 본다.
+pub fn shell_key_for(requested: Option<&str>, types_claude: bool) -> Option<&str> {
+    requested.filter(|k| EnvChoice::parse(k).is_some()).filter(|k| !types_claude || can_type_claude(k))
 }
 
 // ── 설치된 Claude Code 버전 (§5.10) ─────────────────────────
@@ -495,6 +563,61 @@ mod tests {
         let v = t.view();
         assert_eq!(v.iter().map(|x| x.id.as_str()).collect::<Vec<_>>(), ["wt", "pwsh", "powershell", "cmd", "git-bash"]);
         assert!(v.iter().all(|x| !x.installed && !x.running));
+    }
+
+    fn env_entry(kind: EnvKind, distro: Option<&str>, label: &str) -> EnvEntry {
+        EnvEntry { choice: EnvChoice { kind, distro: distro.map(str::to_string) }, label: label.into(), program: PathBuf::from("x.exe") }
+    }
+
+    /// WSL 은 배포판마다 한 단추(`wsl:<이름>`, `WSL · <이름>`)이고 기본 다섯 뒤에 붙는다. 없으면 단추도 없다.
+    #[test]
+    fn dock_lists_wsl_per_distro_after_the_fixed_five() {
+        let found = vec![
+            env_entry(EnvKind::Pwsh, None, "PowerShell 7"),
+            env_entry(EnvKind::Wsl, Some("Ubuntu"), "WSL · Ubuntu"),
+            env_entry(EnvKind::Wsl, Some("Debian"), "WSL · Debian"),
+        ];
+        let t = Terminals::default();
+        *t.wsl.lock().unwrap() = wsl_entries(found);
+        let v = t.view();
+        assert_eq!(
+            v.iter().map(|x| (x.id.as_str(), x.name.as_str())).skip(5).collect::<Vec<_>>(),
+            [("wsl:Ubuntu", "WSL · Ubuntu"), ("wsl:Debian", "WSL · Debian")]
+        );
+        assert!(v[5..].iter().all(|x| x.installed && !x.running));
+        assert_eq!(t.wsl_entry("wsl:Debian").map(|e| e.label), Some("WSL · Debian".to_string()));
+        assert!(t.wsl_entry("wsl:Gone").is_none());
+        assert_eq!(Terminals::default().view().len(), 5, "WSL 이 없으면 단추도 없다");
+    }
+
+    #[test]
+    fn dock_wsl_button_starts_in_linux_home() {
+        assert_eq!(wsl_dock_args(Some("Ubuntu")), ["-d", "Ubuntu", "--cd", "~"]);
+        assert_eq!(wsl_dock_args(None), ["--cd", "~"]);
+    }
+
+    #[test]
+    fn env_views_carry_key_and_label() {
+        let v = env_views(&[env_entry(EnvKind::Cmd, None, "명령 프롬프트"), env_entry(EnvKind::Wsl, Some("Ubuntu"), "WSL · Ubuntu")]);
+        assert_eq!(serde_json::to_value(&v).unwrap(), json!([{"key":"cmd","label":"명령 프롬프트"},{"key":"wsl:Ubuntu","label":"WSL · Ubuntu"}]));
+    }
+
+    #[test]
+    fn claude_is_not_typed_into_wsl_tabs() {
+        for key in ["wsl", "wsl:Ubuntu", "wsl:Debian-12"] {
+            assert!(!can_type_claude(key), "{key}");
+        }
+        for key in ["pwsh", "powershell", "cmd", "git-bash"] {
+            assert!(can_type_claude(key), "{key}");
+        }
+        // claude 를 쳐 넣을 탭이면 WSL 은 기본 셸로 돌아가고, 그냥 셸 탭이면 그대로 간다
+        assert_eq!(shell_key_for(Some("wsl:Ubuntu"), true), None);
+        assert_eq!(shell_key_for(Some("wsl:Ubuntu"), false), Some("wsl:Ubuntu"));
+        assert_eq!(shell_key_for(Some("git-bash"), true), Some("git-bash"));
+        assert_eq!(shell_key_for(None, true), None);
+        // 틀린 키는 어느 쪽이든 기본 셸
+        assert_eq!(shell_key_for(Some("zsh"), false), None);
+        assert_eq!(shell_key_for(Some("wsl:bad name"), false), None);
     }
 
     /// 실제 Windows 에서만 — `spawn_console` 로 node.exe 를 새 콘솔에 띄워 자식이 받은 인자·환경변수·작업 폴더를 비교한다.

@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use claude_board_core::envs::EnvChoice;
 use claude_board_core::{fileio, paths};
 use serde::{Deserialize, Serialize};
 
@@ -64,6 +65,8 @@ pub struct Settings {
     pub new_session_md_render: bool,
     /// 시작할 때와 한 시간마다 새 버전을 확인하는가(mac `autoUpdateCheck`)
     pub auto_update_check: bool,
+    /// 새 터미널 탭의 셸 키(`EnvChoice` 키: `pwsh` · `powershell` · `cmd` · `git-bash` · `wsl` · `wsl:<배포판>`). null 이면 기본 셸(pwsh → powershell → cmd)
+    pub terminal_shell: Option<String>,
 }
 
 impl Default for Settings {
@@ -97,6 +100,7 @@ impl Default for Settings {
             new_session_command: String::new(),
             new_session_md_render: true,
             auto_update_check: true,
+            terminal_shell: None,
         }
     }
 }
@@ -126,6 +130,8 @@ impl Settings {
             s.settings_transition = "slide".into();
         }
         s.shortcuts.retain(|_, combo| is_shortcut_shape(combo));
+        // 키 모양이 틀린 셸(손으로 고친 파일)은 기본 셸로 읽는다
+        s.terminal_shell = s.terminal_shell.filter(|k| EnvChoice::parse(k).is_some());
         s
     }
 
@@ -160,8 +166,19 @@ impl Settings {
             new_session_command: self.new_session_command.clone(),
             new_session_md_render: self.new_session_md_render,
             auto_update_check: self.auto_update_check,
+            terminal_shell: self.terminal_shell.clone(),
             notify_position,
         }
+    }
+
+    /// 새 탭의 셸을 고른다. `None`(또는 빈 글자)은 기본 셸로 돌아가고, 키 모양이 틀리면 받지 않고 false.
+    pub fn set_terminal_shell(&mut self, key: Option<String>) -> bool {
+        let key = key.map(|k| k.trim().to_string()).filter(|k| !k.is_empty());
+        if key.as_deref().is_some_and(|k| EnvChoice::parse(k).is_none()) {
+            return false;
+        }
+        self.terminal_shell = key;
+        true
     }
 
     /// 단축키 하나를 바꾼다. `None` 은 기본값으로 돌아가(항목 삭제), `Some([])` 는 비움, `Some([코드, 수정키])` 는 그 키.
@@ -334,6 +351,7 @@ mod tests {
         s.new_session_command = "claude --model opus".into();
         s.new_session_md_render = false;
         s.auto_update_check = false;
+        s.terminal_shell = Some("wsl:Ubuntu".into());
         s.save(&path).unwrap();
         let back = Settings::load(&path);
         assert_eq!(back, s);
@@ -357,6 +375,7 @@ mod tests {
         assert_eq!(v["settingsTransition"], "fade");
         assert_eq!(v["newSessionCommand"], "claude --model opus");
         assert_eq!((v["newSessionMdRender"].as_bool(), v["autoUpdateCheck"].as_bool()), (Some(false), Some(false)));
+        assert_eq!(v["terminalShell"], "wsl:Ubuntu");
         assert!(v.get("terminalTabs").is_none(), "탭 목록은 상태 묶음에 싣지 않고 load_tabs 로 읽는다");
         assert!(v.get("hiddenGroups").is_none());
         assert!(v.get("miniFromExpanded").is_none());
@@ -381,6 +400,7 @@ mod tests {
             "newSessionCommand",
             "newSessionMdRender",
             "autoUpdateCheck",
+            "terminalShell",
         ];
         for k in stored {
             assert!(raw.get(k).is_some(), "{k}");
@@ -418,10 +438,40 @@ mod tests {
         assert_eq!(old.settings_transition, "slide");
         assert_eq!(old.new_session_command, "");
         assert!(old.new_session_md_render && old.auto_update_check);
+        assert_eq!(old.terminal_shell, None);
         old.save(&path).unwrap();
         let raw: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert_eq!((raw["pinned"].as_bool(), raw["mascot"].as_str(), raw["mdRenderOff"][0].as_str()), (Some(false), Some("foreman"), Some("s1")));
         assert_eq!(raw["settingsTransition"], "slide");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 새 탭의 셸 — 키 모양이 맞는 것만 받고, 비우면 기본 셸(null)이며, 파일에 틀린 값이 있어도 나머지 설정은 남는다
+    #[test]
+    fn terminal_shell_accepts_only_known_keys() {
+        let mut s = Settings::default();
+        assert_eq!(s.terminal_shell, None);
+        for key in ["wsl", "wsl:Ubuntu-22.04", "pwsh", "powershell", "cmd", "git-bash"] {
+            assert!(s.set_terminal_shell(Some(key.into())), "{key}");
+            assert_eq!(s.terminal_shell.as_deref(), Some(key));
+        }
+        for bad in ["zsh", "wsl:bad name", "wsl:", "wsl:a;b"] {
+            assert!(!s.set_terminal_shell(Some(bad.into())), "{bad}");
+        }
+        assert_eq!(s.terminal_shell.as_deref(), Some("git-bash"), "거절한 값은 바꾸지 않는다");
+        assert!(s.set_terminal_shell(Some("  ".into())), "빈 글자는 기본 셸");
+        assert_eq!(s.terminal_shell, None);
+        assert!(s.set_terminal_shell(Some("cmd".into())) && s.set_terminal_shell(None));
+        assert_eq!(s.terminal_shell, None);
+
+        let dir = std::env::temp_dir().join(format!("cb-settings-sh-{}", crate::util::short_id()));
+        let path = dir.join("board-settings.json");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(&path, br#"{"pinned": false, "terminalShell": "wsl:bad name"}"#).unwrap();
+        let loaded = Settings::load(&path);
+        assert_eq!((loaded.pinned, loaded.terminal_shell), (false, None));
+        fs::write(&path, br#"{"terminalShell": "wsl:Ubuntu"}"#).unwrap();
+        assert_eq!(Settings::load(&path).terminal_shell.as_deref(), Some("wsl:Ubuntu"));
         fs::remove_dir_all(&dir).unwrap();
     }
 

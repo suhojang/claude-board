@@ -1,0 +1,59 @@
+{
+  "active_sec" : 301,
+  "branch" : "feature/TOY-12-sort",
+  "caps" : {
+    "minutes" : 120,
+    "usd" : 100,
+    "weekly_pp" : 5
+  },
+  "checks" : [
+    {
+      "at" : 1761013000,
+      "evidence" : "evidence/check-1",
+      "exit" : 0,
+      "sec" : 6,
+      "tail" : "ok",
+      "try" : 0
+    }
+  ],
+  "claude_runs" : 1,
+  "cost_done" : 1.35,
+  "cost_usd" : 1.35,
+  "denials" : [
+    {
+      "tool" : "Bash",
+      "ts" : 1761012900,
+      "what" : "curl https://example.com"
+    }
+  ],
+  "ended" : 1761013010,
+  "errors" : 0,
+  "git" : {
+    "diff_stat" : " src/sort.js | 12 ++++++++++++",
+    "status" : " M src/sort.js"
+  },
+  "id" : "u2",
+  "merge" : {
+    "branch" : "feature/TOY-12-sort",
+    "how" : "merge",
+    "state" : "merged",
+    "story" : "TOY-10",
+    "task" : "TOY-12"
+  },
+  "phase" : "end",
+  "reason" : "판정 통과",
+  "result_ok" : true,
+  "session_id" : "7c1d2e3f-1111-4222-8333-444455556666",
+  "session_started" : true,
+  "started" : 1761012400,
+  "status" : "done",
+  "title" : "목록 정렬",
+  "try" : 0,
+  "turns" : 9,
+  "unit" : 2,
+  "updated" : 1761013010,
+  "weekly_base" : 0.31,
+  "weekly_last" : 0.33,
+  "weekly_pp" : 2,
+  "weekly_pp_done" : 2
+}
