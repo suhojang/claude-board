@@ -18,7 +18,7 @@ Windows 10 · 11 판도 있습니다. PowerShell 에서 한 줄로 설치합니�
 irm https://raw.githubusercontent.com/suhojang/claude-board/main/windows/packaging/install.ps1 | iex
 ```
 
-설치 프로그램을 쓰려면 [ClaudeBoard-3.2.3-setup.exe](https://github.com/suhojang/claude-board/releases/download/windows-v3.2.3/ClaudeBoard-3.2.3-setup.exe) 를 받아 실행합니다([windows-v3.2.3 릴리스](https://github.com/suhojang/claude-board/releases/tag/windows-v3.2.3)).
+설치 프로그램을 쓰려면 [ClaudeBoard-3.2.4-setup.exe](https://github.com/suhojang/claude-board/releases/download/windows-v3.2.4/ClaudeBoard-3.2.4-setup.exe) 를 받아 실행합니다([windows-v3.2.4 릴리스](https://github.com/suhojang/claude-board/releases/tag/windows-v3.2.4)).
 필요한 환경 · 사용법 · macOS 판과 다른 점은 [windows/README.md](windows/README.md) 를 보세요.
 
 ## 💡 컨셉

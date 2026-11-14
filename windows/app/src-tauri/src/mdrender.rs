@@ -51,7 +51,7 @@ pub fn copy_plan(source: &[(String, String)], destination: &[(String, String)]) 
 }
 
 /// 심볼릭 링크나 정션(재해석 지점)인가 — 없는 경로는 아니다.
-fn is_link(path: &Path) -> bool {
+pub fn is_link(path: &Path) -> bool {
     let Ok(meta) = fs::symlink_metadata(path) else { return false };
     #[cfg(windows)]
     {

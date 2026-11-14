@@ -3,7 +3,9 @@
 // 화면 대조용 시나리오(?scenario=mac1) — 파일은 저장소에 올리지 않는다(없으면 건너뜀)
 type Scenarios = { applyMac1?: (s: typeof S) => void; FROZEN_NOW?: number };
 const scenarios: Scenarios = Object.values(import.meta.glob("./mock-scenarios.ts", { eager: true }))[0] as Scenarios ?? {};
-import type { Account, Brain, Group, Session, Snapshot, State, Sub, TermId, TermInfo, TermSpec } from "./types";
+import type { StartRequest } from "./autopilot/startForm";
+import { normalizeBoardFontScale } from "./board/fontScale";
+import type { Account, AutopilotAction, AutopilotRun, Brain, Group, Session, Snapshot, State, Sub, TermId, TermInfo, TermSpec } from "./types";
 
 const SEC = 1000;
 const MIN = 60 * SEC;
@@ -150,10 +152,73 @@ const demo: Account = { id: "acc-demo|org-demo", email: "demo@example.com", org:
 const work: Account = { id: "acc-work|org-work", email: "work@example.com", org: "Example Inc.", plan: "Max 5x", expired: false };
 const old: Account = { id: "acc-old|org-old", email: "old@example.com", org: "", plan: "Pro", expired: true };
 
+// 자율주행 실행 — 도는 cmd 실행(샌드박스 없음 칩), 끝난 실행, 한도를 기다리는 WSL 실행(접힌 infra 카드 안)
+function autopilotRun(path: string, p: Partial<AutopilotRun> & { id: string; title: string }): AutopilotRun {
+  return {
+    path,
+    state: "running",
+    reason: "",
+    waitUntil: null,
+    env: { key: "cmd", label: "명령 프롬프트", sandbox: false },
+    unit: null,
+    total: 5,
+    done: 0,
+    failed: 0,
+    capped: 0,
+    skipped: 0,
+    stopped: 0,
+    can: ["pause", "stop"],
+    ended: false,
+    ...p,
+  };
+}
+
+function initialAutopilot(): AutopilotRun[] {
+  if (empty) return [];
+  return [
+    autopilotRun("~\\work\\shop-api", {
+      id: "ap-shop-1",
+      title: "결제 모듈 정리",
+      unit: { n: 2, title: "결과 파일 맞추기", phase: "work", activeSec: 12 * 60, costUsd: 0.42, tries: 1 },
+      done: 1,
+      capped: 1,
+    }),
+    autopilotRun("~\\work\\web-dashboard", {
+      id: "ap-web-1",
+      title: "차트 색 통일",
+      state: "done",
+      total: 3,
+      done: 3,
+      can: [],
+      ended: true,
+    }),
+    autopilotRun("~\\work\\infra", {
+      id: "ap-infra-1",
+      title: "배포 스크립트 점검",
+      state: "waiting_limit",
+      waitUntil: t0 + 2 * HOUR,
+      env: { key: "wsl:Ubuntu", label: "WSL · Ubuntu", sandbox: true },
+      unit: { n: 4, title: "롤백 경로 확인", phase: "work", activeSec: 63 * 60, costUsd: 1.5, tries: 2 },
+      total: 6,
+      done: 3,
+      failed: 1,
+      can: ["pause", "stop"],
+    }),
+  ];
+}
+
+// 누른 단추가 실행의 상태를 바꾼 것처럼 보이게 한다(실제 백엔드는 control.json 만 쓰고 엔진이 상태를 바꾼다)
+function applyAutopilotControl(run: AutopilotRun, action: string) {
+  if (action === "pause") Object.assign(run, { state: "paused", can: ["resume", "stop"] });
+  if (action === "resume") Object.assign(run, { state: "running", waitUntil: null, can: ["pause", "stop"] });
+  if (action === "stop") Object.assign(run, { state: "stopped", can: [], ended: true });
+}
+
 const S: Snapshot = {
   now: t0,
   runsClaude: [], // 지금 claude 가 도는 보드 터미널 — 가짜 화면에서 실제로 도는 claude 는 없다
   groups: initialGroups(),
+  autopilot: initialAutopilot(),
   allMuted: false,
   counts: { waiting: 0, working: 0, idle: 0, paused: 0, ended: 0 },
   usage: {
@@ -198,6 +263,8 @@ const S: Snapshot = {
     newSessionCommand: "",
     newSessionMdRender: true,
     autoUpdateCheck: true,
+    terminalShell: null,
+    boardFontScale: 1,
   },
   claudeVersion: "2.1.301",
   terminals: [
@@ -206,6 +273,7 @@ const S: Snapshot = {
     { id: "powershell", name: "Windows PowerShell", installed: true, running: false },
     { id: "cmd", name: "명령 프롬프트", installed: true, running: false },
     { id: "git-bash", name: "Git Bash", installed: false, running: false },
+    { id: "wsl:Ubuntu", name: "WSL · Ubuntu", installed: true, running: false },
   ],
 };
 
@@ -340,6 +408,19 @@ export async function handle(cmd: string, a: Record<string, unknown>): Promise<u
       if (action === "stop") Object.assign(s, { state: "ended", paused: false, subagents: [], updated: now });
       break;
     }
+    case "autopilot_control": {
+      const run = S.autopilot?.find((r) => r.id === str("runId"));
+      const action = str("action");
+      console.info(`[mock] autopilot_control ${action} ${str("runId")}`);
+      if (!run) throw new Error("모르는 실행");
+      if (!run.can.includes(action as AutopilotAction)) throw new Error("지금 상태에서는 할 수 없습니다");
+      applyAutopilotControl(run, action);
+      break;
+    }
+    case "autopilot_envs":
+      return MOCK_AUTOPILOT_ENVS;
+    case "autopilot_start":
+      return mockAutopilotStart(a.request as StartRequest);
     case "switch_account": {
       const target = S.accounts.saved.find((x) => x.id === str("id"));
       if (!target) break;
@@ -405,6 +486,9 @@ export async function handle(cmd: string, a: Record<string, unknown>): Promise<u
     case "set_opacity":
       st.opacity = Number(a.v) || 1;
       break;
+    case "set_board_font_scale":
+      st.boardFontScale = normalizeBoardFontScale(a.v);
+      break;
     case "set_notify_position":
       st.notifyPosition = a.pos as Snapshot["settings"]["notifyPosition"];
       break;
@@ -427,6 +511,11 @@ export async function handle(cmd: string, a: Record<string, unknown>): Promise<u
       st.newSessionCommand = str("command").trim();
       st.newSessionMdRender = bool("mdRender");
       break;
+    case "set_terminal_shell":
+      st.terminalShell = typeof a.shell === "string" ? a.shell : null;
+      break;
+    case "list_envs":
+      return MOCK_ENVS;
     case "set_auto_update_check":
       st.autoUpdateCheck = bool("on");
       break;
@@ -550,6 +639,7 @@ class FakeTerm {
     private cols: number,
     private rows: number,
     private readonly cwd: string,
+    private readonly shell: string = "pwsh",
   ) {
     // 제목(OSC 0) — 셸 탭의 "하는 일" 자리에 보이는 터미널 제목
     this.print(`\x1b]0;${cwd}\x07Mock PowerShell (echo) ${cols}x${rows}\r\n한 줄을 치고 Enter 를 누르면 되돌려 줍니다. exit, flood, clear\r\n\r\n${PROMPT}`);
@@ -559,7 +649,7 @@ class FakeTerm {
     return {
       id: this.id,
       pid: 4000 + Number(this.id.slice(1)),
-      shell: "pwsh",
+      shell: this.shell,
       cwd: this.cwd,
       cols: this.cols,
       rows: this.rows,
@@ -650,9 +740,59 @@ class FakeTerm {
   }
 }
 
+// 자율주행 시작 준비의 실행 환경 목록(autopilot_envs) — WSL 만 샌드박스를 걸 수 있다
+const MOCK_AUTOPILOT_ENVS = [
+  { key: "wsl:Ubuntu", label: "WSL · Ubuntu", kind: "wsl", distro: "Ubuntu", sandboxCapable: true },
+  { key: "pwsh", label: "PowerShell 7", kind: "pwsh", distro: null, sandboxCapable: false },
+  { key: "powershell", label: "Windows PowerShell", kind: "powershell", distro: null, sandboxCapable: false },
+  { key: "cmd", label: "명령 프롬프트", kind: "cmd", distro: null, sandboxCapable: false },
+  { key: "git-bash", label: "Git Bash", kind: "git-bash", distro: null, sandboxCapable: false },
+];
+
+// 출발 — 실제 명령줄의 거절을 흉내 낸다: 동의 없는 네이티브 환경, 이름에 missing 이 든 작업 폴더. 통과하면 도는 실행 하나를 더한다
+function mockAutopilotStart(request: StartRequest): { runId: string; scheduled: boolean } {
+  const key = String((request.run.exec_env as { key?: string } | undefined)?.key ?? "");
+  const env = MOCK_AUTOPILOT_ENVS.find((e) => e.key === key);
+  const problems: string[] = [];
+  if (!env) problems.push("고른 실행 환경이 이 PC 에 없습니다.");
+  else if (!env.sandboxCapable && !request.acceptUnsandboxed) problems.push(`${env.label} 는 샌드박스를 걸 수 없는 환경입니다. 샌드박스 없이 돌리는 데 동의해야 출발합니다.`);
+  request.queue.forEach((u, i) => {
+    if (String(u.cwd).toLowerCase().includes("missing")) problems.push(`단위 ${i + 1}(${String(u.title)}): 작업 폴더(cwd)가 폴더가 아니거나 없습니다: ${String(u.cwd)}`);
+  });
+  if (problems.length > 0) throw new Error(problems.join("\n"));
+  const label = env?.label ?? key;
+  S.autopilot = [
+    autopilotRun(String(request.run.project_root), {
+      id: request.runId,
+      title: String(request.run.title),
+      state: "starting",
+      env: { key, label, sandbox: env?.sandboxCapable ?? false },
+      total: request.queue.length,
+      can: [],
+    }),
+    ...(S.autopilot ?? []),
+  ];
+  return { runId: request.runId, scheduled: true };
+}
+
+// 가짜 실행 환경 목록(list_envs) — WSL 한 개를 포함한다
+const MOCK_ENVS = [
+  { key: "pwsh", label: "PowerShell 7" },
+  { key: "powershell", label: "Windows PowerShell" },
+  { key: "cmd", label: "명령 프롬프트" },
+  { key: "git-bash", label: "Git Bash" },
+  { key: "wsl:Ubuntu", label: "WSL · Ubuntu" },
+];
+
+// 띄울 셸 키 — 백엔드 규칙과 같다: 요청 > 설정 > pwsh. claude 를 칠 탭이면 WSL 은 기본 셸로 돌아간다
+function mockShellFor(spec: TermSpec): string {
+  const wanted = spec.shell ?? S.settings.terminalShell ?? "pwsh";
+  return spec.typesClaude && wanted.startsWith("wsl") ? "pwsh" : wanted;
+}
+
 function spawnTerm(spec: TermSpec): TermInfo {
   const id = `t${nextTermNumber++}`;
-  const term = new FakeTerm(id, spec.cols, spec.rows, spec.cwd ?? HOME);
+  const term = new FakeTerm(id, spec.cols, spec.rows, spec.cwd ?? HOME, mockShellFor(spec));
   fakeTerms.set(id, term);
   return term.info();
 }

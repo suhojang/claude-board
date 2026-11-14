@@ -27,7 +27,7 @@ const table = [
   ["옛 설치본 경로를 새 경로로 바꾼다", String.raw`claude --plugin-dir "C:\Users\me\AppData\Local\Programs\Claude Board\plugins\md-render" --resume abc`, DIR, false, `claude --plugin-dir "${DIR}" --resume abc`],
   ["끔 — 이미 든 것도 걷어 낸다", `claude --plugin-dir "${DIR}" --resume abc`, DIR, true, "claude --resume abc"],
   ["폴더를 모르면 이미 든 것은 걷어 낸다", `claude --resume abc --plugin-dir "${DIR}"`, null, false, "claude --resume abc"],
-  ["대소문자·끝의 \\ 도 같은 경로", String.raw`claude --plugin-dir "C:\X\Plugins\MD-Render\" --resume abc`, DIR, false, `claude --plugin-dir "${DIR}" --resume abc`],
+  ["대소문자·끝의 \\ 도 읽지 못하므로 그대로", String.raw`claude --plugin-dir "C:\X\Plugins\MD-Render\" --resume abc`, DIR, false, String.raw`claude --plugin-dir "C:\X\Plugins\MD-Render\" --resume abc`],
   ["사용자의 다른 --plugin-dir 은 둔다", "claude --plugin-dir C:/mine/plugins/other --resume abc", DIR, false, `claude --plugin-dir "${DIR}" --plugin-dir C:/mine/plugins/other --resume abc`],
   ["끔 — 다른 --plugin-dir 은 그대로", "claude --plugin-dir C:/mine/plugins/other", DIR, true, "claude --plugin-dir C:/mine/plugins/other"],
   ["md-render 로 끝나지 않는 이름은 둔다", String.raw`claude --plugin-dir C:\x\plugins\md-render-fork`, DIR, false, String.raw`claude --plugin-dir "${DIR}" --plugin-dir C:\x\plugins\md-render-fork`],

@@ -16,6 +16,7 @@ use claude_board_core::{clock, console, paths};
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindowBuilder};
 
 use crate::accounts::{self, AccountPaths, Accounts};
+use crate::autopilot::AutopilotReader;
 use crate::autoswitch::{self, AutoSwitch};
 use crate::model::{Counts, Group, Session, Snapshot};
 use crate::settings::{self, set_in, toggle, Frame, Settings};
@@ -54,6 +55,8 @@ pub struct Board {
     pub account_paths: AccountPaths,
     pub updater: Mutex<Updater>,
     pub auto: Mutex<AutoSwitch>,
+    /// 자율주행 실행 폴더 읽기 — 읽기 전용(실행 상태의 주인은 엔진)
+    pub(crate) autopilot: Mutex<AutopilotReader>,
     pub terminals: Mutex<Terminals>,
     claude_version: Mutex<(f64, Option<String>)>,
     /// 지난 확인 때의 Windows Terminal pid — 새로 생기면 보드를 보인다
@@ -65,6 +68,8 @@ pub struct Board {
     tray_shown: Mutex<Option<tray::TrayState>>,
     /// 창 위치·크기가 바뀐 시각 — 움직임이 멎으면 저장한다
     frame_dirty: Mutex<Option<f64>>,
+    /// 바깥 탭 열기 수함(`open_tab::inbox`) — 프론트 준비 표지와 곱 기다림
+    pub inbox: Mutex<crate::open_tab::inbox::Inbox>,
 }
 
 impl Board {
@@ -92,6 +97,7 @@ impl Board {
             account_paths,
             updater: Mutex::new(Updater::new()),
             auto: Mutex::new(AutoSwitch::default()),
+            autopilot: Mutex::new(AutopilotReader::new(claude_board_core::paths::autopilot_root(false))),
             terminals: Mutex::new(Terminals::default()),
             claude_version: Mutex::new((f64::NEG_INFINITY, None)),
             wt_pids: Mutex::new(None),
@@ -99,6 +105,7 @@ impl Board {
             tray: Mutex::new(None),
             tray_shown: Mutex::new(None),
             frame_dirty: Mutex::new(None),
+            inbox: Mutex::default(),
         })
     }
 
@@ -145,6 +152,7 @@ impl Board {
         drop(st);
         drop(store);
         *self.view.lock().unwrap() = View { groups: r.groups, all_muted: r.all_muted };
+        self.autopilot.lock().unwrap().refresh(clock::now());
     }
 
     fn claude_version(&self, now: f64) -> Option<String> {
@@ -183,6 +191,7 @@ impl Board {
             terminals: self.terminals.lock().unwrap().view(),
             runs_claude,
             at_prompt,
+            autopilot: self.autopilot.lock().unwrap().view(now),
         }
     }
 
@@ -734,6 +743,12 @@ fn set_opacity(board: B<'_>, v: f64) {
     board.publish();
 }
 
+#[tauri::command(async)]
+fn set_board_font_scale(board: B<'_>, v: f64) {
+    board.update_settings(|s| s.board_font_scale = settings::clamp_board_font_scale(v));
+    board.publish();
+}
+
 /// 꾸미기를 끈 세션 id 가운데 세션 파일이 아직 있는 것만(입력 순서 그대로).
 fn kept_md_render_off(list: &[String], exists: impl Fn(&str) -> bool) -> Vec<String> {
     list.iter().filter(|id| exists(id)).cloned().collect()
@@ -774,6 +789,21 @@ fn set_auto_update_check(board: B<'_>, on: bool) {
     if on {
         updater::check(&board, false);
     }
+}
+
+/// 새 터미널 탭의 셸을 고른다 — 키는 `list_envs` 가 준 것. `null` 이면 기본 셸, 키 모양이 틀리면 받지 않는다. 현재 값은 상태 묶음의 `terminalShell`.
+#[tauri::command(async)]
+fn set_terminal_shell(board: B<'_>, shell: Option<String>) {
+    board.update_settings(|s| {
+        s.set_terminal_shell(shell);
+    });
+    board.publish();
+}
+
+/// 이 PC 에서 고를 수 있는 실행 환경(`[{key,label}]`) — 기본 셸들, Git Bash, WSL 배포판마다 하나.
+#[tauri::command(async)]
+fn list_envs() -> Vec<crate::model::EnvChoiceView> {
+    terminal::env_views(&claude_board_core::envs::detect())
 }
 
 #[tauri::command(async)]
@@ -861,8 +891,22 @@ pub fn action_arg(argv: &[String]) -> Option<(String, String)> {
     Some((action.to_string(), argv.get(i + 2)?.clone()))
 }
 
+/// 명령줄이 `--action quit` 인가 — 세션을 가리키지 않는 보드 동작(설치·제거 스크립트가 청하는 정상 종료)이라 `action_arg` 와 따로 판정한다.
+/// `action_arg` 에 넣으면 보드가 안 떠 있을 때 "세션을 찾지 못했습니다" 로 버려지는 길로 간다.
+pub fn is_quit_request(argv: &[String]) -> bool {
+    argv.iter()
+        .position(|a| a == "--action")
+        .and_then(|i| argv.get(i + 1))
+        .is_some_and(|name| crate::session_action::BoardAction::parse(name).is_some())
+}
+
 /// 두 번째 실행 — 첫 보드를 앞으로(`--show` 와 같음), `--action` 이면 동작을 넘긴다(중단은 확인 없이).
+/// `--action quit` 은 떠 있는 보드에 끊길 세션 확인 창을 거친 종료를 청한다.
 fn second_instance(app: &AppHandle, argv: Vec<String>) {
+    if is_quit_request(&argv) {
+        crate::shutdown::request_quit(app);
+        return;
+    }
     let Some(board) = app.try_state::<Arc<Board>>().map(|s| s.inner().clone()) else { return };
     match action_arg(&argv) {
         Some((action, id)) => {
@@ -973,6 +1017,10 @@ fn start_ticker(board: Arc<Board>) {
 }
 
 pub fn run(argv: Vec<String>, context: tauri::Context<tauri::Wry>) {
+    // 꺼 달라는 요청인데 보드가 안 떠 있으면(첫 실행이 이 프로세스) 보드를 띄우지 않고 끝낸다
+    if is_quit_request(&argv) {
+        return;
+    }
     let background = argv.iter().any(|a| a == "--background");
     let first_action = action_arg(&argv);
     let result = tauri::Builder::default()
@@ -997,6 +1045,9 @@ pub fn run(argv: Vec<String>, context: tauri::Context<tauri::Wry>) {
             reveal,
             session_action,
             crate::drive::drive_session,
+            crate::autopilot::autopilot_control,
+            crate::autopilot::autopilot_envs,
+            crate::autopilot::autopilot_start,
             crate::drive::rename_check,
             crate::open_session::show_board,
             crate::open_session::take_open_session,
@@ -1011,6 +1062,7 @@ pub fn run(argv: Vec<String>, context: tauri::Context<tauri::Wry>) {
             set_pinned,
             set_mascot,
             set_opacity,
+            set_board_font_scale,
             set_notify_position,
             set_board_mini,
             open_terminal,
@@ -1033,6 +1085,8 @@ pub fn run(argv: Vec<String>, context: tauri::Context<tauri::Wry>) {
             set_settings_transition,
             set_new_session_defaults,
             set_auto_update_check,
+            set_terminal_shell,
+            list_envs,
             crate::hotkeys::set_shortcut,
             crate::hotkeys::reset_shortcuts,
             crate::hotkeys::sync_hotkeys,
@@ -1055,6 +1109,9 @@ pub fn run(argv: Vec<String>, context: tauri::Context<tauri::Wry>) {
             crate::terms::term_write_bin,
             crate::terms::term_resize,
             crate::terms::term_kill,
+            crate::open_tab::inbox::open_tab_ready,
+            crate::open_tab::inbox::open_tab_done,
+            crate::open_tab::inbox::close_tab_panes,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -1074,6 +1131,8 @@ pub fn run(argv: Vec<String>, context: tauri::Context<tauri::Wry>) {
                 *board.pending_action.lock().unwrap() = Some((action, id));
             }
             updater::check(&board, false);
+            // 바깥 탭 열기 훑기 — 1초 틱으로 요청 폴더를 본다(`open_tab::inbox`)
+            crate::open_tab::inbox::start(board.clone());
             start_ticker(board);
             Ok(())
         })
@@ -1110,6 +1169,24 @@ mod tests {
         assert_eq!(action_arg(&v(&["ClaudeBoard.exe", "--action", "activate", "abc"])), None);
         assert_eq!(action_arg(&v(&["ClaudeBoard.exe", "--action", "stop"])), None);
         assert_eq!(action_arg(&v(&["ClaudeBoard.exe", "--show"])), None);
+        // quit 은 세션을 가리키지 않는 보드 동작이라 action_arg 로는 읽히지 않고 is_quit_request 가 따로 읽는다
+        assert_eq!(action_arg(&v(&["ClaudeBoard.exe", "--action", "quit", "-"])), None);
+    }
+
+    #[test]
+    fn quit_request_is_read_apart_from_session_actions() {
+        let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(is_quit_request(&v(&["ClaudeBoard.exe", "--action", "quit", "-"])));
+        assert!(is_quit_request(&v(&["ClaudeBoard.exe", "--background", "--action", "quit"])));
+        for argv in [
+            &["ClaudeBoard.exe", "--action", "stop", "abc"][..],
+            &["ClaudeBoard.exe", "--action", "Quit", "-"],
+            &["ClaudeBoard.exe", "--action"],
+            &["ClaudeBoard.exe", "quit"],
+            &["ClaudeBoard.exe", "--show"],
+        ] {
+            assert!(!is_quit_request(&v(argv)), "{argv:?}");
+        }
     }
 
     #[test]
@@ -1140,7 +1217,7 @@ mod tests {
             }
         }
         assert!(body.lines().count() > 10, "snapshot 본문을 찾지 못했다");
-        for field in ["view", "settings", "probe", "terminals", "store", "claude_version"] {
+        for field in ["view", "settings", "probe", "terminals", "store", "claude_version", "autopilot"] {
             let needle = format!("self.{field}.lock()");
             assert!(body.matches(&needle).count() <= 1, "{field} 잠금을 두 번 이상 잡는다");
         }

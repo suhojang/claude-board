@@ -20,6 +20,8 @@ pub const TERMINAL_MIN_WIDTH: f64 = 480.0;
 pub const EXPANDED_MIN_WIDTH: f64 = BOARD_MIN_WIDTH + PANE_DIVIDER_WIDTH + TERMINAL_MIN_WIDTH;
 pub const EXPANDED_MIN_HEIGHT: f64 = 300.0;
 pub const MINI_WIDTH: f64 = 300.0;
+/// 미니의 최소 높이 — mac `miniMinHeight`(144)와 같고, 캐릭터 줄·경로 두 줄·아래 줄이 잘리지 않는 가장 작은 높이다(실측: 110 은 한 줄도 잘리고 128 은 두 줄째가 잘린다).
+/// `tauri.conf.json` 의 `minHeight` 도 같은 값이어야 한다(시험이 맞춘다).
 pub const MINI_MIN_HEIGHT: f64 = 144.0;
 pub const MINI_ROW_HEIGHT: f64 = 26.0;
 
@@ -346,6 +348,17 @@ mod tests {
     fn pane_constants_match_mac_and_frontend() {
         assert_eq!((BOARD_MIN_WIDTH, BOARD_LAUNCH_WIDTH, TERMINAL_MIN_WIDTH, PANE_DIVIDER_WIDTH), (360.0, 454.0, 480.0, 8.0));
         assert_eq!(EXPANDED_MIN_WIDTH, 848.0);
+    }
+
+    // 미니 최소 크기 — mac ClaudeBoard.swift 의 miniWidth·miniMinHeight·miniRowHeight 와 같은 값이고, 창 설정의 최소 크기도 같다
+    #[test]
+    fn mini_min_size_matches_mac_and_window_config() {
+        assert_eq!((MINI_WIDTH, MINI_MIN_HEIGHT, MINI_ROW_HEIGHT), (300.0, 144.0, 26.0));
+        let conf: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let main = &conf["app"]["windows"][0];
+        assert_eq!(main["label"], "main");
+        assert_eq!(main["minWidth"].as_f64(), Some(MINI_WIDTH));
+        assert_eq!(main["minHeight"].as_f64(), Some(MINI_MIN_HEIGHT));
     }
 
     // 3.1.9 진리표 — 고정했고 (펼친 창이 작업 영역을 덮는 것)이 아닐 때만 위에 둔다.

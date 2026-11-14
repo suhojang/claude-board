@@ -62,7 +62,8 @@ pub struct Outcome {
     pub remove_paused: bool,
 }
 
-// 세션을 다시 열 때 그대로 넘길 실행 인자 — 값을 받는 것, 값을 여러 개 받는 것, 값이 없는 것
+// 세션을 다시 열 때 그대로 넘길 실행 인자 — 값을 받는 것, 값을 여러 개 받는 것, 값이 없는 것,
+// 값을 받을 수도 있는 것(리모트 컨트롤 이름: --remote-control=<이름>, 또는 다음 인자가 - 로 시작하지 않으면 그 인자 — Claude Code 와 같은 읽기)
 const CARRY_ONE: &[&str] = &["--model", "--permission-mode", "--agent", "--settings", "--plugin-dir"];
 const CARRY_MANY: &[&str] = &["--add-dir", "--mcp-config"];
 const CARRY_FLAG: &[&str] = &[
@@ -72,11 +73,14 @@ const CARRY_FLAG: &[&str] = &[
     "--ide",
     "--verbose",
 ];
+const CARRY_OPT: &[&str] = &["--remote-control", "--rc"];
 
 /// 다시 열 때 넘길 실행 인자만 고른다(argv[0] 은 건너뛴다) — `state.py:carry_args`.
 /// 같은 플래그·같은 `(이름, 값)` 쌍·같은 `--x=v` 형은 한 번만 넘긴다. Claude Code 는 bypass 권한 모드로 이어 열 때
 /// `--allow-dangerously-skip-permissions` 를 스스로 하나 더 붙여 띄우므로, 그대로 넘기면 이어 열 때마다 하나씩 늘어난다.
 /// 값을 여러 개 받는 `--add-dir x` 꼴은 중복을 걸러내지 않는다.
+/// `--remote-control`·`--rc` 는 값을 받을 수도 있는 옵션 — `--x=v` 형은 그대로, 다음 인자가 `-` 로 시작하지 않으면
+/// 그 인자를 값으로 `(이름, 값)` 쌍의 중복을 걸러 넘기고, 값이 없으면 플래그 그대로 넘긴다.
 pub fn carry_args<S: AsRef<str>>(argv: &[S]) -> Vec<String> {
     let argv: Vec<&str> = argv.iter().map(AsRef::as_ref).collect();
     let mut out = Vec::new();
@@ -85,8 +89,23 @@ pub fn carry_args<S: AsRef<str>>(argv: &[S]) -> Vec<String> {
     while i < argv.len() {
         let a = argv[i];
         let name = a.split('=').next().unwrap_or(a);
-        if (a.contains('=') && (CARRY_ONE.contains(&name) || CARRY_MANY.contains(&name))) || CARRY_FLAG.contains(&a) {
+        if (a.contains('=')
+            && (CARRY_ONE.contains(&name) || CARRY_MANY.contains(&name) || CARRY_OPT.contains(&name)))
+            || CARRY_FLAG.contains(&a)
+        {
             if seen.insert((a, None)) {
+                out.push(a.to_string());
+            }
+        } else if CARRY_OPT.contains(&a) {
+            // 다음 인자가 - 로 시작하지 않을 때만 그 인자가 값이다 — 값이 없으면 플래그 그대로 넘긴다
+            let takes_next_as_value = i + 1 < argv.len() && !argv[i + 1].starts_with('-');
+            if takes_next_as_value {
+                i += 1;
+                if seen.insert((a, Some(argv[i]))) {
+                    out.push(a.to_string());
+                    out.push(argv[i].to_string());
+                }
+            } else if seen.insert((a, None)) {
                 out.push(a.to_string());
             }
         } else if CARRY_ONE.contains(&a) && i + 1 < argv.len() {

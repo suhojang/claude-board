@@ -5,7 +5,7 @@
     | "bell" | "bell-slash" | "refresh" | "compress" | "expand"
     | "pin" | "pin-slash" | "person" | "person-plus" | "person-switch" | "swap"
     | "terminal" | "terminal-outline" | "moon-stars" | "people" | "wrench" | "brain"
-    | "hand" | "check-circle" | "pause-circle" | "minus-circle" | "trash" | "gauge"
+    | "hand" | "check-circle" | "pause-circle" | "minus-circle" | "ellipsis-circle" | "trash" | "gauge"
     | "warn" | "arrow-down-circle" | "hammer" | "moon-zzz" | "half-circle"
     | "snap-right" | "shrink" | "grow" | "win-min" | "win-close" | "shells" | "seal-check"
     | "app-forward" | "app-plus" | "nosign" | "plus" | "panel-left" | "panel-right";
@@ -40,7 +40,7 @@
     />
   {:else if name === "xmark"}
     <path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" />
-  {:else if name === "xmark-circle" || name === "check-circle" || name === "pause-circle" || name === "minus-circle" || name === "arrow-down-circle" || name === "person"}
+  {:else if name === "xmark-circle" || name === "check-circle" || name === "pause-circle" || name === "minus-circle" || name === "ellipsis-circle" || name === "arrow-down-circle" || name === "person"}
     <mask id={uid}>
       <rect width="16" height="16" fill="#fff" />
       {#if name === "xmark-circle"}
@@ -51,6 +51,8 @@
         <path d="M6.4 5.2v5.6M9.6 5.2v5.6" stroke="#000" stroke-width="1.8" stroke-linecap="round" />
       {:else if name === "minus-circle"}
         <path d="M4.8 8h6.4" stroke="#000" stroke-width="1.8" stroke-linecap="round" />
+      {:else if name === "ellipsis-circle"}
+        <circle cx="4.8" cy="8" r="1.15" fill="#000" /><circle cx="8" cy="8" r="1.15" fill="#000" /><circle cx="11.2" cy="8" r="1.15" fill="#000" />
       {:else if name === "arrow-down-circle"}
         <path d="M8 4.6v6.2M5.4 8.4 8 11l2.6-2.6" fill="none" stroke="#000" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
       {:else}

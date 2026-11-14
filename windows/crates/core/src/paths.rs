@@ -116,6 +116,37 @@ fn find_claude_exe(path_var: Option<&std::ffi::OsStr>, local_bin: &std::path::Pa
     from_path.or_else(|| Some(local_bin.join(CLAUDE_EXE)).filter(|p| p.is_file()))
 }
 
+/// 자율주행 데이터 뿌리 — macOS `~/Library/Application Support/Claude Board[ Dev]/autopilot` 의 Windows 대응.
+/// 뿌리 자리는 [`local_app_data`] 가 정한다. 실행 폴더는 보통 `<뿌리>\runs\<실행 id>`, 엔진 전용 자리는 `<뿌리>\private\…`.
+pub fn autopilot_root(dev: bool) -> PathBuf {
+    autopilot_under(&local_app_data(), dev)
+}
+
+/// 로컬 앱 데이터 뿌리 — 홈을 환경변수로 바꾼 시험·개발 실행(`overridden`)은 `<홈>\AppData\Local`,
+/// 아니면 `%LOCALAPPDATA%`(빠졌으면 `<홈>\AppData\Local`). macOS `~/Library/Application Support` 의 Windows 대응 자리다.
+pub fn local_app_data() -> PathBuf {
+    let local_appdata_env = env_path("LOCALAPPDATA");
+    pick_local_app_data(overridden(), local_appdata_env.as_deref(), &home())
+}
+
+/// [`local_app_data`] 의 판정 몸통 — 환경변수를 읽는 부분을 밖으로 빼 시험에서 순수하게 본다.
+fn pick_local_app_data(
+    home_overridden: bool,
+    local_appdata_env: Option<&std::path::Path>,
+    home: &std::path::Path,
+) -> PathBuf {
+    let under_home = home.join("AppData").join("Local");
+    if home_overridden {
+        under_home
+    } else {
+        local_appdata_env.map(std::path::Path::to_path_buf).unwrap_or(under_home)
+    }
+}
+
+fn autopilot_under(local: &std::path::Path, dev: bool) -> PathBuf {
+    local.join(if dev { "Claude Board Dev" } else { "Claude Board" }).join("autopilot")
+}
+
 /// 경로의 마지막 이름 — Python `os.path.basename` 처럼 끝이 구분자면 빈 문자열.
 /// Windows 는 `\`·`/` 를 모두 구분자로 본다(SPEC §2.1 `project`).
 pub fn basename(path: &str) -> &str {
@@ -155,6 +186,27 @@ mod tests {
         let mark = login_launch_off_file();
         assert_eq!(mark.file_name().and_then(|n| n.to_str()), Some("login-launch-off"));
         assert_eq!(mark.parent(), Some(notifier_dir().as_path()));
+    }
+
+    #[test]
+    fn autopilot_root_names_the_dev_build_apart() {
+        let local = std::path::Path::new("L");
+        assert_eq!(autopilot_under(local, false), local.join("Claude Board").join("autopilot"));
+        assert_eq!(autopilot_under(local, true), local.join("Claude Board Dev").join("autopilot"));
+    }
+
+    #[test]
+    fn local_app_data_uses_local_appdata_but_stays_under_home_when_overridden() {
+        let home = std::path::Path::new(r"C:\Users\me");
+        let local_appdata = std::path::Path::new(r"C:\Users\me\AppData\Local");
+        let elsewhere = std::path::Path::new(r"D:\LocalAppData");
+        // 보통 실행 — %LOCALAPPDATA%
+        assert_eq!(pick_local_app_data(false, Some(elsewhere), home), elsewhere);
+        // 홈을 환경변수로 바꾼 시험·개발 실행 — 실제 AppData 를 쓰지 않게 홈 아래 같은 자리로
+        assert_eq!(pick_local_app_data(true, Some(elsewhere), home), local_appdata);
+        // %LOCALAPPDATA% 가 빠진 실행 — 홈 아래로 흘러간다(부재에도 겉모양은 같다)
+        assert_eq!(pick_local_app_data(false, None, home), local_appdata);
+        assert_eq!(pick_local_app_data(true, None, home), local_appdata);
     }
 
     #[test]

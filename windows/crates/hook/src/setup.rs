@@ -199,6 +199,140 @@ fn unregister_login_launch(redirected: bool, run: &dyn RunSink) -> Result<(), St
     run.delete(RUN_VALUE).map_err(|e| format!("자동 실행 값을 지우지 못했습니다: {e}"))
 }
 
+/// 자율주행이 작업 스케줄러에 등록한 작업의 자리 — 작업 폴더와 그 폴더 작업 이름의 앞머리.
+/// 이름은 `com.claude.board[.dev].autopilot.<실행 id>.<경로 해시 8자>` 이다(autopilot 크레이트 `adapters::supervisor`·`cli::label_for_dir`).
+/// hook 크레이트는 autopilot 크레이트에 기대지 않으므로(의존 방향) 폴더·이름 꼴을 여기에 따로 둔다.
+#[cfg_attr(not(windows), allow(dead_code))]
+#[derive(Clone, Copy)]
+struct TaskScope {
+    folder: &'static str,
+    prefix: &'static str,
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+const AUTOPILOT_SCOPES: [TaskScope; 2] = [
+    TaskScope { folder: r"\ClaudeBoard\autopilot\", prefix: "com.claude.board.autopilot." },
+    TaskScope { folder: r"\ClaudeBoard\autopilot-dev\", prefix: "com.claude.board.dev.autopilot." },
+];
+
+/// 작업 스케줄러를 읽고 지우는 곳 — 시험은 가짜를 넣는다. 작업은 폴더를 포함한 전체 경로(`\ClaudeBoard\autopilot\<이름>`)로 다룬다.
+#[cfg_attr(not(windows), allow(dead_code))]
+trait TaskSink {
+    fn list(&self) -> Result<Vec<String>, String>;
+    fn delete(&self, task_path: &str) -> Result<(), String>;
+}
+
+/// `<실행 id>.<해시 8자>` 꼴인가 — 실행 id 는 autopilot 의 `valid_run_id`(1~120자, `[A-Za-z0-9._-]`, 점만이거나 점으로 끝나지 않음)와 같다.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn is_run_label_tail(tail: &str) -> bool {
+    let Some((id, hash)) = tail.rsplit_once('.') else { return false };
+    let hash_ok = hash.len() == 8 && hash.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f'));
+    let id_ok = (1..=120).contains(&id.len())
+        && id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        && id.chars().any(|c| c != '.')
+        && !id.ends_with('.');
+    hash_ok && id_ok
+}
+
+/// 작업 목록(전체 경로) 중 지울 것만 고른다 — 폴더 **바로 아래**이고(대소문자 무시) 이름이 그 폴더의 앞머리 + `<실행 id>.<해시>` 인 것.
+/// 다른 폴더·하위 폴더·꼴이 다른 이름은 고르지 않는다. 같은 경로는 한 번만.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn select_autopilot_tasks(listing: &[String], scopes: &[TaskScope]) -> Vec<String> {
+    let mut picked: Vec<String> = Vec::new();
+    for path in listing {
+        for scope in scopes {
+            let Some(head) = path.get(..scope.folder.len()) else { continue };
+            if !head.eq_ignore_ascii_case(scope.folder) {
+                continue;
+            }
+            let name = &path[scope.folder.len()..];
+            let Some(tail) = name.strip_prefix(scope.prefix) else { continue };
+            if !name.contains('\\') && is_run_label_tail(tail) && !picked.contains(path) {
+                picked.push(path.clone());
+            }
+        }
+    }
+    picked
+}
+
+/// 한 번의 정리 결과
+#[cfg_attr(not(windows), allow(dead_code))]
+#[derive(Debug, Default, PartialEq, Eq)]
+struct TaskCleanup {
+    /// 격리 실행이라 건드리지 않았다
+    skipped: bool,
+    removed: Vec<String>,
+    /// (작업 경로, 이유) — 하나가 실패해도 나머지는 계속 지운다
+    failed: Vec<(String, String)>,
+    /// 목록을 못 읽었다
+    list_error: Option<String>,
+}
+
+/// uninstall 의 자율주행 작업 스케줄러 등록 지우기. 작업만 지운다 — 돌고 있는 엔진은 끝내지 않는다
+/// (엔진은 시작 때 실행 파일 사본을 따로 쥐고 있어 설치 폴더를 지워도 마저 돈다. 등록이 사라지면 죽어도 다시 뜨지 않을 뿐이다).
+/// `redirected`(폴더를 바꿔 띄운 실행)면 진짜 스케줄러를 읽지도 지우지도 않는다 — Run 값과 같은 규칙.
+/// 실패는 uninstall 의 종료 코드를 바꾸지 않는다(호출 쪽이 알린다) — 남은 등록은 `claude-autopilot unregister --all` 로 지운다.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn remove_autopilot_tasks(redirected: bool, scopes: &[TaskScope], sink: &dyn TaskSink) -> TaskCleanup {
+    let mut out = TaskCleanup::default();
+    if redirected {
+        out.skipped = true;
+        return out;
+    }
+    let listing = match sink.list() {
+        Ok(l) => l,
+        Err(e) => {
+            out.list_error = Some(e);
+            return out;
+        }
+    };
+    for path in select_autopilot_tasks(&listing, scopes) {
+        match sink.delete(&path) {
+            Ok(()) => out.removed.push(path),
+            Err(e) => out.failed.push((path, e)),
+        }
+    }
+    out
+}
+
+/// 화면에 낼 줄들
+#[cfg_attr(not(windows), allow(dead_code))]
+fn describe_cleanup(c: &TaskCleanup) -> Vec<String> {
+    if c.skipped {
+        return vec!["  자율주행 작업 스케줄러: 건너뜀(폴더를 바꿔 띄운 실행은 진짜 스케줄러를 건드리지 않음)".to_string()];
+    }
+    if let Some(e) = &c.list_error {
+        return vec![format!("  자율주행 작업 스케줄러 목록을 읽지 못했습니다: {e}")];
+    }
+    let mut lines = vec![format!("  자율주행 작업 스케줄러: {}개 지움", c.removed.len())];
+    lines.extend(c.failed.iter().map(|(p, e)| format!("  {p} 을 지우지 못했습니다: {e}")));
+    lines
+}
+
+/// `schtasks /query /fo csv /nh` 출력 → 작업 전체 경로 목록(줄의 첫 칸)
+#[cfg_attr(not(windows), allow(dead_code))]
+fn parse_task_paths(csv: &str) -> Vec<String> {
+    csv.lines().filter_map(|line| first_csv_cell(line.trim())).filter(|c| c.starts_with('\\')).collect()
+}
+
+/// 큰따옴표로 감싼 첫 칸(`""` 는 `"`). 따옴표로 시작하지 않거나 닫히지 않으면 None
+#[cfg_attr(not(windows), allow(dead_code))]
+fn first_csv_cell(line: &str) -> Option<String> {
+    let mut chars = line.strip_prefix('"')?.chars().peekable();
+    let mut cell = String::new();
+    while let Some(c) = chars.next() {
+        if c != '"' {
+            cell.push(c);
+        } else if chars.peek() == Some(&'"') {
+            chars.next();
+            cell.push('"');
+        } else {
+            return Some(cell);
+        }
+    }
+    None
+}
+
 /// 지난 setup 이 비켜 둔 `claude-board-hook.old-*` 를 지운다(아직 도는 것은 지워지지 않으니 다음에 다시).
 fn remove_old_copies(notifier: &Path) {
     for entry in fs::read_dir(notifier).into_iter().flatten().flatten() {
@@ -253,6 +387,10 @@ pub fn uninstall() -> ExitCode {
         if let Err(e) = unregister_login_launch(paths::overridden(), &registry::Real) {
             eprintln!("  {e}");
             ok = false;
+        }
+        // 자율주행이 남긴 작업 스케줄러 등록 — 실패해도 제거를 실패로 치지 않는다(돌던 엔진은 끝내지 않는다)
+        for line in describe_cleanup(&remove_autopilot_tasks(paths::overridden(), &AUTOPILOT_SCOPES, &scheduler::Real)) {
+            println!("{line}");
         }
         let table = claude_board_core::proc::ProcessTable::capture();
         for pid in table.pids_named("ClaudeBoard.exe") {
@@ -338,6 +476,68 @@ fn remove(path: &Path, r: io::Result<()>) -> bool {
         Err(e) => {
             eprintln!("  {} 을 지우지 못했습니다: {e}", path.display());
             false
+        }
+    }
+}
+
+/// 진짜 작업 스케줄러 — `schtasks.exe` 를 부른다(COM 을 쓰지 않는다. autopilot 의 어댑터와 같은 길).
+#[cfg(windows)]
+mod scheduler {
+    use std::os::windows::process::CommandExt;
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    /// 콘솔 창이 깜빡이지 않게
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    pub struct Real;
+
+    /// 종료 코드와 stdout·stderr 를 합친 글(OEM 코드 페이지라 글은 판정에 쓰지 않는다)
+    fn run(args: &[&str]) -> Result<(i32, String), String> {
+        let exe = std::env::var_os("SystemRoot")
+            .map(|root| PathBuf::from(root).join("System32").join("schtasks.exe"))
+            .filter(|p| p.is_file())
+            .unwrap_or_else(|| PathBuf::from("schtasks.exe"));
+        let out = Command::new(exe).args(args).creation_flags(CREATE_NO_WINDOW).output().map_err(|e| e.to_string())?;
+        let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+        text.push_str(&String::from_utf8_lossy(&out.stderr));
+        Ok((out.status.code().unwrap_or(-1), text))
+    }
+
+    pub fn query_csv() -> Result<String, String> {
+        let (code, text) = run(&["/query", "/fo", "csv", "/nh"])?;
+        if code == 0 {
+            Ok(text)
+        } else {
+            Err(format!("schtasks /query 실패(종료 코드 {code}): {}", text.trim().chars().take(200).collect::<String>()))
+        }
+    }
+
+    pub fn delete(task_path: &str) -> Result<(), String> {
+        let (code, text) = run(&["/delete", "/tn", task_path, "/f"])?;
+        if code == 0 {
+            Ok(())
+        } else {
+            Err(format!("schtasks /delete 실패(종료 코드 {code}): {}", text.trim().chars().take(200).collect::<String>()))
+        }
+    }
+
+    #[cfg(test)]
+    pub fn create_throwaway(task_path: &str) -> Result<(), String> {
+        let (code, text) = run(&["/create", "/tn", task_path, "/tr", "cmd.exe /c exit 0", "/sc", "once", "/st", "23:59"])?;
+        if code == 0 {
+            Ok(())
+        } else {
+            Err(format!("schtasks /create 실패(종료 코드 {code}): {}", text.trim()))
+        }
+    }
+
+    impl super::TaskSink for Real {
+        fn list(&self) -> Result<Vec<String>, String> {
+            query_csv().map(|csv| super::parse_task_paths(&csv))
+        }
+        fn delete(&self, task_path: &str) -> Result<(), String> {
+            delete(task_path)
         }
     }
 }
@@ -578,5 +778,165 @@ mod tests {
         assert_eq!(with_env_vars(r"D:\Apps\ClaudeBoard.exe", &vars), r"D:\Apps\ClaudeBoard.exe");
         assert_eq!(with_env_vars(r"C:\Users\홍길동2\x.exe", &vars), r"C:\Users\홍길동2\x.exe");
         assert_eq!(with_env_vars("/opt/board/ClaudeBoard", &[("USERPROFILE", None)]), "/opt/board/ClaudeBoard");
+    }
+
+    // ── 자율주행 작업 스케줄러 정리 ──
+
+    const HASH: &str = "0123abcd";
+
+    fn full(folder: &str, prefix: &str, id: &str) -> String {
+        format!("{folder}{prefix}{id}.{HASH}")
+    }
+
+    /// 가짜 작업 스케줄러 — 목록을 주고, 지우려 한 경로를 기록한다. `fail` 에 든 경로는 지우기가 실패한다
+    struct FakeTasks {
+        tasks: Vec<String>,
+        fail: Vec<String>,
+        list_fails: bool,
+        deleted: std::cell::RefCell<Vec<String>>,
+    }
+
+    impl FakeTasks {
+        fn new(tasks: Vec<String>) -> Self {
+            Self { tasks, fail: Vec::new(), list_fails: false, deleted: Default::default() }
+        }
+    }
+
+    impl TaskSink for FakeTasks {
+        fn list(&self) -> Result<Vec<String>, String> {
+            if self.list_fails {
+                Err("목록 실패".to_string())
+            } else {
+                Ok(self.tasks.clone())
+            }
+        }
+        fn delete(&self, task_path: &str) -> Result<(), String> {
+            self.deleted.borrow_mut().push(task_path.to_string());
+            if self.fail.iter().any(|f| f == task_path) {
+                Err("거부".to_string())
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    const NON_DEV_FOLDER: &str = r"\ClaudeBoard\autopilot\";
+    const DEV_FOLDER: &str = r"\ClaudeBoard\autopilot-dev\";
+    const NON_DEV_PREFIX: &str = "com.claude.board.autopilot.";
+    const DEV_PREFIX: &str = "com.claude.board.dev.autopilot.";
+
+    #[test]
+    fn selects_matching_dev_and_non_dev_tasks_only() {
+        let unrelated = [
+            r"\Microsoft\Windows\Defrag\ScheduledDefrag".to_string(),
+            r"\ClaudeBoard\autopilot\other-task".to_string(),
+            format!(r"\ClaudeBoard\autopilot-dev\{NON_DEV_PREFIX}run-3.{HASH}"), // 폴더와 앞머리가 어긋남
+            format!(r"\ClaudeBoard\autopilot\{DEV_PREFIX}run-4.{HASH}"),
+            format!(r"\Other\autopilot\{NON_DEV_PREFIX}run-5.{HASH}"), // 다른 폴더
+            format!(r"\ClaudeBoard\autopilot\sub\{NON_DEV_PREFIX}run-6.{HASH}"), // 하위 폴더
+            format!(r"\ClaudeBoard\autopilot\{NON_DEV_PREFIX}run-7"), // 해시 없음
+            format!(r"\ClaudeBoard\autopilot\{NON_DEV_PREFIX}run-8.0123ABCD"), // 대문자 해시
+            format!(r"\ClaudeBoard\autopilot\{NON_DEV_PREFIX}run-9.0123abc"), // 7자
+            format!(r"\ClaudeBoard\autopilot\{NON_DEV_PREFIX}.{HASH}"), // 실행 id 없음
+            format!(r"\ClaudeBoard\autopilot\{NON_DEV_PREFIX}...{HASH}"), // 점만인 id
+            format!(r"\ClaudeBoard\autopilot\x{NON_DEV_PREFIX}run-1.{HASH}"), // 앞머리 앞에 글자
+            format!(r"\ClaudeBoard\autopilot\{NON_DEV_PREFIX}run 1.{HASH}"), // 허용하지 않는 글자
+        ];
+        let want = vec![full(NON_DEV_FOLDER, NON_DEV_PREFIX, "run-1"), full(DEV_FOLDER, DEV_PREFIX, "run.2_b")];
+        let mut listing = unrelated.to_vec();
+        listing.insert(1, want[0].clone());
+        listing.push(want[1].clone());
+        listing.push(want[0].clone()); // 같은 경로가 둘이어도 한 번
+        assert_eq!(select_autopilot_tasks(&listing, &AUTOPILOT_SCOPES), want);
+        // 폴더는 대소문자를 가리지 않는다(작업 스케줄러가 그렇다)
+        let upper = full(r"\CLAUDEBOARD\AUTOPILOT\", NON_DEV_PREFIX, "run-1");
+        assert_eq!(select_autopilot_tasks(std::slice::from_ref(&upper), &AUTOPILOT_SCOPES), [upper]);
+    }
+
+    #[test]
+    fn empty_listing_removes_nothing() {
+        let fake = FakeTasks::new(Vec::new());
+        let r = remove_autopilot_tasks(false, &AUTOPILOT_SCOPES, &fake);
+        assert_eq!(r, TaskCleanup::default());
+        assert!(fake.deleted.borrow().is_empty());
+        assert_eq!(describe_cleanup(&r), ["  자율주행 작업 스케줄러: 0개 지움"]);
+    }
+
+    #[test]
+    fn one_delete_failure_continues_with_the_rest() {
+        let (a, b, c) = (full(NON_DEV_FOLDER, NON_DEV_PREFIX, "a"), full(DEV_FOLDER, DEV_PREFIX, "b"), full(NON_DEV_FOLDER, NON_DEV_PREFIX, "c"));
+        let mut fake = FakeTasks::new(vec![a.clone(), r"\Unrelated\x".to_string(), b.clone(), c.clone()]);
+        fake.fail = vec![b.clone()];
+        let r = remove_autopilot_tasks(false, &AUTOPILOT_SCOPES, &fake);
+        assert_eq!(*fake.deleted.borrow(), [a.clone(), b.clone(), c.clone()], "관계없는 작업은 지우기를 시도하지도 않는다");
+        assert_eq!(r.removed, [a, c]);
+        assert_eq!(r.failed, [(b, "거부".to_string())]);
+        assert!(r.list_error.is_none());
+        assert_eq!(describe_cleanup(&r).len(), 2);
+    }
+
+    #[test]
+    fn list_failure_deletes_nothing_and_is_reported() {
+        let mut fake = FakeTasks::new(vec![full(NON_DEV_FOLDER, NON_DEV_PREFIX, "a")]);
+        fake.list_fails = true;
+        let r = remove_autopilot_tasks(false, &AUTOPILOT_SCOPES, &fake);
+        assert!(fake.deleted.borrow().is_empty());
+        assert_eq!(r.list_error.as_deref(), Some("목록 실패"));
+        assert!(describe_cleanup(&r)[0].contains("목록 실패"));
+    }
+
+    /// 폴더를 바꿔 띄운 uninstall 은 진짜 스케줄러를 읽지도 지우지도 않는다
+    #[test]
+    fn redirected_uninstall_never_touches_the_scheduler() {
+        let fake = FakeTasks::new(vec![full(NON_DEV_FOLDER, NON_DEV_PREFIX, "a")]);
+        let r = remove_autopilot_tasks(true, &AUTOPILOT_SCOPES, &fake);
+        assert!(r.skipped && r.removed.is_empty());
+        assert!(fake.deleted.borrow().is_empty());
+        assert!(describe_cleanup(&r)[0].contains("건너뜀"));
+    }
+
+    #[test]
+    fn parses_schtasks_csv_first_column() {
+        let csv = "\"\\ClaudeBoard\\autopilot\\com.claude.board.autopilot.r.0123abcd\",\"N/A\",\"Ready\"\r\n\
+                   \"TaskName\",\"Next Run Time\",\"Status\"\r\n\
+                   \r\n\
+                   \"\\Microsoft\\X\",\"2026-01-01\",\"Ready\"\r\n";
+        assert_eq!(parse_task_paths(csv), [r"\ClaudeBoard\autopilot\com.claude.board.autopilot.r.0123abcd", r"\Microsoft\X"]);
+    }
+
+    /// 진짜 작업 스케줄러 — 시험 폴더 아래에 같은 꼴의 작업 둘(일반·dev)과 관계없는 하나를 만들고 정리한 뒤 사라졌는지 본다.
+    /// 사용자의 진짜 `\ClaudeBoard\autopilot*` 폴더는 건드리지 않는다.
+    #[cfg(windows)]
+    #[test]
+    fn real_scheduler_removes_only_the_matching_throwaway_tasks() {
+        use super::TaskSink as _;
+        let scopes = [
+            TaskScope { folder: r"\ClaudeBoardHookTest\w14a\", prefix: NON_DEV_PREFIX },
+            TaskScope { folder: r"\ClaudeBoardHookTest\w14b\", prefix: DEV_PREFIX },
+        ];
+        let mine = [full(scopes[0].folder, NON_DEV_PREFIX, "hooktest-1"), full(scopes[1].folder, DEV_PREFIX, "hooktest-2")];
+        let unrelated = format!("{}unrelated-hooktest", scopes[0].folder);
+        let cleanup = || {
+            for p in mine.iter().chain(std::iter::once(&unrelated)) {
+                let _ = scheduler::delete(p);
+            }
+        };
+        cleanup();
+        for p in mine.iter().chain(std::iter::once(&unrelated)) {
+            scheduler::create_throwaway(p).unwrap_or_else(|e| panic!("{p}: {e}"));
+        }
+        let before = scheduler::Real.list().unwrap();
+        for p in mine.iter().chain(std::iter::once(&unrelated)) {
+            assert!(before.iter().any(|b| b.eq_ignore_ascii_case(p)), "{p} 가 만들어지지 않았다");
+        }
+        let r = remove_autopilot_tasks(false, &scopes, &scheduler::Real);
+        let after = scheduler::Real.list().unwrap();
+        let still: Vec<&String> = mine.iter().filter(|p| after.iter().any(|a| a.eq_ignore_ascii_case(p))).collect();
+        let kept = after.iter().any(|a| a.eq_ignore_ascii_case(&unrelated));
+        cleanup();
+        assert!(r.failed.is_empty() && r.list_error.is_none(), "{r:?}");
+        assert!(still.is_empty(), "남았다: {still:?}");
+        assert!(kept, "관계없는 작업까지 지웠다");
+        assert_eq!(r.removed.len(), 2);
     }
 }

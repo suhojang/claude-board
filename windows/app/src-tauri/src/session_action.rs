@@ -36,9 +36,36 @@ impl SessionAction {
     }
 }
 
+/// 세션을 가리키지 않는 `--action` — 세션 id 자리는 `-` 같은 아무 글자이고 보지 않는다.
+/// 세션 동작(`SessionAction`)과 섞지 않는다: 세션을 찾는 길(`queue_action`·`pending_action`)로 보내면 세션이 없다며 버려진다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoardAction {
+    /// 설치·제거·업데이트 스크립트가 청하는 정상 종료(mac `requestQuit`) — 끊길 세션 확인 창을 거친다
+    Quit,
+}
+
+impl BoardAction {
+    /// 이름 → 보드 동작. 세션 동작 이름과 모르는 이름은 None.
+    pub fn parse(name: &str) -> Option<BoardAction> {
+        match name {
+            "quit" => Some(BoardAction::Quit),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quit_is_a_board_action_and_not_a_session_action() {
+        assert_eq!(BoardAction::parse("quit"), Some(BoardAction::Quit));
+        assert_eq!(SessionAction::parse("quit", None), None, "세션을 찾는 길로 가면 버려진다");
+        for name in ["Quit", "exit", "", "stop", "pause", "focus"] {
+            assert_eq!(BoardAction::parse(name), None, "{name}");
+        }
+    }
 
     #[test]
     fn dispatch_table_uses_mac_names() {

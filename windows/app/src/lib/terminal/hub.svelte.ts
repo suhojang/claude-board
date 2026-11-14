@@ -3,9 +3,11 @@
 // 탭 줄은 지금 경로의 탭만 보인다. 셸이 끝나면 그 탭이 닫히고 선택은 같은 경로의 이웃 탭 → 이웃 경로 → 빈 상태로 간다.
 // 터미널 출력은 보드의 1초 상태 묶음에 싣지 않고, 여기서 term_list 와 채널로 채운다(이벤트 기반).
 import { tick } from "svelte";
-import { inTauri, rememberMdRenderOff, setTerminalExpanded, termKill, termList, termSpawn, testClaudePrefix } from "$lib/backend";
+import { inTauri, log, rememberMdRenderOff, setTerminalExpanded, termKill, termList, termSpawn, testClaudePrefix } from "$lib/backend";
 import { board } from "$lib/board/store.svelte";
 import { mockTabs } from "$lib/mock";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import type { BoardSurface, BoardTab, LeafPhase, Session, State, TermId, TermInfo } from "$lib/types";
 import {
   folderNameOf,
@@ -25,15 +27,20 @@ import {
   wrapStep,
 } from "./tabLogic";
 import { pairSessions, placeOf, type SessionPlace, type SurfaceChange } from "./place";
-import { startLifecycle } from "./lifecycle.svelte";
+import { startLifecycle, whenRestored } from "./lifecycle.svelte";
 import { loadPluginDir } from "./mdRenderLoad";
+import { isMdRenderOff } from "./mdRender";
 import { loadTestClaudePrefix } from "./testClaude";
 import { closeSettings } from "$lib/settings/screen.svelte";
 import { hasLeaf, leaves } from "./split";
+import { panesKey, paneViews } from "./closeTab";
 import { startTabRenames } from "./renameFlow.svelte";
-import { startSessionFlow } from "./sessionFlow.svelte";
+import { reveal, startSessionFlow, toast } from "./sessionFlow.svelte";
+import { canTypeClaude } from "./shellRules";
 import { TermController } from "./term";
-import { typeCommand } from "./typeCommand";
+import { typeAtPrompt, typeCommand } from "./typeCommand";
+import { findReuseSurface, openTabLine, openTabSession, parseOpenTabEvent, type OpenTabRequest } from "./openTab";
+import { isTerminalHere, switchForHeaderClick } from "./workspaceSwitch";
 
 export interface LeafState {
   phase: LeafPhase;
@@ -186,7 +193,7 @@ function isBusy(tab: BoardTab): boolean {
 
 // ── 탭 만들기·찾기 ────────────────────────────────────────────
 
-function newTab(termId: TermId | null, workspace: string): BoardTab {
+function newTab(termId: TermId | null, workspace: string, shell?: string): BoardTab {
   const surface: BoardSurface = {
     id: crypto.randomUUID(),
     termId,
@@ -194,6 +201,7 @@ function newTab(termId: TermId | null, workspace: string): BoardTab {
     command: null,
     held: null,
     mdRenderOff: false,
+    ...(shell ? { shell } : {}),
     title: "",
     typedAt: null,
   };
@@ -262,12 +270,21 @@ function applyChange(change: SurfaceChange) {
   }
 }
 
+/** 마지막으로 백엔드에 알린 탭 화면 값 지문 — 지문이 바뀔 때만 close_tab_panes 를 다시 보낸다 */
+let lastCloseTabPanesKey: string | null = null;
+
 /** 상태 묶음 세션들로 짝짓기를 다시 쥔다 — 화면을 먼저 고치고 짝·소유 표를 갈아낸다(mac TerminalHub.pair) */
 export function pair(sessions: Session[], runsClaude: TermId[] | null) {
   const plan = pairSessions({ sessions, surfaces: TerminalHub.surfaces, runsClaude });
   for (const change of plan.changes) applyChange(change);
   TerminalHub.paired = { ...plan.paired };
   TerminalHub.tabOwnedHeadless = { ...plan.owned };
+  // 바깥 닫기(--close-tab)의 탭 화면 값 — 짝짓기가 화면을 고친 뒤의 값이다. 값이 바뀔 때만 백엔드에 알린다(C4.1b)
+  const panes = paneViews(TerminalHub.tabs, surfaceOf, (id) => TerminalHub.leaves[id]?.phase, shownName, Date.now());
+  const key = panesKey(panes);
+  if (key === lastCloseTabPanesKey) return;
+  lastCloseTabPanesKey = key;
+  void invoke("close_tab_panes", { panes }).catch((e) => console.error("닫기 탭 화면 값을 알리지 못했습니다", e));
 }
 
 /** 세션이 어디서 도는지 화면 고침 뒤의 상태로 가른다(mac TerminalHub.place) — 세션 줄의 위치 칩이 부른다 */
@@ -291,7 +308,7 @@ export async function startHub() {
   }
   for (const info of list) TerminalHub.terms[info.id] = info;
   for (const info of list.filter((t) => t.status === "running")) {
-    const tab = newTab(info.id, info.cwd);
+    const tab = newTab(info.id, info.cwd, info.shell);
     TerminalHub.tabs.push(tab);
   }
   if (TerminalHub.tabs.length) select(TerminalHub.tabs[TerminalHub.tabs.length - 1].id, false);
@@ -304,6 +321,7 @@ export async function startHub() {
   }
   startLifecycle(); // 탭 저장·되살리기·끌 때 확인(P1.1)
   startSessionFlow(); // 상태 묶음마다 짝짓기(pair)를 다시 쥐고, 세션 열기 요청·이름 바꾸기를 받는다
+  startOpenTabFlow(); // 바깥 열기(--open-tab) 요청을 받는다
 }
 
 // ── 고르기 ────────────────────────────────────────────────────
@@ -325,9 +343,15 @@ function shownTab(ws: string): string | undefined {
 
 /** 경로 줄 항목을 눌렀을 때 — 그 경로의 마지막에 고른 탭으로 */
 export function showWorkspace(path: string) {
+  const act = switchForHeaderClick(shownTab(path), expanded());
+  if (act.kind === "none") return; // 탭이 없는 경로는 아무것도 하지 않는다 — 설정 화면도 닫지 않는다
   leaveSettings();
-  const id = shownTab(path);
-  if (id) select(id);
+  select(act.tabId, act.focus);
+}
+
+/** 펼친 터미널이 지금 이 경로(카드 id)를 보이는 중인가 — 카드 폴더 아이콘의 표지 */
+export function terminalHere(groupId: string): boolean {
+  return isTerminalHere(expanded(), TerminalHub.workspace, groupId, homeDir());
 }
 
 /** 지금 경로 안에서 왼쪽(-1)·오른쪽(+1) 탭으로(끝에서는 반대쪽 끝으로) */
@@ -357,21 +381,157 @@ export function stepWorkspace(step: number) {
 
 // ── 열기 ──────────────────────────────────────────────────────
 
-/** 그 폴더(없으면 홈)의 셸 탭을 같은 경로 탭들의 끝에(새 경로면 맨 끝에) 연다. command 는 셸이 뜬 뒤 한 번 칠 명령 */
-export function openShell(dir: string | null = null, opts: { command?: string; sessionId?: string; mdRenderOff?: boolean } = {}): BoardTab | undefined {
-  leaveSettings();
+/**
+ * 그 폴더(없으면 홈)의 셸 탭을 같은 경로 탭들의 끝에(새 경로면 맨 끝에) 연다. command 는 셸이 뜬 뒤 한 번 칠 명령.
+ * shell 은 이 탭만 쓸 셸 키(없으면 설정의 기본). 명령을 칠 탭이면 WSL 을 고를 수 없어 셸 지정을 버리고 기본 셸로 띄운다.
+ * select 를 false 로 두면(바깥 열기의 no_focus) 설정을 닫지도, 고른 탭을 바꾸지도 않는다 — 탭만 만들어 둔다
+ */
+export function openShell(dir: string | null = null, opts: { command?: string; sessionId?: string; mdRenderOff?: boolean; shell?: string; select?: boolean } = {}): BoardTab | undefined {
+  if (opts.select !== false) leaveSettings();
   const tab = newTab(null, dir ?? "~");
   const surface = focusedSurface(tab);
   if (surface) {
     surface.command = opts.command ?? null;
     surface.sessionId = opts.sessionId ?? null;
     surface.mdRenderOff = opts.mdRenderOff ?? false;
+    if (opts.shell && (!opts.command || canTypeClaude(opts.shell))) surface.shell = opts.shell;
     // 명령을 넣을 화면은 막 claude 가 뜨는 것으로 본다 — 셸이 뜨기 전 스냅샷이 명령을 비우지 않게
     surface.typedAt = opts.command ? Date.now() : null;
   }
   TerminalHub.tabs.splice(insertIndexFor(TerminalHub.tabs, tab.workspace, homeDir()), 0, tab);
-  select(tab.id);
+  if (opts.select !== false) select(tab.id);
   return TerminalHub.tabs.find((t) => t.id === tab.id);
+}
+
+// ── 바깥 열기(--open-tab) ─────────────────────────────────────
+// claude CLI 의 --open-tab 이 백엔드를 거쳐 보내는 open-tab-request 이벤트를 화면에 반영한다.
+// 이어 열 화면이 있으면 그 화면을 쓰고(reuse), 없으면 새 탭을 열어 둔다(mac openExternal·run 과 같은 흐름).
+// 처리가 끝난 뒤 곱을 백엔드에 알린다 — open-tab-done 은 뒤 단계가 만든다, 지금은 부른 결과가 없으면 그냥 잊힌다.
+
+/** 듣기를 켠 적이 있는지 — startOpenTabFlow 를 여러 번 불러도 한 번만 켠다 */
+let openTabStarted = false;
+
+/** 바깥 열기 준비를 알린 적 있는지 — 페이지를 띄운 뒤 딱 한 번 알린다(실패해도 다시 보내지 않는다) */
+let openTabReadySent = false;
+
+/** 바깥 열기를 받을 준비가 끝났음을 백엔드에 알린다 — 듣기가 켜지고 탭 되살리기가 끝난 뒤 딱 한 번(실패는 기록만 남긴다) */
+async function notifyOpenTabReady(): Promise<void> {
+  if (openTabReadySent) return;
+  openTabReadySent = true;
+  try {
+    await invoke("open_tab_ready");
+  } catch (e) {
+    console.error("바깥 열기 준비를 알리지 못했습니다", e);
+  }
+}
+
+/** 바깥 열기의 곱을 알린다 — 요청 하나당 딱 한 번. 탭·세션을 알아내지 못했으면 null 이다(backend 가 그대로 남긴다) */
+function reportOpenTabDone(id: string, tab: string | null, session: string | null) {
+  void invoke("open_tab_done", { id, tab, session }).catch((e) => console.error("바깥 열기 곱을 알리지 못했습니다", e));
+}
+
+/** 바깥 열기 명령들과 요청이 든 세션 — 세션이 있으면 꾸미기 끔 목록에 기억한다 */
+function sessionOfOpenTab(command: readonly string[]): { line: string | null; session: string | null; mdRenderOff: boolean } {
+  const line = openTabLine(command);
+  const session = openTabSession(command);
+  const mdRenderOff = session !== null && isMdRenderOff(session, board.snap?.settings.mdRenderOff ?? []);
+  if (session !== null && mdRenderOff) void rememberMdRenderOff(session);
+  return { line, session, mdRenderOff };
+}
+
+/** 이어 열 화면에 명령을 친다(plan 의 Reuse — mac run 과 같다). typing 은 기다리지 않는다: CLI 는 치는 걸 끝날 때까지 마주 보지 않는다 */
+async function reuseSurface(request: OpenTabRequest, surface: BoardSurface, tab: BoardTab): Promise<void> {
+  if (surface.termId === null) {
+    // 화면의 셸이 아직 뜨기 전(시작 직전 찰나) — 칠 곳이 없다
+    console.error("바깥 열기 화면의 셸이 아직 뜨지 않았습니다", request.reuseTab);
+    toast("바깥 열기 화면이 아직 준비되지 않았습니다");
+    return reportOpenTabDone(request.id, null, null);
+  }
+  const { line, session, mdRenderOff } = sessionOfOpenTab(request.command);
+  if (line === null) {
+    console.error("바깥 열기 명령을 셸 줄로 만들지 못했습니다", request.command);
+    toast("바깥 열기 명령이 셸에 붙여넣기 안전하지 않습니다");
+    return reportOpenTabDone(request.id, null, null);
+  }
+  const termId = surface.termId;
+  // 남겨 둔 이어 열기(held)는 이 자리를 쓰려던 옛 값이므로 비운다 — 저장 때 held 가 이기면 새 명령을 잃는다
+  surface.held = null;
+  surface.command = line;
+  surface.sessionId = session;
+  surface.mdRenderOff = mdRenderOff;
+  void typeAtPrompt(termId, line, {
+    alive: () => surfaceOf(surface.id)?.termId === termId && !!TerminalHub.terms[termId],
+    touch: () => {
+      surface.typedAt = Date.now();
+    },
+    shell: TerminalHub.terms[termId]?.shell ?? "pwsh",
+    mdRenderOff,
+  });
+  // 화면 하나뿐인 탭에만 탭 이름을 붙인다 — 나눈 탭에 이름을 붙이면 어느 화면의 이름인지 애매해진다
+  if (request.title !== null && leaves(tab.root).length === 1) tab.customName = request.title;
+  reportOpenTabDone(request.id, shownName(tab), session);
+}
+
+/** 바깥 열기 요청 하나를 반영한다(답은 마친 뒤 딱 한 번 알린다) — plan.rs OpenTabAction 의 Open·Reuse·Exists 차례다 */
+async function handleOpenTab(request: OpenTabRequest): Promise<void> {
+  if (request.reuseTab === null) return openExternalTab(request);
+  // backend 는 백엔드 터미널 id("t1")로 이어 열 화면을 가르킨다 — 화면 id(옛 꼴)로 먼저 보고 없으면 터미널 id 로 본다
+  const surface = findReuseSurface(TerminalHub.surfaces, request.reuseTab);
+  const tab = surface !== undefined ? tabOfLeaf(surface.id) : undefined;
+  if (!surface || !tab) {
+    // 이어 열 화면을 골랐는데 그 사이 닫혔다 — 대신 새 탭을 열지 않고 기록만 남긴다(mac 도 조용히 건너뛴다)
+    console.error("바깥 열기 화면이 사라졌습니다", request.reuseTab);
+    log("바깥 열기 화면이 사라졌습니다");
+    toast("바깥 열기 화면이 사라졌습니다");
+    return reportOpenTabDone(request.id, null, null);
+  }
+  if (request.command.length === 0) {
+    // 이미 도는 화면 가리키기(plan 의 Exists) — 명령 없이 그 탭을 펼쳐 보인다
+    reveal(surface.id);
+    return reportOpenTabDone(request.id, shownName(tab), surface.sessionId);
+  }
+  return reuseSurface(request, surface, tab);
+}
+
+/** 새 탭에 띄운다(plan 의 Open) — focus 면 그 탭을 펼쳐 고르고 보드 창을 앞으로, 아니면 탭만 만들어 둔다 */
+function openExternalTab(request: OpenTabRequest): void {
+  const { line, session, mdRenderOff } = sessionOfOpenTab(request.command);
+  if (line === null) {
+    console.error("바깥 열기 명령을 셸 줄로 만들지 못했습니다", request.command);
+    toast("바깥 열기 명령이 셸에 붙여넣기 안전하지 않습니다");
+    return reportOpenTabDone(request.id, null, null);
+  }
+  const tab = openShell(request.cwd, { command: line, sessionId: session ?? undefined, mdRenderOff, select: !request.noFocus });
+  if (!tab) {
+    console.error("바깥 열기 탭을 열지 못했습니다");
+    toast("바깥 열기 탭을 열지 못했습니다");
+    return reportOpenTabDone(request.id, null, null);
+  }
+  tab.external = true; // 바깥에서 연 탭을 새기고 — 닫기 흐름이 이 사실을 본다
+  if (request.title !== null) tab.customName = request.title;
+  if (!request.noFocus) reveal(tab.focused);
+  reportOpenTabDone(request.id, shownName(tab), session);
+}
+
+/** 바깥 열기 요청을 듣는다 — startHub 가 시작 때 한 번 부른다. 브라우저 개발 화면에서는 듣지 않는다.
+ * 듣기가 켜지고 탭 되살리기가 끝나면 바깥 열기 준비를 한 번 알린다(실패해도 다시 보내지 않는다) —
+ * 이 답을 받기 전의 요청은 되살린 탭이 아직 없어 닫힌 화면으로 답한다
+ */
+export function startOpenTabFlow(): void {
+  if (openTabStarted || !inTauri) return;
+  openTabStarted = true;
+  void listen("open-tab-request", (event) => {
+    const request = parseOpenTabEvent(event.payload);
+    if (request === null) return console.error("바깥 열기 요청을 읽지 못했습니다", event.payload);
+    void handleOpenTab(request).catch((e) => {
+      console.error("바깥 열기 요청을 처리하지 못했습니다", e);
+      toast("바깥 열기 요청을 처리하지 못했습니다");
+      reportOpenTabDone(request.id, null, null);
+    });
+  })
+    .then(() => whenRestored())
+    .then(() => notifyOpenTabReady())
+    .catch((e) => console.error("바깥 열기 듣기를 켜지 못했습니다", e));
 }
 
 /** 새 세션 창 — 터미널이 접혀 있으면 펼치고 연다. 이미 떠 있으면 겹쳐 띄우지 않는다(Ctrl+T 를 또 누름) */
@@ -402,7 +562,8 @@ export async function startLeaf(leafId: string) {
       const dims = ctl.dims();
       if (!dims) throw new Error("터미널 크기를 잴 수 없음");
       const cwd = workspaceKey(tab.workspace) === "~" ? undefined : tab.workspace;
-      info = await termSpawn({ cwd, cols: dims.cols, rows: dims.rows });
+      // claude 명령을 칠 화면(새 세션·이어 열기)이면 typesClaude — 백엔드가 WSL 을 기본 셸로 바꿔 띄운다
+      info = await termSpawn({ cwd, cols: dims.cols, rows: dims.rows, shell: leaf.shell, typesClaude: !!(leaf.command || leaf.held) });
       spawnedId = info.id;
       if (closed()) {
         termKill(info.id); // 닫힌 탭의 셸이 남지 않게
@@ -410,6 +571,7 @@ export async function startLeaf(leafId: string) {
       }
       TerminalHub.terms[info.id] = info;
       leaf.termId = info.id;
+      leaf.shell = info.shell; // 실제로 뜬 셸을 기억한다 — 탭을 저장하면 다음에 이 셸로 돌아온다
     }
     await ctl.bind(info);
     if (closed()) {

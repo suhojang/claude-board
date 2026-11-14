@@ -1,15 +1,10 @@
 // 답변 꾸미기(md-render) 명령 규칙(mac mdRenderCommand·mdRenderOff) — 순수 함수다. node:test 로 바로 시험한다.
 // 보드 탭에서 치는 claude 명령에서 md-render 의 `--plugin-dir` 을 모두 걷어 내고, 켜져 있고 폴더를 알 때만 하나 붙인다.
 // 폴더는 시작 때 백엔드가 `%USERPROFILE%\.claude\notifier\plugins\md-render` 로 옮겨 둔 것이다(src-tauri/src/mdrender.rs).
-import { CLAUDE_START } from "./sessionCommand.ts";
+import { claudeLine, mdRenderArgIndices, shellEdit, shellLine } from "./shellCommand.ts";
 
-// 경로가 `...plugins\md-render` 로 끝나는 `--plugin-dir` 값 하나(따옴표 없음·큰따옴표·작은따옴표). 앞 공백까지 잡아 지운다.
-// 사용자의 다른 `--plugin-dir` 은 값이 md-render 로 끝나지 않으므로 남는다. 경로는 대소문자를 가리지 않고 `\`·`/` 어느 쪽이든 읽는다
-const MD_RENDER_TAIL = String.raw`[\\/]plugins[\\/]md-render[\\/]?`;
-const MD_RENDER_FLAG = new RegExp(
-  String.raw`\s+--plugin-dir(?:\s+|=)(?:"[^"]*${MD_RENDER_TAIL}"|'[^']*${MD_RENDER_TAIL}'|[^\s"']*${MD_RENDER_TAIL})(?=\s|$)`,
-  "gi",
-);
+// 아직 다른 꼴(따옴표 한쪽만 있는 등)로 남은 md-render 경로가 있는지 — 남았으면 더 붙이지 않는다(둘이 되느니 사용자 것을 둔다).
+// 경로는 대소문자를 가리지 않고 `\`·`/` 어느 쪽이든 읽는다
 const MD_RENDER_PATH = /[\\/]plugins[\\/]md-render(?:[\\/]|\s|"|'|$)/i;
 
 // 큰따옴표 안에서 cmd.exe·PowerShell 이 풀어 버리는 글자(% $ ` " 굽은 따옴표 ^ !)와 제어 문자·끝의 역슬래시(닫는 따옴표를 가린다)
@@ -23,16 +18,18 @@ export function quotePluginDir(pluginDir: string): string {
 
 /**
  * 명령의 md-render `--plugin-dir` 을 정리한다 — 끄면(off) 없음, 켜고 pluginDir 을 알면 claude 낱말 바로 뒤에 하나.
- * claude 가 아닌 명령은 그대로. 사용자의 다른 `--plugin-dir` 은 둔다. 큰따옴표 등 다른 꼴로 사용자가 적은 md-render 경로가 남으면 더 붙이지 않는다.
+ * claude 가 아니거나 읽지 못하는 명령은 그대로. 사용자의 다른 `--plugin-dir` 은 둔다. 큰따옴표 등 다른 꼴로 사용자가 적은 md-render 경로가 남으면 더 붙이지 않는다.
  * pluginDir 에 따옴표 안에서도 풀리는 글자가 있으면 던진다(켜져 있을 때만)
  */
 export function mdRenderCommand(command: string, pluginDir: string | null, off: boolean): string {
-  const start = CLAUDE_START.exec(command);
-  if (!start) return command;
-  const stripped = command.replace(MD_RENDER_FLAG, "");
+  const line = claudeLine(command);
+  if (line === null) return command;
+  const stripped = shellEdit(command, line, { remove: mdRenderArgIndices(line.texts) });
+  if (stripped === null) return command;
   if (off || pluginDir === null || MD_RENDER_PATH.test(stripped)) return stripped;
-  const at = start[0].length;
-  return `${stripped.slice(0, at)} --plugin-dir ${quotePluginDir(pluginDir)}${stripped.slice(at)}`;
+  const base = shellLine(stripped);
+  if (base === null) return stripped;
+  return shellEdit(stripped, base, { afterFirst: ["--plugin-dir", quotePluginDir(pluginDir)] }) ?? stripped;
 }
 
 /** 이 세션이 꾸미기를 끈 채 떴는가 */

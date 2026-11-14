@@ -113,6 +113,8 @@ export interface BoardSettings {
   newSessionCommand: string;           // 새 세션 기본 명령, 비면 claude
   newSessionMdRender: boolean;         // 새 세션의 답변 꾸미기 기본값
   autoUpdateCheck: boolean;            // 시작할 때와 하루마다 새 버전 확인
+  terminalShell: string | null;        // 새 탭의 셸 키(list_envs 의 key), null 이면 기본 셸(pwsh → powershell → cmd)
+  boardFontScale: number;              // 보드 글자 크기 배율 0.8 ~ 1.5(0.1 단위, 기본 1) — 규칙은 board/fontScale.ts
 }
 
 // ── 설정 화면·단축키·계정 로그인(2단계) — 규칙은 settings/·shortcuts/ ────────────────
@@ -176,6 +178,18 @@ export interface Snapshot {
   settings: BoardSettings;
   claudeVersion: string | null;
   terminals: TerminalApp[];
+  autopilot?: AutopilotRun[];  // 자율주행 실행(5.2 의 뷰) — 없으면 빈 목록으로 본다(옛 백엔드)
+}
+
+// ── 자율주행 — 백엔드 autopilot.rs 의 AutopilotRunView 와 같은 칸(camelCase, 시각은 ms) ──
+export interface AutopilotEnv { key: string; label: string; sandbox: boolean }
+export interface AutopilotUnit { n: number; title: string; phase: string; activeSec: number; costUsd: number; tries: number }
+export type AutopilotAction = "pause" | "resume" | "stop";
+export interface AutopilotRun {
+  id: string; path: string; title: string; state: string; reason: string; waitUntil: number | null;
+  env: AutopilotEnv; unit: AutopilotUnit | null; total: number;
+  done: number; failed: number; capped: number; skipped: number; stopped: number;
+  can: AutopilotAction[]; ended: boolean;
 }
 
 // 세션 줄·카드에서 부르는 동작 — 백엔드 명령 session_action 의 action 값. mac performAction 의 어휘(pause·resume·stop·reopen·focus)와 Windows 전용 activate
@@ -201,12 +215,20 @@ export interface TermSpec {
   cwd?: string;
   cols: number;
   rows: number;
+  shell?: string;         // 셸 키(`pwsh`·`powershell`·`cmd`·`git-bash`·`wsl`·`wsl:<배포판>`), 없으면 설정의 terminalShell
+  typesClaude?: boolean;  // 보드가 이 탭에 claude 명령을 쳐 넣는가(새 세션·이어 열기) — 참이면 WSL 은 기본 셸로 바뀐다. 기본 거짓
+}
+
+// 실행 환경 하나 — list_envs 가 돌려주는 설정 화면용 목록 항목. key 는 TermSpec.shell·settings.terminalShell 에 쓴다
+export interface EnvChoice {
+  key: string;
+  label: string;
 }
 
 export interface TermInfo {
   id: TermId;
   pid: number;
-  shell: "pwsh" | "powershell" | "cmd";
+  shell: string;       // 실제로 띄운 셸 키 — `pwsh`·`powershell`·`cmd`·`git-bash`·`wsl`·`wsl:<배포판>`
   cwd: string;
   cols: number;
   rows: number;
@@ -238,6 +260,7 @@ export interface BoardSurface {
   command: string | null;         // 셸이 뜬 뒤 한 번 칠 claude 명령, 없으면 null(셸 화면)
   held: Record<string, string> | null; // 다시 뜰 때 셸만 띄우고 들어갈 때 이어 열 값(resumeHeld)
   mdRenderOff: boolean;           // 답변 꾸미기를 끄고 띄운 화면
+  shell?: string;                 // 이 화면의 셸 키 — 띄울 때 고른 것, 띄운 뒤에는 실제로 뜬 셸. 없으면 설정의 기본
   title: string;                  // 터미널이 알려 준 제목(xterm onTitleChange)
   typedAt?: number | null;        // 셸에 claude 명령을 친 시각(ms) — 3초 동안은 claude 가 도는 것으로 본다(mac typedAt, W3)
 }
@@ -251,6 +274,7 @@ export interface BoardTab {
   root: SplitNode;
   focused: string;            // 고른 화면의 id
   zoomed: boolean;            // 고른 화면 하나 크게 보기
+  external?: boolean;         // 바깥에서(--open-tab) 연 탭 — 옛 저장 항목에는 없다(mac BoardTab.external)
 }
 
 // 칸의 셸 상태 — idle(아직 안 띄움) · starting · running · exited · failed
@@ -283,6 +307,7 @@ export interface SavedSurface {
   command: string | null;
   sessionId: string | null;
   mdRenderOff: boolean;
+  shell?: string; // 셸 키 — 옛 저장 항목에는 없다
 }
 
 // 저장하는 화면 나누기 트리(mac `savedNode`) — 잎은 화면 하나, 가지는 둘로 나눈 것
@@ -295,6 +320,7 @@ export interface TabEntry {
   workspace: string;
   name: string | null;
   selected: boolean;
+  external?: boolean; // 바깥에서(--open-tab) 연 탭 — 옛 저장 항목에는 없다
   root: SavedNode;
 }
 

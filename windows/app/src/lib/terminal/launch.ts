@@ -15,8 +15,8 @@ export function uniqueTabName(base: string): string {
   return name;
 }
 
-/** 그 폴더에서 새 세션을 새 탭으로 띄운다. 터미널이 접혀 있으면 펼친다. mdRender 가 거짓이면 답변 꾸미기를 끄고 띄우고 그 세션 id 를 끈 세션으로 기억한다 */
-export function startSession(command: string, dir: string, mdRender = true) {
+/** 그 폴더에서 새 세션을 새 탭으로 띄운다. shell 은 이 탭만 쓸 셸 키(없으면 설정의 기본 — claude 를 칠 탭이라 WSL 이면 기본 셸로 바뀐다). 터미널이 접혀 있으면 펼친다. mdRender 가 거짓이면 답변 꾸미기를 끄고 띄우고 그 세션 id 를 끈 세션으로 기억한다 */
+export function startSession(command: string, dir: string, mdRender = true, shell?: string) {
   const trimmed = command.trim();
   if (!trimmed) return;
   if (!board.snap?.settings.terminalExpanded) setTerminalExpanded(true);
@@ -24,5 +24,5 @@ export function startSession(command: string, dir: string, mdRender = true) {
   const finalCommand = namedCommand(fresh.command, quoteSessionName(uniqueTabName(sanitizeSessionName(folderName(dir)))));
   const mdRenderOff = !mdRender;
   if (mdRenderOff && fresh.sessionId) rememberMdRenderOff(fresh.sessionId);
-  openShell(dir, { command: finalCommand, sessionId: fresh.sessionId ?? undefined, mdRenderOff });
+  openShell(dir, { command: finalCommand, sessionId: fresh.sessionId ?? undefined, mdRenderOff, shell });
 }

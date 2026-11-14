@@ -4,5 +4,6 @@ import type { SettingsItem } from "../items";
 
 export const TERMINAL_ITEMS: readonly SettingsItem[] = [
   { id: "sessionCommand", section: "terminal", title: "기본 명령", keywords: ["새 세션", "claude", "실행", "명령어"] },
+  { id: "shell", section: "terminal", title: "새 탭 셸", keywords: ["셸", "PowerShell", "pwsh", "cmd", "Git Bash", "WSL", "리눅스", "배포판"] },
   { id: "sessionMd", section: "terminal", title: "답변 마크다운 꾸미기", keywords: ["새 세션", "md-render"] },
 ];

@@ -1,0 +1,68 @@
+{
+  "author" : "",
+  "fields" : [
+    {
+      "name" : "담당",
+      "value" : "김개발"
+    },
+    {
+      "name" : "마감",
+      "value" : "2026-11-15"
+    },
+    {
+      "name" : "상태",
+      "value" : "검토 중"
+    }
+  ],
+  "format" : "claude-board-meta",
+  "id" : "01234567-89ab-cdef-0123-456789abcdef",
+  "kind" : "Notion 페이지",
+  "length" : 101,
+  "links" : [
+    {
+      "kind" : "link",
+      "title" : "화면 설계는 Figma",
+      "url" : "https://www.figma.com/design/AbCdEfGhIjKlMn/x"
+    },
+    {
+      "kind" : "image",
+      "title" : "image",
+      "url" : "https://example.com/plan.png"
+    },
+    {
+      "kind" : "page",
+      "title" : "회의실 목록",
+      "url" : ""
+    }
+  ],
+  "modified" : "2026-10-29T01:02:00.000Z",
+  "sections" : [
+    {
+      "text" : "관리자가 승인합니다. 접속 토큰=[가림:Notion 토큰]",
+      "title" : "승인"
+    }
+  ],
+  "source" : "notion",
+  "summary" : [
+    "회의실을 30분 단위로 예약합니다.",
+    "겹치면 막습니다",
+    "화면 설계는 Figma"
+  ],
+  "title" : "회의실 예약 요구사항",
+  "toc" : [
+    {
+      "level" : 1,
+      "title" : "개요"
+    },
+    {
+      "level" : 2,
+      "title" : "예약 규칙"
+    },
+    {
+      "level" : 2,
+      "title" : "승인"
+    }
+  ],
+  "url" : "https://www.notion.so/0123456789abcdef0123456789abcdef",
+  "version" : 1
+}

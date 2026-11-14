@@ -3,11 +3,13 @@
   // 안에 터미널/백그라운드 구역과 세션 줄, "종료된 세션 n개"(접기, 마우스를 올리면 휴지통)
   import { cubicOut } from "svelte/easing";
   import { fade, fly, slide } from "svelte/transition";
-  import type { BoardSettings, Group } from "$lib/types";
-  import { place } from "$lib/terminal/hub.svelte";
+  import type { AutopilotRun, BoardSettings, Group } from "$lib/types";
+  import { place, showWorkspace, terminalHere } from "$lib/terminal/hub.svelte";
   import { startSession } from "$lib/terminal/launch";
   import { defaultNewSessionCommand, defaultNewSessionMdRender } from "$lib/terminal/newSessionDefaults";
   import { hideGroup, removeEnded, toggleEndedOpen, toggleKindCollapsed, togglePinGroup } from "$lib/backend";
+  import AutopilotLine from "./AutopilotLine.svelte";
+  import { runsForGroup } from "./autopilotView";
   import HeaderButton from "./HeaderButton.svelte";
   import Icon from "./Icon.svelte";
   import KindSection from "./KindSection.svelte";
@@ -24,12 +26,23 @@
     toggle,
     settings,
     locked,
-  }: { g: Group; now: number; collapsed: boolean; toggle: () => void; settings: BoardSettings; locked: boolean } = $props();
+    autopilot = [],
+  }: {
+    g: Group;
+    now: number;
+    collapsed: boolean;
+    toggle: () => void;
+    settings: BoardSettings;
+    locked: boolean;
+    autopilot?: AutopilotRun[];
+  } = $props();
 
   const top = $derived(urgent(g));
   const c = $derived(stateRgb(top));
   const busy = $derived(active(g));
   const lead = $derived(busy[0]);
+  // 이 경로에서 도는 자율주행 실행 — 카드가 접혀 있어도 보인다(도는 일은 숨기지 않는다)
+  const runs = $derived(runsForGroup(autopilot, g.path));
   const pinned = $derived(settings.pinnedGroups.includes(g.id));
   const endedOpen = $derived(settings.endedOpen.includes(g.id));
   const live = $derived(g.sessions.filter((s) => s.state !== "ended"));
@@ -59,6 +72,16 @@
     );
   }
 
+  // 머리 클릭(mac): 접고 펴면서 그 경로에 보드 탭이 있으면 터미널도 그 경로로 — 접힌 터미널은 펼치지 않고 바꿔만 둔다. 탭이 없으면 접고 펴기만.
+  // 단추(새 세션·별·X)는 HeaderButton 이 클릭을 삼키고, 안쪽 클릭 메뉴는 contextmenu 라 여기 오지 않는다
+  function headClick() {
+    toggle();
+    showWorkspace(g.id);
+  }
+
+  // 펼친 터미널이 지금 보이는 경로 — 폴더 모서리에 표지를 단다(mac TerminalHereMark)
+  const here = $derived(terminalHere(g.id));
+
   // 펼칠 때 줄마다 조금씩 늦게 위에서 내려오며 나타난다
   const rowIn = (i: number) => ({ y: -10, duration: 380, delay: Math.min(i, 8) * 35, easing: cubicOut });
 </script>
@@ -68,8 +91,8 @@
     class="head"
     role="button"
     tabindex="-1"
-    onclick={toggle}
-    onkeydown={(e) => e.key === "Enter" && toggle()}
+    onclick={headClick}
+    onkeydown={(e) => e.key === "Enter" && headClick()}
     oncontextmenu={contextMenu}
   >
     <span class="chev" class:open={!collapsed} use:hint={collapsed ? "경로 카드 펼치기" : "경로 카드 접기"}>
@@ -78,12 +101,22 @@
     <!-- 접혀 있어도 작업 중(도는 링)·승인 대기(퍼지는 파문)가 보이게 폴더 자리에 상태 표시를 그린다 -->
     <span
       class="folder"
-      use:hint={collapsed ? (lead ? `${stateName(lead.state)} · 누르면 펼치기` : "작업 경로 · 누르면 펼치기") : "작업 경로 · 누르면 접기"}
+      use:hint={(here ? "터미널에서 지금 보는 경로 · " : "") +
+        (collapsed ? (lead ? `${stateName(lead.state)} · 누르면 펼치기` : "작업 경로 · 누르면 펼치기") : "작업 경로 · 누르면 접기")}
     >
       {#if collapsed && lead}
         <StateIcon state={lead.state} />
       {:else}
         <Icon name="folder" size={17.5} />
+      {/if}
+      <!-- 상태 색과 헷갈리지 않게 흰 표지를 폴더 모서리에(카드 이름 폭을 줄이지 않는다). 속 채움은 터미널이 있는 쪽 -->
+      {#if here}
+        <span class="here" aria-hidden="true">
+          <svg width="10" height="8" viewBox="0 0 14 11">
+            <rect x="0.5" y="0.5" width="13" height="10" rx="2.2" fill="none" stroke="currentColor" stroke-width="1.4" />
+            <rect x={settings.boardSide === "left" ? 7.7 : 2.2} y="2.2" width="3.6" height="6.6" rx="0.6" fill="currentColor" />
+          </svg>
+        </span>
       {/if}
     </span>
     <div class="names">
@@ -121,6 +154,10 @@
     <!-- 접힌 채 작업 중이면 세션 줄처럼 빛이 지나간다 -->
     {#if collapsed && top === "working"}<span class="shimmer"></span>{/if}
   </div>
+
+  {#each runs as run (run.id)}
+    <AutopilotLine {run} {now} />
+  {/each}
 
   {#if !collapsed}
     <div class="body" transition:slide={{ duration: 380, easing: cubicOut }}>
@@ -271,7 +308,20 @@
     opacity: 1;
     color: inherit;
   }
+  .here {
+    position: absolute;
+    right: -6px;
+    bottom: -5px;
+    display: flex;
+    padding: 2.5px 4px;
+    border-radius: 999px;
+    color: #fff;
+    background: var(--term-bar);
+    box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.7);
+    pointer-events: none;
+  }
   .folder {
+    position: relative;
     flex: none;
     width: 30px;
     height: 30px;

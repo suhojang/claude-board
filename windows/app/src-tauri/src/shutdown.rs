@@ -192,10 +192,37 @@ pub fn decide(outcome: Outcome) -> Decision {
     }
 }
 
+/// 확인 요청의 판정 — 끄는 쪽이 무엇을 할지 가른다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    /// 계속한다(답이 계속이거나 묻지 못해 그대로 진행)
+    Go,
+    /// 사용자가 취소했거나 답 없이 시간이 지났다
+    Declined,
+    /// 새 요청이 이어받았거나 화면이 다시 시작했다 — 이 요청의 몫은 끝나고 결정은 다른 요청이 한다
+    Superseded,
+}
+
+pub fn verdict(outcome: &Outcome) -> Verdict {
+    match outcome {
+        Outcome::Cancelled => Verdict::Superseded,
+        other if decide(other.clone()).proceed => Verdict::Go,
+        _ => Verdict::Declined,
+    }
+}
+
 /// 끄기 전에 확인을 받는다. 계속해도 되면 새로 남긴 `.paused` 표지 경로들(없으면 빈 목록), 취소하거나 답 없이 끝났으면 None.
 fn confirm(app: &AppHandle, reason: Reason) -> Option<Vec<PathBuf>> {
+    match confirm_verdict(app, reason) {
+        (Verdict::Go, marks) => Some(marks),
+        _ => None,
+    }
+}
+
+/// `confirm` 과 같되 취소한 까닭(`Declined`·`Superseded`)을 가려 돌려준다.
+fn confirm_verdict(app: &AppHandle, reason: Reason) -> (Verdict, Vec<PathBuf>) {
     if !LIFECYCLE_ACTIVE.load(Ordering::SeqCst) {
-        return Some(Vec::new());
+        return (Verdict::Go, Vec::new());
     }
     let send = |reason: &str| {
         if let Err(e) = app.emit(CONFIRM_SHUTDOWN_EVENT, json!({"reason": reason, "items": []})) {
@@ -213,6 +240,7 @@ fn confirm(app: &AppHandle, reason: Reason) -> Option<Vec<PathBuf>> {
         },
         TIMEOUTS,
     );
+    let kind = verdict(&outcome);
     let decision = decide(outcome);
     if let Some(line) = decision.log {
         board_log(line);
@@ -221,13 +249,74 @@ fn confirm(app: &AppHandle, reason: Reason) -> Option<Vec<PathBuf>> {
         send("cancel");
     }
     if !decision.proceed {
-        return None;
+        return (kind, Vec::new());
     }
     let marks = match app.try_state::<Arc<Board>>() {
         Some(board) if !decision.pause.is_empty() => write_marks(&board, &decision.pause),
         _ => Vec::new(),
     };
-    Some(marks)
+    (kind, marks)
+}
+
+/// 정상 종료 요청 표지의 파일 이름 — 사용자 임시 폴더(`%TEMP%`)에 둔다. 설치·제거 스크립트가 같은 경로를 읽는다(mac `<instanceName>.quit`).
+pub const QUIT_MARK_NAME: &str = "claude-board.quit";
+
+/// 정상 종료 요청 표지의 내용. 계속하면 표지를 지우므로 `Done` 은 없다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuitMark {
+    /// 요청을 받았고 확인 창을 띄우는 중이다
+    Asking,
+    /// 확인 창에서 취소했다 — 기다리던 스크립트는 아무것도 바꾸지 않고 멈춘다
+    Cancel,
+}
+
+impl QuitMark {
+    pub fn text(self) -> &'static str {
+        match self {
+            QuitMark::Asking => "asking",
+            QuitMark::Cancel => "cancel",
+        }
+    }
+}
+
+pub fn quit_mark_path(temp_dir: &Path) -> PathBuf {
+    temp_dir.join(QUIT_MARK_NAME)
+}
+
+fn write_quit_mark(path: &Path, mark: QuitMark) {
+    if let Err(e) = fs::write(path, mark.text()) {
+        board_log(&format!("종료 요청 표지를 쓰지 못했습니다({}): {e}", path.display()));
+    }
+}
+
+/// 판정에 따라 표지를 정리하고 보드를 꺼야 하는지 돌려준다. 계속이면 표지를 지우고 true, 취소면 `cancel` 을 쓰고 false,
+/// 이어받힌 요청이면 표지를 건드리지 않고 false(이어받은 요청이 `asking` 을 쓴 뒤라 덮으면 안 된다).
+pub fn finish_quit(path: &Path, verdict: Verdict) -> bool {
+    match verdict {
+        Verdict::Go => {
+            let _ = fs::remove_file(path);
+            true
+        }
+        Verdict::Declined => {
+            write_quit_mark(path, QuitMark::Cancel);
+            false
+        }
+        Verdict::Superseded => false,
+    }
+}
+
+/// 명령줄 `--action quit -` — 설치·제거·업데이트 스크립트가 청하는 정상 종료. 표지에 `asking` 을 쓰고 업데이트와 같은 확인 창을 띄운 뒤,
+/// 계속이면 `.paused` 를 남기고 표지를 지운 다음 끝내고, 취소면 표지에 `cancel` 을 쓴다. 메인 스레드를 막지 않게 따로 돈다.
+pub fn request_quit(app: &AppHandle) {
+    let mark = quit_mark_path(&std::env::temp_dir());
+    write_quit_mark(&mark, QuitMark::Asking);
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let (verdict, _) = confirm_verdict(&app, Reason::Update);
+        if finish_quit(&mark, verdict) {
+            app.exit(0);
+        }
+    });
 }
 
 /// 트레이 "종료". 도는 세션이 있으면 확인을 받은 뒤 끝낸다. 메인 스레드를 막지 않게 따로 돈다.
@@ -596,6 +685,60 @@ mod tests {
         assert!(dirs_among(&[], Path::is_dir).is_empty());
         let me = std::env::temp_dir().to_string_lossy().into_owned();
         assert_eq!(dirs_among(&[me.clone(), format!("{me}\\cb-nope-{}", crate::util::short_id())], Path::is_dir), [me]);
+    }
+
+    #[test]
+    fn 판정_계속은_진행_취소와_답_없음은_거절_이어받힘은_양보() {
+        assert_eq!(verdict(&Outcome::Answered(answer(true, &["a"]))), Verdict::Go);
+        assert_eq!(verdict(&Outcome::TimedOut), Verdict::Go, "프론트가 없으면 그대로 진행한다");
+        assert_eq!(verdict(&Outcome::Answered(answer(false, &[]))), Verdict::Declined);
+        assert_eq!(verdict(&Outcome::AnswerTimedOut), Verdict::Declined);
+        assert_eq!(verdict(&Outcome::Cancelled), Verdict::Superseded);
+    }
+
+    fn quit_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("cb-quit-{tag}-{}", crate::util::short_id()));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn 종료_표지는_임시_폴더의_약속된_이름이고_글자는_스크립트와_같다() {
+        assert_eq!(quit_mark_path(Path::new("C:\\t")), Path::new("C:\\t").join("claude-board.quit"));
+        assert_eq!(QuitMark::Asking.text(), "asking");
+        assert_eq!(QuitMark::Cancel.text(), "cancel");
+    }
+
+    #[test]
+    fn 종료_계속이면_표지를_지우고_끈다() {
+        let dir = quit_dir("go");
+        let path = quit_mark_path(&dir);
+        write_quit_mark(&path, QuitMark::Asking);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "asking");
+        assert!(finish_quit(&path, Verdict::Go), "계속이면 보드를 끈다");
+        assert!(!path.exists(), "스크립트가 asking 에서 멈추지 않게 표지를 지운다");
+        assert!(finish_quit(&path, Verdict::Go), "표지가 이미 없어도 끈다");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn 종료_취소하면_cancel_을_쓰고_끄지_않는다() {
+        let dir = quit_dir("cancel");
+        let path = quit_mark_path(&dir);
+        write_quit_mark(&path, QuitMark::Asking);
+        assert!(!finish_quit(&path, Verdict::Declined));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "cancel");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn 종료_이어받힌_요청은_이어받은_요청의_표지를_덮지_않는다() {
+        let dir = quit_dir("superseded");
+        let path = quit_mark_path(&dir);
+        write_quit_mark(&path, QuitMark::Asking);
+        assert!(!finish_quit(&path, Verdict::Superseded));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "asking");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

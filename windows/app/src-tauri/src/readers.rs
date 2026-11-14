@@ -1,4 +1,5 @@
-//! 대화 기록에서 모델·effort(SPEC §5.2)와 컨텍스트 사용량(§5.3), Esc 중단 표시(§3.9)와 Claude Code 세션 파일(§2.3)을 읽는다 — `ClaudeBoard.swift ModelReader`·`InterruptReader`·`ClaudeNames`·`ContextReader`.
+//! 대화 기록에서 모델·effort(SPEC §5.2)와 컨텍스트 사용량(§5.3), Esc 중단 표시(§3.9)와 Claude Code 세션 파일(§2.3),
+//! 대화 넘기기 표지(§5.12.15)를 읽는다 — `ClaudeBoard.swift ModelReader`·`InterruptReader`·`ClaudeNames`·`ContextReader`·`HandoffReader`.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -6,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use claude_board_core::claude_live::{self, ClaudeSession, INTERRUPT_TAIL};
+use claude_board_core::handoff::{handed_off_to_in, HandedOff, HANDOFF_TAIL};
 use claude_board_core::{fileio, Record};
 use serde_json::Value;
 
@@ -93,6 +95,42 @@ impl InterruptReader {
 
     /// 목록에서 사라진 기록은 잊는다.
     pub fn prune(&mut self, keep: &std::collections::HashSet<PathBuf>) {
+        self.parsed.retain(|k, _| keep.contains(k));
+    }
+
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.parsed.len()
+    }
+}
+
+/// 대화를 백그라운드로 넘긴 세션 표지 — 대화 기록 끝의 `continued-in` 줄을 읽는다(`HandoffReader`,
+/// `ClaudeBoard.swift HandoffReader`, SPEC §5.12.15). 읽는 꼬리 길이와 규칙은 `handoff::handed_off_to_in` 이 정한다.
+/// 파일 수정 시각과 크기가 같으면 이전 결과를 쓴다 — Windows 는 수정 시각이 타이머 틱 단위라
+/// 덧붙인 줄을 놓치지 않게 크기를 함께 본다(macOS 는 수정 시각만 본다).
+#[derive(Default)]
+pub struct HandoffReader {
+    parsed: HashMap<PathBuf, ((SystemTime, u64), Option<HandedOff>)>,
+}
+
+impl HandoffReader {
+    /// 파일이 없으면 None(캐시하지 않는다).
+    pub fn read(&mut self, path: &Path) -> Option<HandedOff> {
+        let changed = stamp(path)?;
+        if let Some((m, to)) = self.parsed.get(path) {
+            if *m == changed {
+                return to.clone();
+            }
+        }
+        // 넘김 줄에 timestamp 가 없을 때 쓸 파일 수정 시각(유닉스 초)
+        let secs = changed.0.duration_since(UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64());
+        let to = handed_off_to_in(&read_tail(path, HANDOFF_TAIL), secs);
+        self.parsed.insert(path.to_path_buf(), (changed, to.clone()));
+        to
+    }
+
+    /// 목록에 남은 기록의 캐시만 남긴다 — 끝난 세션(대화 기록이 있는) 몫도 남는다.
+    pub fn prune(&mut self, keep: &HashSet<PathBuf>) {
         self.parsed.retain(|k, _| keep.contains(k));
     }
 

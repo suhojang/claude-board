@@ -3,12 +3,28 @@
 //! 다른 OS 에서는 아무것도 하지 않는다(금고만 평문 그대로 — 개발용).
 
 /// 계정 금고에 넣을 바이트를 암호화한다(Windows: DPAPI 현재 사용자, 그 밖: 그대로).
+///
+/// 구현은 core 의 `dpapi` 가 갖는다. 이 얇은 겹은 실패를 `None` 으로 접고, Windows 밖에서는 평문 그대로 돌려준다.
 pub fn protect(plain: &[u8]) -> Option<Vec<u8>> {
-    sys::protect(plain)
+    #[cfg(windows)]
+    {
+        claude_board_core::dpapi::protect(plain).ok()
+    }
+    #[cfg(not(windows))]
+    {
+        Some(plain.to_vec())
+    }
 }
 
 pub fn unprotect(sealed: &[u8]) -> Option<Vec<u8>> {
-    sys::unprotect(sealed)
+    #[cfg(windows)]
+    {
+        claude_board_core::dpapi::unprotect(sealed).ok()
+    }
+    #[cfg(not(windows))]
+    {
+        Some(sealed.to_vec())
+    }
 }
 
 /// 시스템 더블 클릭 시간(ms) — 다른 터미널 줄의 한 번 클릭을 이만큼 미룬다. 읽지 못하면 500.
@@ -24,13 +40,10 @@ pub use sys::{show_no_activate, style_notify_panel};
 
 #[cfg(windows)]
 mod sys {
-    use std::ptr::{null, null_mut};
+    use std::ptr::null_mut;
 
-    use windows_sys::Win32::Foundation::{LocalFree, HWND, LPARAM, TRUE};
+    use windows_sys::Win32::Foundation::{HWND, LPARAM, TRUE};
     use windows_sys::Win32::Media::Audio::{PlaySoundW, SND_ALIAS, SND_ASYNC, SND_NODEFAULT};
-    use windows_sys::Win32::Security::Cryptography::{
-        CryptProtectData, CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
-    };
     use windows_sys::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         EnumWindows, GetForegroundWindow, GetWindow, GetWindowLongPtrW, GetWindowThreadProcessId, IsIconic,
@@ -41,37 +54,6 @@ mod sys {
 
     fn wide(s: &str) -> Vec<u16> {
         s.encode_utf16().chain(std::iter::once(0)).collect()
-    }
-
-    fn blob(data: &[u8]) -> CRYPT_INTEGER_BLOB {
-        CRYPT_INTEGER_BLOB { cbData: data.len() as u32, pbData: data.as_ptr() as *mut u8 }
-    }
-
-    /// DPAPI 결과를 복사하고 LocalFree 로 놓는다(빈 결과는 포인터가 null 일 수 있다).
-    unsafe fn take(out: CRYPT_INTEGER_BLOB) -> Vec<u8> {
-        if out.pbData.is_null() {
-            return Vec::new();
-        }
-        // SAFETY: DPAPI 가 채운 버퍼와 길이
-        let v = unsafe { std::slice::from_raw_parts(out.pbData, out.cbData as usize) }.to_vec();
-        unsafe { LocalFree(out.pbData.cast()) };
-        v
-    }
-
-    pub fn protect(plain: &[u8]) -> Option<Vec<u8>> {
-        let input = blob(plain);
-        let mut out = CRYPT_INTEGER_BLOB { cbData: 0, pbData: null_mut() };
-        // SAFETY: 입력 버퍼는 이 함수 동안 살아 있고, 출력은 take 가 놓는다
-        let ok = unsafe { CryptProtectData(&input, null(), null(), null(), null(), CRYPTPROTECT_UI_FORBIDDEN, &mut out) } != 0;
-        ok.then(|| unsafe { take(out) })
-    }
-
-    pub fn unprotect(sealed: &[u8]) -> Option<Vec<u8>> {
-        let input = blob(sealed);
-        let mut out = CRYPT_INTEGER_BLOB { cbData: 0, pbData: null_mut() };
-        // SAFETY: 위와 같다
-        let ok = unsafe { CryptUnprotectData(&input, null_mut(), null(), null(), null(), CRYPTPROTECT_UI_FORBIDDEN, &mut out) } != 0;
-        ok.then(|| unsafe { take(out) })
     }
 
     /// 창을 앞으로 — 최소화면 복원하고, 포그라운드 잠금에 막히면 포그라운드 스레드에 입력을 붙여 다시 시도한다.
@@ -209,12 +191,6 @@ mod sys {
 
 #[cfg(not(windows))]
 mod sys {
-    pub fn protect(plain: &[u8]) -> Option<Vec<u8>> {
-        Some(plain.to_vec())
-    }
-    pub fn unprotect(sealed: &[u8]) -> Option<Vec<u8>> {
-        Some(sealed.to_vec())
-    }
     pub fn bring_to_front(_hwnd: isize) {}
     pub fn play_sound(_kind: &str) {}
     pub fn double_click_time() -> u32 {

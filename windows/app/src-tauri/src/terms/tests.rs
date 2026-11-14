@@ -37,7 +37,7 @@ fn term_info_serializes_with_camel_case_keys() {
 #[cfg(not(windows))]
 #[test]
 fn spawn_is_unsupported_off_windows() {
-    let err = TermHub::default().spawn(SpawnSpec { cwd: None, cols: 80, rows: 24 }).unwrap_err();
+    let err = TermHub::default().spawn(SpawnSpec { cols: 80, rows: 24, ..Default::default() }).unwrap_err();
     assert!(!err.is_empty());
 }
 

@@ -1,0 +1,59 @@
+{
+  "active_sec" : 612.4,
+  "caps" : {
+    "minutes" : 60,
+    "usd" : 20,
+    "weekly_pp" : 2
+  },
+  "checks" : [
+    {
+      "at" : 1761011500,
+      "evidence" : "evidence/check-1",
+      "exit" : 1,
+      "sec" : 4.2,
+      "tail" : "1 failing",
+      "try" : 0
+    }
+  ],
+  "claude_runs" : 1,
+  "cost_done" : 0,
+  "cost_usd" : 0.742,
+  "denials" : [
+
+  ],
+  "directions" : [
+
+  ],
+  "errors" : 0,
+  "first_message" : "단위 1: 할 일 목록 화면 만들기",
+  "id" : "u1",
+  "limits" : 0,
+  "next_message" : "판정이 실패했습니다. 고쳐 주세요.",
+  "phase" : "model",
+  "procs" : {
+    "claude_pid" : 48250,
+    "groups" : [
+      {
+        "cmd" : "npm test --silent",
+        "pgid" : 48301
+      }
+    ]
+  },
+  "reason" : "",
+  "session_id" : "5b0a1c7e-0a67-4f0e-9f5c-5d3f2b6a8e11",
+  "session_started" : true,
+  "sessions" : [
+    "5b0a1c7e-0a67-4f0e-9f5c-5d3f2b6a8e11"
+  ],
+  "started" : 1761010010.5,
+  "status" : "running",
+  "title" : "할 일 목록 화면 만들기",
+  "try" : 1,
+  "turns" : 14,
+  "unit" : 1,
+  "updated" : 1761012300.25,
+  "weekly_base" : null,
+  "weekly_last" : 0.31,
+  "weekly_pp" : 0.4,
+  "weekly_pp_done" : 0
+}

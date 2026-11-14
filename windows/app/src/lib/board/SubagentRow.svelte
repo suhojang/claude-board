@@ -7,11 +7,13 @@
   import KindLabel from "./KindLabel.svelte";
   import ModelLabel from "./ModelLabel.svelte";
   import StateIcon from "./StateIcon.svelte";
-  import { elapsed, subState } from "./format";
+  import { elapsed, stateRgb, subState } from "./format";
   import { hint } from "./hint.svelte";
+  import { subIconKind } from "./subIcon";
 
   let { sub, now, last }: { sub: Sub; now: number; last: boolean } = $props();
   const done = $derived(sub.state === "done");
+  const icon = $derived(subIconKind(subState(sub)));
 </script>
 
 <div
@@ -21,7 +23,14 @@
 >
   <span class="branch" class:last></span>
   <!-- SwiftUI scaleEffect 는 칸 크기를 그대로 두고 그림만 줄인다 — 18 칸 안에서 0.8 배 -->
-  <span class="ico"><StateIcon state={subState(sub)} scale={0.8} /></span>
+  <!-- 도는 서브에이전트는 회전 대신 멈춘 아이콘(mac 3.2.1) — 줄마다 도는 표시를 두지 않는다 -->
+  <span class="ico">
+    {#if icon === "still"}
+      <span class="still" style:--c={stateRgb("working")}><Icon name="ellipsis-circle" size={15} /></span>
+    {:else}
+      <StateIcon state={icon} scale={0.8} />
+    {/if}
+  </span>
   <div class="col">
     <div class="desc">{sub.desc || sub.type}</div>
     <Fit count={3} class="meta">
@@ -93,6 +102,12 @@
     place-items: center;
     width: 18px;
     height: 18px;
+  }
+  .still {
+    display: grid;
+    place-items: center;
+    color: rgb(var(--c));
+    transform: scale(0.8);
   }
   .col {
     flex: 1;

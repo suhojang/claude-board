@@ -1,12 +1,16 @@
 <script lang="ts">
   // 탭 줄(ClaudeBoard.swift TerminalTabBar) — 높이 40, 지금 경로의 탭만. 탭은 120~250 폭으로 나눠 갖고, 120 씩도 안 들어가면 가로로 민다.
-  // + 단추는 밀리는 칸 밖이라 늘 보이고 그 오른쪽은 비어 있다
+  // + 단추는 밀리는 칸 밖이라 늘 보이고 그 오른쪽은 비어 있다. + 오른쪽 ▾ 단추(와 + 오른쪽 클릭)는 이 탭만 쓸 셸을 골라 맨 셸 탭을 연다
   import { tick } from "svelte";
   import Icon from "$lib/board/Icon.svelte";
+  import { listEnvs } from "$lib/backend";
   import { hint } from "$lib/board/hint.svelte";
+  import { openMenu, type MenuItem } from "$lib/board/menu.svelte";
+  import { board } from "$lib/board/store.svelte";
   import { keyLabel } from "$lib/shortcuts/store.svelte";
   import TerminalTabButton from "./TerminalTabButton.svelte";
-  import { TerminalHub, newSessionSheet, tabsIn } from "./hub.svelte";
+  import { TerminalHub, newSessionSheet, openShell, tabsIn } from "./hub.svelte";
+  import { shellChoices } from "./shellRules";
   import { badgeNumber } from "./tabLogic";
   import { scrollTargetFor, tabStripLeast, tabStripWidth } from "./paneLayout";
   import { wheelStep } from "./stripScroll";
@@ -22,6 +26,32 @@
   const least = $derived(tabStripLeast(count));
   // 새 세션 키 안내 — 설정 > 단축키에서 바꾼 키를 따른다(비웠으면 안 보인다)
   const newKey = $derived(keyLabel("newSession"));
+
+  // 셸 고르기 메뉴 — 목록은 열 때 읽는다(WSL 배포판이 늦게 채워질 수 있다). 고르면 지금 경로에 그 셸의 맨 셸 탭을 연다.
+  // 설정의 기본 셸에는 체크를 단다. 목록을 못 읽어도 "자동(기본)" 은 보인다
+  async function showShellMenu(at: MouseEvent | { x: number; y: number }) {
+    const envs = await listEnvs().catch(() => []);
+    const saved = board.snap?.settings.terminalShell ?? null;
+    const items: MenuItem[] = [{ label: "셸 탭 열기 — 이 탭만 고른 셸로 엽니다", header: true }];
+    for (const choice of shellChoices(envs)) {
+      items.push({
+        label: choice.label,
+        checked: choice.key === saved,
+        action: () => openShell(TerminalHub.workspace || null, { shell: choice.key ?? undefined }),
+      });
+    }
+    openMenu(items, at);
+  }
+
+  function showShellMenuBelow(e: MouseEvent) {
+    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    void showShellMenu({ x: r.left, y: r.bottom + 4 });
+  }
+
+  function newContextMenu(e: MouseEvent) {
+    e.preventDefault();
+    void showShellMenu(e);
+  }
 
   // 고른 탭이 칸 밖이면 보이게 민다(가장 가까운 만큼만)
   function scrollToSelected(animated: boolean) {
@@ -65,13 +95,18 @@
       {/each}
     </div>
   </div>
-  <button class="new" bind:offsetWidth={newWidth} onclick={newSessionSheet} use:hint={"새 세션"}>
-    <span class="box">
-      <svg class="dash" aria-hidden="true"><rect x="0.5" y="0.5" rx="7.5" ry="7.5" /></svg>
-      <Icon name="plus" size={10} />
-      {#if newKey}<span class="key">{newKey}</span>{/if}
-    </span>
-  </button>
+  <div class="newGroup" bind:offsetWidth={newWidth}>
+    <button class="new" onclick={newSessionSheet} oncontextmenu={newContextMenu} use:hint={"새 세션"}>
+      <span class="box">
+        <svg class="dash" aria-hidden="true"><rect x="0.5" y="0.5" rx="7.5" ry="7.5" /></svg>
+        <Icon name="plus" size={10} />
+        {#if newKey}<span class="key">{newKey}</span>{/if}
+      </span>
+    </button>
+    <button class="shells" onclick={showShellMenuBelow} aria-label="셸 고르기" use:hint={"셸을 골라 맨 셸 탭 열기"} data-testid="tab-shell-menu">
+      <Icon name="chevron-down" size={9} />
+    </button>
+  </div>
 </div>
 
 <style>
@@ -111,10 +146,32 @@
     display: flex;
     gap: 2px;
   }
+  .newGroup {
+    flex: none;
+    display: flex;
+    align-items: center;
+    margin-left: 6px;
+  }
   .new {
     flex: none;
-    margin-left: 6px;
     height: 26px;
+  }
+  .shells {
+    flex: none;
+    width: 20px;
+    height: 26px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 8px;
+    color: rgb(255 255 255 / 0.6);
+    transition:
+      background 0.15s,
+      color 0.15s;
+  }
+  .shells:hover {
+    color: #fff;
+    background: rgb(255 255 255 / 0.08);
   }
   .box {
     position: relative;

@@ -5,6 +5,7 @@
 //! - `setup --app <ClaudeBoard.exe>` / `uninstall` / `install-hooks` / `uninstall-hooks`: 설치 도구. 짧은 진행 문구를 쓰고 실패하면 0 이 아닌 코드.
 //! - `tui`: 터미널판 보드.
 
+mod board_running;
 mod setup;
 mod spawn;
 mod tui;
@@ -94,7 +95,8 @@ fn notify_panel(kind: &str, input: &[u8], notifier: &Path, cwd: &str) -> Option<
 fn run_notify(kind: &str) {
     let input = read_stdin();
     let cwd = std::env::current_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
-    if let Some(panel) = notify_panel(kind, &input, &paths::notifier_dir(), &cwd) {
+    // 보드가 떠 있을 때만 패널을 띄운다 — 검사는 board_running 모듈의 것이고(CI 연기 환경변수도 그쪽), 시험은 가짜로 바꾼다
+    if let Some(panel) = board_running::panel_to_spawn(notify_panel(kind, &input, &paths::notifier_dir(), &cwd), board_running::board_running) {
         spawn::detached(&panel.app, &panel.args);
     }
 }

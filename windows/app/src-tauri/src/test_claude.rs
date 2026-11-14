@@ -9,51 +9,13 @@
 //! 닫힌 채로 실패한다 — 꺼짐(Off) / 켜짐(On) / 어긋남(Rejected) 셋으로 가른다. 어긋남이면 진짜 claude 를 찾지도 띄우지도 않는다.
 
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::util::board_log;
 
-pub const CLAUDE_ENV: &str = "CLAUDE_BOARD_CLAUDE";
+// 판정 규칙은 core 가 소유한다 — 자율주행 start 가 같은 규칙을 쓴다
+pub use claude_board_core::test_claude::{decide, Decision, CLAUDE_ENV};
 pub const HOME_ENV: &str = claude_board_core::paths::HOME_ENV;
-
-/// `prefix` 의 판정 — 꺼짐 / 켜짐 / 켜려 했으나 어긋남(이유)
-#[derive(Debug, PartialEq, Eq)]
-pub enum Decision {
-    Off,
-    On(Vec<PathBuf>),
-    Rejected(String),
-}
-
-fn non_empty(env: &dyn Fn(&str) -> Option<OsString>, key: &str) -> Option<OsString> {
-    env(key).filter(|v| !v.is_empty())
-}
-
-/// 환경(`env`)과 파일 확인(`exists`)만으로 정하는 순수 판정 — 시험은 가짜 환경으로 이것을 부른다.
-pub fn decide(env: &dyn Fn(&str) -> Option<OsString>, exists: &dyn Fn(&Path) -> bool) -> Decision {
-    let Some(raw) = non_empty(env, CLAUDE_ENV) else { return Decision::Off };
-    if non_empty(env, HOME_ENV).is_none() {
-        return Decision::Rejected(format!("{CLAUDE_ENV} 는 {HOME_ENV} 도 있을 때만 쓴다. 무시한다"));
-    }
-    let Some(raw) = raw.to_str() else { return Decision::Rejected(format!("{CLAUDE_ENV} 가 유니코드가 아니다. 무시한다")) };
-    let mut parts = Vec::new();
-    for piece in raw.split('|') {
-        if piece.is_empty() {
-            return Decision::Rejected(format!("{CLAUDE_ENV} 에 빈 조각이 있다. 무시한다"));
-        }
-        if piece.contains('"') {
-            return Decision::Rejected(format!("{CLAUDE_ENV} 조각에 큰따옴표가 있다({piece}). 무시한다"));
-        }
-        let path = PathBuf::from(piece);
-        if !path.is_absolute() {
-            return Decision::Rejected(format!("{CLAUDE_ENV} 조각이 절대 경로가 아니다({piece}). 무시한다"));
-        }
-        if !exists(&path) {
-            return Decision::Rejected(format!("{CLAUDE_ENV} 조각이 없는 파일이다({piece}). 무시한다"));
-        }
-        parts.push(path);
-    }
-    Decision::On(parts)
-}
 
 /// 주어진 환경에서의 판정 — 어긋나면 board.log 한 줄을 남긴다.
 pub fn decision(env: &dyn Fn(&str) -> Option<OsString>) -> Decision {
@@ -128,6 +90,7 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use std::fs;
+    use std::path::Path;
 
     fn env_of(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<OsString> {
         let map: HashMap<String, OsString> = pairs.iter().map(|(k, v)| (k.to_string(), OsString::from(v))).collect();
@@ -157,13 +120,6 @@ mod tests {
     }
 
     #[test]
-    fn unset_is_off() {
-        assert_eq!(decide(&env_of(&[]), &always), Decision::Off);
-        assert_eq!(decide(&env_of(&[(HOME_ENV, "C:\\h")]), &always), Decision::Off);
-        assert_eq!(decide(&env_of(&[(CLAUDE_ENV, ""), (HOME_ENV, "C:\\h")]), &always), Decision::Off);
-    }
-
-    #[test]
     fn inactive_unless_both_vars_are_set() {
         let (_dir, exe, _) = fixture();
         let claude = exe.to_str().unwrap();
@@ -172,41 +128,6 @@ mod tests {
         let empty_home = decide(&env_of(&[(CLAUDE_ENV, claude), (HOME_ENV, "")]), &always);
         assert!(rejected(&empty_home).contains(HOME_ENV));
         assert_eq!(prefix(&env_of(&[(CLAUDE_ENV, claude)])), None);
-    }
-
-    #[test]
-    fn relative_part_is_rejected() {
-        let (_dir, exe, _) = fixture();
-        let abs = exe.to_str().unwrap();
-        for bad in ["claude.exe", "fake\\claude.exe", ".\\claude.exe", "..\\claude.exe", "\\claude.exe", "C:claude.exe"] {
-            let d = decide(&env_of(&[(CLAUDE_ENV, bad), (HOME_ENV, "C:\\h")]), &always);
-            assert!(rejected(&d).contains("절대 경로"), "{bad}: {d:?}");
-            // 앞쪽 인자 자리의 상대 경로도 거절 — 하나라도 어긋나면 통째로 꺼진다
-            let joined = format!("{abs}|{bad}");
-            let d = decide(&env_of(&[(CLAUDE_ENV, joined.as_str()), (HOME_ENV, "C:\\h")]), &always);
-            assert!(rejected(&d).contains("절대 경로"), "{joined}: {d:?}");
-        }
-    }
-
-    #[test]
-    fn missing_file_and_empty_piece_and_quote_are_rejected() {
-        let (_dir, exe, _) = fixture();
-        let abs = exe.to_str().unwrap();
-        let ghost = exe.with_file_name("no-such-file.exe");
-        let ghost = ghost.to_str().unwrap();
-        let home = (HOME_ENV, "C:\\h");
-        let missing = decide(&env_of(&[(CLAUDE_ENV, ghost), home]), &|p| p.exists());
-        assert!(rejected(&missing).contains("없는 파일"));
-        let second_missing = format!("{abs}|{ghost}");
-        let missing = decide(&env_of(&[(CLAUDE_ENV, second_missing.as_str()), home]), &|p| p.exists());
-        assert!(rejected(&missing).contains("없는 파일"));
-        for bad in [format!("{abs}|"), format!("|{abs}"), format!("{abs}||{abs}")] {
-            let d = decide(&env_of(&[(CLAUDE_ENV, bad.as_str()), home]), &always);
-            assert!(rejected(&d).contains("빈 조각"), "{bad}: {d:?}");
-        }
-        let quoted = format!("\"{abs}\"");
-        let d = decide(&env_of(&[(CLAUDE_ENV, quoted.as_str()), home]), &always);
-        assert!(rejected(&d).contains("큰따옴표"));
     }
 
     #[test]

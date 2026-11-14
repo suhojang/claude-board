@@ -1,6 +1,6 @@
 <script lang="ts">
   // 세션 한 줄(ClaudeBoard.swift SessionRow): 서브에이전트 접기 화살표·상태 아이콘·제목·알림 스위치·… 메뉴(종료면 ⓧ),
-  // 둘째 줄에 경과 시간·하위 작업·셸·세션 이름·모델·컨텍스트(좁으면 3단계로 줄이고 세션 이름은 앞 두 단계에만 보임), 승인 대기면 ✋ 요청 내용
+  // 둘째 줄에 경과 시간·하위 작업·셸·세션 이름·모델·컨텍스트(좁으면 5단계로 줄이고 세션 이름은 앞 두 단계에만 보이며 가장 좁으면 다음 줄로 넘김 — sessionMeta.ts), 승인 대기면 ✋ 요청 내용
   import { cubicOut } from "svelte/easing";
   import { fly, fade } from "svelte/transition";
   import type { Session } from "$lib/types";
@@ -21,6 +21,7 @@
   import { hint } from "./hint.svelte";
   import { openMenu, type MenuItem } from "./menu.svelte";
   import { sessionMenuEntries } from "./sessionActions";
+  import { META_STAGES, metaStage } from "./sessionMeta";
 
   let { s, now, locked, subCollapsed }: { s: Session; now: number; locked: boolean; subCollapsed: boolean } = $props();
 
@@ -49,6 +50,8 @@
         : {
             label: entry.label,
             enabled: entry.enabled,
+            title: entry.detail,
+            destructive: entry.action === "stop",
             // 보드로 옮기기만 프론트가 흐름을 짠다(확인 → 키 → 끝나기 대기 → 이어 열기). 나머지는 백엔드 동작 이름 그대로
             action: () => (entry.action === "moveToBoard" ? void moveSessionToBoard(s) : sessionAction(entry.action, s.id, entry.carryOn)),
           },
@@ -101,10 +104,13 @@
           </button>
         {/if}
       </div>
-      <!-- 다 들어가면 글자까지, 좁으면 하위 작업은 아이콘 + 개수만, 더 좁으면 컨텍스트 막대·토큰을 뺀다 -->
-      <Fit count={3} class="meta">
-        {#snippet content(level)}
-          <span class="items">
+      <!-- 다 들어가면 글자까지, 좁으면 하위 작업은 아이콘 + 개수만, 그래도 좁으면 세션 이름을 빼고, 더 좁으면 컨텍스트 막대·토큰을 뺀다.
+           그래도 안 들어가면(보드 최소 폭) 라벨을 다음 줄로 넘긴다(sessionMeta.ts 의 마지막 단계) -->
+      <Fit count={META_STAGES.length} class="meta">
+        {#snippet content(stage)}
+          {@const m = metaStage(stage)}
+          {@const level = m.level}
+          <span class="items" class:wrap={m.wrap}>
             <span class="num el">{ended ? `${clock(s.updated)} 종료` : s.state === "idle" ? `${elapsed(s.since, now)} 전` : elapsed(s.since, now)}</span>
             <PlaceChip place={where} headless={s.headless} appName={s.appName} mode={s.state === "ended" ? null : s.mode} />
             {#if s.subagents.length || s.shells > 0 || s.ctx || s.brain}<span>·</span>{/if}
@@ -126,7 +132,7 @@
                 <Icon name="shells" size={11} />{level > 0 ? `${s.shells}` : `셸 ${s.shells}개 실행 중`}
               </span>
             {/if}
-            {#if s.name && !ended && level < 2}<NameLabel name={s.name} />{/if}
+            {#if s.name && !ended && m.name}<NameLabel name={s.name} />{/if}
             {#if s.brain}<ModelLabel brain={s.brain} {level} />{/if}
             {#if s.ctx}<ContextLabel ctx={s.ctx} {level} />{/if}
           </span>
@@ -265,6 +271,14 @@
     align-items: center;
     gap: 5px;
     white-space: nowrap;
+  }
+  /* 마지막 단계: 칸 폭을 넘는 라벨부터 다음 줄로(mac WrapRow — 가로 간격 5, 줄 간격 3, 줄 안은 세로 가운데) */
+  .items.wrap {
+    display: flex;
+    flex: 1 1 0;
+    min-width: 0;
+    flex-wrap: wrap;
+    gap: 3px 5px;
   }
   .el {
     margin-right: 2px;

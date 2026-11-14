@@ -209,3 +209,76 @@ test("메뉴를 두 번 만들어도 한쪽을 고쳐 다른 쪽이 변하지 �
   assert.equal(b[2].label, "세션 중단");
   assert.equal(sessionMenuEntries(sessionOf("idle"), TAB)[2].label, "세션 중단");
 });
+
+// ── 표 시험: 상태 x 자리 x canDrive 전부를 mac SessionMenuPanel.items(for:place:) 규칙에서 옮긴 기대 문자열과 맞춘다 ──
+// 모양: "라벨[켜짐|꺼짐]" 을 위에서부터, 구분선은 "---". mac 규칙 — 끝남: 이어 열기 하나 / 일시중지: 재개·구분선·중단 /
+// 그 밖: 일시중지(isPausable && canDriveSession)·(자리=terminal && canDrive 면)보드로 옮기기·구분선·중단 / 살아 있는 background: 메뉴 없음
+const PLACES = { tab: TAB, terminal: TERMINAL, background: BACKGROUND, ended: ENDED };
+const render = (entries: SessionMenuEntry[]) => entries.map((e) => ("separator" in e ? "---" : `${e.label}[${e.enabled === false ? "꺼짐" : "켜짐"}]`));
+
+const PAUSE_ON = "일시중지[켜짐]";
+const PAUSE_OFF = "일시중지[꺼짐]";
+const MOVE = "보드로 옮기기[켜짐]";
+const STOP = "세션 중단[켜짐]";
+const RESUME = "세션 재개[켜짐]";
+
+// [상태, 자리, canDrive] → 기대
+const MENU_TABLE: Array<[string, keyof typeof PLACES, boolean, string[]]> = [];
+for (const state of ["working", "waiting"]) {
+  MENU_TABLE.push(
+    [state, "tab", true, [PAUSE_ON, "---", STOP]],
+    [state, "tab", false, [PAUSE_OFF, "---", STOP]],
+    [state, "terminal", true, [PAUSE_ON, MOVE, "---", STOP]],
+    [state, "terminal", false, [PAUSE_OFF, "---", STOP]],
+    [state, "background", true, []],
+    [state, "background", false, []],
+    [state, "ended", true, [PAUSE_ON, "---", STOP]],
+    [state, "ended", false, [PAUSE_OFF, "---", STOP]],
+  );
+}
+MENU_TABLE.push(
+  ["idle", "tab", true, [PAUSE_OFF, "---", STOP]],
+  ["idle", "tab", false, [PAUSE_OFF, "---", STOP]],
+  ["idle", "terminal", true, [PAUSE_OFF, MOVE, "---", STOP]],
+  ["idle", "terminal", false, [PAUSE_OFF, "---", STOP]],
+  ["idle", "background", true, []],
+  ["idle", "background", false, []],
+  ["idle", "ended", true, [PAUSE_OFF, "---", STOP]],
+  ["idle", "ended", false, [PAUSE_OFF, "---", STOP]],
+);
+for (const place of ["tab", "terminal", "ended"] as const) {
+  for (const canDrive of [true, false]) MENU_TABLE.push(["paused", place, canDrive, [RESUME, "---", STOP]]);
+}
+for (const canDrive of [true, false]) MENU_TABLE.push(["paused", "background", canDrive, []]);
+for (const place of Object.keys(PLACES) as Array<keyof typeof PLACES>) {
+  for (const canDrive of [true, false]) MENU_TABLE.push(["ended", place, canDrive, ["세션 다시 열기[켜짐]"]]);
+}
+
+test("표: 상태 x 자리 x canDrive 마다 항목·순서·구분선·켜짐 여부가 mac 규칙과 같다", () => {
+  assert.equal(MENU_TABLE.length, 5 * 4 * 2);
+  for (const [state, place, canDrive, expected] of MENU_TABLE) {
+    assert.deepEqual(render(sessionMenuEntries(sessionOf(state, { canDrive }), PLACES[place])), expected, `${state}/${place}/canDrive=${canDrive}`);
+  }
+});
+
+test("표: 끝난 세션의 paused·headless 조합 네 가지는 라벨·설명만 다르고 항목은 하나다", () => {
+  const table: Array<[boolean, boolean, string]> = [
+    [false, false, "세션 다시 열기"],
+    [false, true, "세션 다시 열기"],
+    [true, false, "세션 재개 (이어서 진행)"],
+    [true, true, "세션 재개 (이어서 진행)"],
+  ];
+  for (const [paused, headless, label] of table) {
+    const entries = sessionMenuEntries(sessionOf("ended", { paused, headless }), ENDED);
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0].label, label);
+  }
+});
+
+test("표: 켜진 항목은 enabled 를 비우거나 true, 일시중지만 false 를 쓴다(보드로 옮기기·중단·재개는 항상 켜짐)", () => {
+  for (const [state, place, canDrive] of MENU_TABLE) {
+    for (const entry of actionsOf(sessionMenuEntries(sessionOf(state, { canDrive }), PLACES[place]))) {
+      if (entry.action !== "pause") assert.notEqual(entry.enabled, false, `${state}/${place}/${entry.action}`);
+    }
+  }
+});

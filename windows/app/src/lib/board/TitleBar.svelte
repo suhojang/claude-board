@@ -11,6 +11,7 @@
   import Icon from "./Icon.svelte";
   import { stateName, stateRgb } from "./format";
   import { hint } from "./hint.svelte";
+  import { snapHint, snapIconName } from "./windowMenu";
   import { keyLabel } from "$lib/shortcuts/store.svelte";
 
   let { mini, counts, rows, expanded, side }: { mini: boolean; counts: Record<State, number>; rows: number; expanded: boolean; side: BoardSide } = $props();
@@ -21,8 +22,8 @@
 </script>
 
 <div class="bar" data-tauri-drag-region>
-  <button class="snap" onclick={snapRight} use:hint={`처음 크기로 되돌려 화면 오른쪽에 붙이기${snapKey ? ` (${snapKey})` : ""}`}>
-    <span class="cap"><Icon name="snap-right" size={11} /></span>
+  <button class="snap" onclick={snapRight} use:hint={snapHint(side, snapKey)}>
+    <span class="cap"><Icon name={snapIconName(side)} size={11} /></span>
   </button>
   {#if !expanded && !mini}
     <TerminalToggleButton expanded={false} {side} />

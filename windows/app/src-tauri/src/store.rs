@@ -8,12 +8,13 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use claude_board_core::claude_live::{live_state, session_name, status_change};
+use claude_board_core::handoff::visible_sessions;
 use claude_board_core::{fileio, Record};
 use serde_json::Value;
 
 use crate::model::{last_name, Group, Session, Sub};
 use crate::drive::can_drive;
-use crate::readers::{ClaudeNames, ContextReader, InterruptReader, ModelReader};
+use crate::readers::{ClaudeNames, ContextReader, HandoffReader, InterruptReader, ModelReader};
 use crate::settings::{set_in, Settings};
 use crate::util::{ms, num, obj};
 
@@ -21,6 +22,9 @@ use crate::util::{ms, num, obj};
 mod scan_table;
 
 mod group_table;
+
+#[cfg(test)]
+mod handoff_tests;
 
 /// 조용한 카드를 자동으로 접기까지의 시간
 const QUIET_FOLD_AFTER: f64 = 30.0 * 60.0;
@@ -49,6 +53,8 @@ pub struct Store {
     contexts: ContextReader,
     /// Esc 중단 표시(대화 기록 끝)와 Claude Code 의 `sessions\<pid>.json` — 둘 다 파일 수정 시각이 같으면 다시 읽지 않는다
     interrupts: InterruptReader,
+    /// 대화를 백그라운드로 넘긴 세션 표지(대화 기록 끝) — 파일 수정 시각과 크기가 같으면 다시 읽지 않는다
+    handoffs: HandoffReader,
     pub(crate) names: ClaudeNames,
     /// 직전 reload 때 승인 대기였던 세션 — 새로 승인 대기가 된 세션만 골라 그 그룹을 편다
     waiting_ids: HashSet<String>,
@@ -147,6 +153,7 @@ impl Store {
             models: ModelReader::default(),
             contexts: ContextReader::new(notifier.join("context"), notifier.join("context-windows.json")),
             interrupts: InterruptReader::default(),
+            handoffs: HandoffReader::default(),
             waiting_ids: HashSet::new(),
         }
     }
@@ -164,6 +171,8 @@ impl Store {
         let mut ctx_sids = HashSet::new();
         let mut ctx_transcripts = HashSet::new();
         let mut seen = HashSet::new();
+        // 대화를 백그라운드로 넘긴 세션 id → 이어 받은 세션 id(대화 기록 끝의 표지, SPEC §5.12.15)
+        let mut handed_to: HashMap<String, String> = HashMap::new();
         let mut names: Vec<String> = fs::read_dir(&self.dir)
             .map(|rd| rd.flatten().filter_map(|e| e.file_name().into_string().ok()).filter(|n| n.ends_with(".json")).collect())
             .unwrap_or_default();
@@ -180,7 +189,7 @@ impl Store {
                     parsed
                 }
             };
-            if let Some(s) = self.session(&j, &name, &path, probe, alive, now, &mut brain_paths, &mut pids, &mut ctx_sids, &mut ctx_transcripts) {
+            if let Some(s) = self.session(&j, &name, &path, probe, alive, now, &mut handed_to, &mut brain_paths, &mut pids, &mut ctx_sids, &mut ctx_transcripts) {
                 pids.insert(s.pid);
                 sessions.push(s);
             }
@@ -190,7 +199,17 @@ impl Store {
         self.names.prune(&pids);
         // 컨텍스트 캐시도 목록에 남은 세션(끝난 것 포함) 몫만 남긴다
         self.contexts.prune(&ctx_sids, &ctx_transcripts);
+        // 넘김 표지 캐시도 목록에 남은 대화 기록(끝난 것 포함) 몫만 남긴다
+        self.handoffs.prune(&ctx_transcripts);
         self.records.retain(|k, _| seen.contains(k));
+
+        // 넘긴 세션은 이어 받은 세션의 카드가 목록에 있을 때만 빼고, 그 세션 기록이 없으면 그대로 보인다.
+        // 보드 탭이 이어 받은 작업을 따라가는 동안의 탭 세션 짝짓기(macOS parkedFrom)는 Windows 에 아직 없다.
+        // groups 가 이 목록으로 만들어지므로 상태별 개수·트레이·끝내기 확인도 함께 빠진다(SPEC §5.12.15)
+        let parked_from: HashSet<String> = HashSet::new();
+        let shown = visible_sessions(&sessions, |s| s.id.as_str(), &handed_to, &parked_from);
+        let keep_ids: HashSet<String> = shown.iter().map(|s| s.id.clone()).collect();
+        let sessions: Vec<Session> = sessions.into_iter().filter(|s| keep_ids.contains(&s.id)).collect();
 
         let mut changed = self.expand_newly_waiting(&sessions, settings);
 
@@ -235,6 +254,7 @@ impl Store {
         probe: &Probe,
         alive: &dyn Fn(&Record) -> bool,
         now: f64,
+        handed_to: &mut HashMap<String, String>,
         brain_paths: &mut HashSet<PathBuf>,
         pids: &mut HashSet<u32>,
         ctx_sids: &mut HashSet<String>,
@@ -274,6 +294,14 @@ impl Store {
         if state == "ended" && (now - updated > ENDED_KEEP || !transcript.exists()) {
             let _ = fs::remove_file(path);
             return None;
+        }
+        // 대화를 백그라운드로 넘긴 세션 표지(§5.12.15) — 끝난 세션의 대화 기록(지우지 않은 몫)도 읽는다.
+        // 넘긴 뒤 이 세션을 다시 열면(--resume 의 SessionStart) started 가 새로 잡혀
+        // 아직 대화 줄이 없어도 넘긴 세션으로 보지 않는다(표지 시각 전에 열린 만큼만 숨는다)
+        if let Some(to) = self.handoffs.read(&transcript) {
+            if to.id != sid && num(j.get("started")).unwrap_or(0.0) <= to.at {
+                handed_to.insert(sid.clone(), to.id);
+            }
         }
         // Esc 로 끊은 세션은 입력을 기다리는 중이고, 승인한 도구가 도는 세션은 작업 중이다(SPEC §3.9).
         // 끊은 뒤에도 서브에이전트·셸이 돌면 아래에서 다시 작업 중이 된다

@@ -324,6 +324,17 @@ export async function answerConfirm(ok: boolean) {
 
 let started = false;
 
+// 탭 되살리기가 끝나(실패로 끝나도)면 푸는 약속 — 바깥 열기 요청은 되살리기가 끝난 뒤에 반영한다. startLifecycle 의 되살리기 뒤가 푸는 유일한 자리다
+let restoredResolve: () => void = () => {};
+const restored = new Promise<void>((resolve) => {
+  restoredResolve = resolve;
+});
+
+/** 탭 되살리기가(성공·실패 모두) 끝났음을 기다린다 — 바깥 열기 듣기가 켜진 뒤 이 약속이 풀려야 첫 요청을 반영한다 */
+export function whenRestored(): Promise<void> {
+  return restored;
+}
+
 /** 보드를 켤 때 세션 파일이 없어진 세션의 id 를 꾸미기 끈 목록에서 치운다 — 첫 상태 묶음이 와서 세션을 읽은 뒤에 */
 function pruneStaleMdRenderOff() {
   void firstSessions()
@@ -347,6 +358,7 @@ export function startLifecycle(): void {
     })
     .then((outcome) => {
       restoreOutcome = outcome;
+      restoredResolve(); // 실패로 끝나도 푼다 — 기다리던 쪽은 되살리기가 끝났다는 것만 본다
       // 되살리기를 마친 뒤부터 바뀔 때마다 저장한다 — 마치기 전에 저장하면 지난 목록을 덮는다. 첫 저장은 백엔드에 수명 주기가 켜졌다고 알린다
       void flushSave();
       $effect.root(() => {

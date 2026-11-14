@@ -1,0 +1,97 @@
+{
+  "allowed_tools" : [
+    "Read",
+    "Edit",
+    "Write",
+    "Bash(npm test:*)"
+  ],
+  "base_branch" : "main",
+  "branches" : {
+    "created" : [
+      {
+        "branch" : "autopilot/20261021-0900-toy",
+        "by" : "engine",
+        "head" : "3f2a9c1d",
+        "repo" : "/Users/demo/toy"
+      }
+    ],
+    "moved" : [
+
+    ],
+    "repos" : {
+      "/Users/demo/toy" : {
+        "base" : {
+          "branch" : "main",
+          "head" : "3f2a9c1d"
+        },
+        "original" : "main",
+        "restored" : false,
+        "work" : "autopilot/20261021-0900-toy"
+      }
+    }
+  },
+  "caps" : {
+    "minutes" : 120,
+    "usd" : 100,
+    "weekly_pp" : 5
+  },
+  "check_retries" : 2,
+  "check_timeout_min" : 10,
+  "control_last" : "pause",
+  "control_seen" : 1761012345.5,
+  "created" : 1761010000.123,
+  "dev" : false,
+  "effort" : "high",
+  "engine_pid" : 48213,
+  "harness" : {
+    "base" : "9c0e5a7b1f4d",
+    "copy" : "/Users/demo/Library/Application Support/Claude Board/autopilot/private/20261021-0900-toy/harness",
+    "files" : 14,
+    "folders" : [
+      "/Users/demo/toy"
+    ]
+  },
+  "inbox" : [
+
+  ],
+  "last_activity" : 1761012300.25,
+  "launchd_label" : "com.claude.board.autopilot.20261021-0900-toy",
+  "model" : "claude-sonnet-5-5",
+  "project" : "toy",
+  "reason" : "단위 1/2 하는 중: 할 일 목록 화면 만들기",
+  "sessions" : [
+    "5b0a1c7e-0a67-4f0e-9f5c-5d3f2b6a8e11"
+  ],
+  "source" : "topic",
+  "started" : 1761010005,
+  "state" : "running",
+  "stopline" : {
+    "five_hour" : 0.95,
+    "seven_day" : 0.8
+  },
+  "title" : "할 일 앱 장난감",
+  "unit" : 1,
+  "unit_caps" : {
+    "minutes" : 120,
+    "usd" : 100,
+    "weekly_pp" : 5
+  },
+  "updated" : 1761012300.25,
+  "usage" : {
+    "at" : 1761012290,
+    "five_hour" : 0.12,
+    "five_hour_resets" : 1761025000,
+    "from" : "stream",
+    "seven_day" : 0.31,
+    "seven_day_resets" : 1761400000
+  },
+  "wait_until" : null,
+  "worktree" : {
+    "base" : "3f2a9c1d",
+    "branch" : "autopilot/20261021-0900-toy",
+    "mode" : "worktree",
+    "path" : "/Users/demo/.claude-board/worktrees/20261021-0900-toy/toy",
+    "reason" : "저장소 하나, 깨끗한 작업 트리",
+    "repo" : "/Users/demo/toy"
+  }
+}

@@ -1,0 +1,80 @@
+{
+  "author" : "박기획",
+  "fields" : [
+    {
+      "name" : "상태",
+      "value" : "진행 중"
+    },
+    {
+      "name" : "담당",
+      "value" : "김개발"
+    },
+    {
+      "name" : "우선순위",
+      "value" : "높음"
+    },
+    {
+      "name" : "상위",
+      "value" : "TODO-10 회의실 예약 API"
+    },
+    {
+      "name" : "레이블",
+      "value" : "예약, api"
+    },
+    {
+      "name" : "만든 때",
+      "value" : "2026-10-20T09:00:00.000+0900"
+    }
+  ],
+  "format" : "claude-board-meta",
+  "id" : "TODO-41",
+  "kind" : "스토리",
+  "length" : 95,
+  "links" : [
+    {
+      "kind" : "attachment",
+      "title" : "화면.png",
+      "url" : "https://example.atlassian.net/rest/api/3/attachment/content/100"
+    },
+    {
+      "kind" : "issue",
+      "title" : "막음 TODO-42 취소 API",
+      "url" : "https://example.atlassian.net/browse/TODO-42"
+    },
+    {
+      "kind" : "link",
+      "title" : "정책 문서",
+      "url" : "https://example.atlassian.net/wiki/spaces/OPS/pages/48213"
+    }
+  ],
+  "modified" : "2026-10-29T10:00:00.000+0900",
+  "sections" : [
+    {
+      "text" : "겹치면 409 를 돌려줍니다\n정책 문서",
+      "title" : "수용 기준"
+    },
+    {
+      "text" : "＜b＞굵게＜/b＞ 는 글입니다. 비밀번호: [가림:비밀 값]",
+      "title" : "참고"
+    }
+  ],
+  "source" : "jira",
+  "summary" : [
+    "같은 회의실 같은 시각에 두 예약이 생기지 않게 합니다.",
+    "겹치면 409 를 돌려줍니다",
+    "정책 문서"
+  ],
+  "title" : "회의실 예약 겹침 막기",
+  "toc" : [
+    {
+      "level" : 2,
+      "title" : "수용 기준"
+    },
+    {
+      "level" : 2,
+      "title" : "참고"
+    }
+  ],
+  "url" : "https://example.atlassian.net/browse/TODO-41",
+  "version" : 1
+}

@@ -39,7 +39,17 @@ pub fn with_vars(block: &[u16], vars: &[(String, String)]) -> Vec<u16> {
     out
 }
 
-/// 이 사용자 계정의 환경 블록(끝의 이중 NUL 포함). 실패는 호출한 쪽이 터미널을 못 여는 오류로 올린다.
+/// 보드 탭의 셸에 심는 표시 — 설치·제거 스크립트가 이 표시를 보면 보드를 끄지 않고 파일만 바꿔 끼운다(mac 의 보드 탭 설치 길과 같은 뜻).
+pub const BOARD_TAB_VAR: (&str, &str) = ("CLAUDE_BOARD_TAB", "1");
+
+/// 블록에 보드 탭 표시를 더한다(이미 같은 이름이 있으면 `1` 로 바꾼다).
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn mark_board_tab(block: &[u16]) -> Vec<u16> {
+    with_vars(block, &[(BOARD_TAB_VAR.0.to_string(), BOARD_TAB_VAR.1.to_string())])
+}
+
+/// 이 사용자 계정의 환경 블록(끝의 이중 NUL 포함). 보드가 띄우는 셸의 블록이므로 `CLAUDE_BOARD_TAB=1` 이 들어 있다.
+/// 실패는 호출한 쪽이 터미널을 못 여는 오류로 올린다.
 #[cfg(windows)]
 pub fn new_block() -> std::io::Result<Vec<u16>> {
     use std::ptr::null_mut;
@@ -74,7 +84,7 @@ pub fn new_block() -> std::io::Result<Vec<u16>> {
     let block = unsafe { std::slice::from_raw_parts(p, len + 2) }.to_vec();
     // SAFETY: CreateEnvironmentBlock 이 준 블록
     unsafe { DestroyEnvironmentBlock(raw) };
-    Ok(block)
+    Ok(mark_board_tab(&block))
 }
 
 #[cfg(test)]
@@ -109,6 +119,17 @@ mod tests {
     }
 
     #[test]
+    fn mark_board_tab_adds_the_variable_and_overrides_an_inherited_one() {
+        let got = parse(&mark_board_tab(&block(&["Path=C:\\bin", "claude_board_tab=0"])));
+        let tab: Vec<&(String, String)> = got.iter().filter(|(k, _)| k.eq_ignore_ascii_case("CLAUDE_BOARD_TAB")).collect();
+        assert_eq!(tab.len(), 1, "같은 이름이 둘이면 안 된다: {got:?}");
+        assert_eq!(tab[0].1, "1");
+        assert!(got.iter().any(|(k, v)| k == "Path" && v == "C:\\bin"), "다른 변수는 그대로");
+        let plain = parse(&mark_board_tab(&block(&["Path=C:\\bin"])));
+        assert!(plain.contains(&("CLAUDE_BOARD_TAB".to_string(), "1".to_string())));
+    }
+
+    #[test]
     fn parse_stops_at_the_double_nul() {
         let mut b = block(&["A=1"]);
         b.extend("B=2".encode_utf16());
@@ -126,6 +147,7 @@ mod tests {
         let has = |name: &str| vars.iter().any(|(k, _)| k.eq_ignore_ascii_case(name));
         assert!(has("PATH"), "PATH 가 없다: {} 개 항목", vars.len());
         assert!(has("SystemRoot"), "SystemRoot 가 없다");
+        assert!(vars.contains(&("CLAUDE_BOARD_TAB".to_string(), "1".to_string())), "보드 탭 표시가 없다");
         assert!(!has("CLAUDECODE"), "CLAUDECODE 가 새어 들어갔다");
         assert!(!has("CLAUDE_CODE_CHILD_SESSION"), "CLAUDE_CODE_CHILD_SESSION 이 새어 들어갔다");
         assert!(!has("CB_TEST_ONLY_PROCESS_VAR"), "이 프로세스에만 있던 변수가 새어 들어갔다");

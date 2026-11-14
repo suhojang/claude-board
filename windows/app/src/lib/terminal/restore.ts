@@ -4,12 +4,15 @@
 // - 다시 뜰 때 모든 화면이 우선 셸로 돌아오고, claude 화면의 이어 열 값은 held 에 담긴다. 고른 탭의 화면만 바로 이어 열고(resumeNow),
 //   나머지는 그 탭에 들어갈 때(lifecycle 의 resumeHeld) 이어 연다.
 // - 앞 보드가 남긴 세션이 보드 밖에서 아직 도는 중이면(옛 pid 가 살아 있음) 5초까지 기다리고, 그래도 살아 있으면 그 화면은 되살리지 않는다.
+// - 화면은 자기 셸 키(shell)를 함께 남긴다. WSL 셸 화면은 claude 명령을 쳐 넣지 못하므로 다시 뜰 때 늘 맨 셸로 돌아온다.
+//   옛 저장 항목에는 shell 이 없다 — 없으면 설정의 기본 셸로 뜬다.
 // - 저장해 둔 작업 폴더가 지금 없으면 claude 화면은 되살리지도 이어 열지도 않는다(mac restoreCommand). 폴더가 없으면 셸이 홈 폴더로 떠서
 //   권한 확인을 건너뛰는 claude 가 홈 폴더 전체를 열게 되기 때문이다. 셸만 있던 화면은 mac 처럼 홈에서 셸로 돌아온다.
 import type { BoardSurface, BoardTab, PidTarget, Session, SplitDirection, SplitNode, TabEntry, TermId, TermInfo } from "../types.ts";
 import type { SavedNode, SavedSurface } from "../types.ts";
 import { freshSessionCommand, namedCommand, resumeCommand } from "./sessionCommand.ts";
 import { sessionNameArg } from "./sessionName.ts";
+import { canTypeClaude, normalizeShellKey } from "./shellRules.ts";
 import { leaves } from "./split.ts";
 
 export type { SavedNode, SavedSurface, TabEntry } from "../types.ts";
@@ -30,14 +33,21 @@ function savedFromHeld(held: Record<string, string>): SavedSurface {
     command: held.command ?? null,
     sessionId: held.session ?? null,
     mdRenderOff: held.mdoff !== undefined,
+    ...shellField(held.shell),
   };
+}
+
+/** 저장 항목에 셸 키를 싣는 조각 — 키가 없으면 필드 자체를 두지 않는다(옛 저장 항목과 같은 모양) */
+function shellField(shell: string | undefined): { shell?: string } {
+  return shell ? { shell } : {};
 }
 
 function savedSurface(surface: BoardSurface | undefined, tab: BoardTab, view: RestoreView): SavedSurface {
   if (surface?.held) return savedFromHeld(surface.held);
   const cwd = (surface?.termId ? view.terms[surface.termId]?.cwd : undefined) || tab.workspace;
-  if (!surface || surface.command === null) return { cwd, command: null, sessionId: null, mdRenderOff: false };
-  return { cwd, command: surface.command, sessionId: surface.sessionId, mdRenderOff: surface.mdRenderOff };
+  const shell = shellField(surface?.shell);
+  if (!surface || surface.command === null) return { cwd, command: null, sessionId: null, mdRenderOff: false, ...shell };
+  return { cwd, command: surface.command, sessionId: surface.sessionId, mdRenderOff: surface.mdRenderOff, ...shell };
 }
 
 function savedNode(node: SplitNode, tab: BoardTab, view: RestoreView): SavedNode {
@@ -56,6 +66,7 @@ export function savedTabs(tabs: BoardTab[], view: RestoreView): TabEntry[] {
     workspace: tab.workspace,
     name: tab.customName,
     selected: tab.id === view.selected,
+    ...(tab.external === true ? { external: true } : {}), // 바깥에서 연 탭만 표시한다(빠진 꼴은 옛 항목과 같다)
     root: savedNode(tab.root, tab, view),
   }));
 }
@@ -68,6 +79,7 @@ function parseSurface(x: unknown): SavedSurface | null {
   if (!isObject(x) || typeof x.cwd !== "string") return null;
   const command = typeof x.command === "string" ? x.command : null;
   return {
+    ...shellField(normalizeShellKey(x.shell) ?? undefined),
     cwd: x.cwd,
     command,
     sessionId: command !== null && typeof x.sessionId === "string" && x.sessionId !== "" ? x.sessionId : null,
@@ -97,7 +109,13 @@ export function parseEntries(raw: unknown): TabEntry[] {
     if (!isObject(x) || typeof x.workspace !== "string") continue;
     const root = parseNode(x.root);
     if (!root) continue;
-    entries.push({ workspace: x.workspace, name: typeof x.name === "string" ? x.name : null, selected: x.selected === true, root });
+    entries.push({
+      workspace: x.workspace,
+      name: typeof x.name === "string" ? x.name : null,
+      selected: x.selected === true,
+      ...(x.external === true ? { external: true } : {}), // 디스크의 값을 믿지 않는다 — 정확히 true 일 때만
+      root,
+    });
   }
   return entries;
 }
@@ -114,6 +132,11 @@ export interface RestorePlan {
   resumeNow: string | null;
   /** 작업 폴더가 없어 되살리지 않은 claude 화면의 없는 폴더들(중복 없이, 처음 나온 순서) — 호출한 쪽이 board.log 에 남긴다 */
   missingDirs: string[];
+}
+
+/** 이 저장 화면을 claude 화면으로 되살리는가 — 명령이 있어도 쳐 넣지 못하는 셸(WSL)이면 맨 셸로 돌아온다 */
+export function restoresClaude(leaf: SavedSurface): boolean {
+  return leaf.command !== null && canTypeClaude(leaf.shell ?? "");
 }
 
 /** 홈("~")은 늘 있는 것으로 본다 — 탭 작업 경로 "~" 는 보드가 홈 폴더를 뜻하게 쓴다. 빈 문자열은 폴더가 아니다 */
@@ -134,7 +157,7 @@ export function savedClaudeDirs(entries: TabEntry[]): string[] {
   const dirs = new Set<string>();
   const walk = (workspace: string, node: SavedNode) => {
     if ("leaf" in node) {
-      if (node.leaf.command !== null) for (const dir of claudeDirs(workspace, node.leaf.cwd)) dirs.add(dir);
+      if (restoresClaude(node.leaf)) for (const dir of claudeDirs(workspace, node.leaf.cwd)) dirs.add(dir);
     } else {
       walk(workspace, node.first);
       walk(workspace, node.second);
@@ -151,6 +174,7 @@ function heldOf(leaf: SavedSurface): Record<string, string> {
     command: leaf.command ?? "",
     ...(leaf.sessionId ? { session: leaf.sessionId } : {}),
     ...(leaf.mdRenderOff ? { mdoff: "1" } : {}),
+    ...shellField(leaf.shell),
   };
 }
 
@@ -164,7 +188,7 @@ export function restorePlan(entries: TabEntry[], aliveOutside: ReadonlySet<strin
 
   // 화면 하나를 만든다. 저장 때 claude 화면이었으면 셸로 띄우고 이어 열 값만 쥔다
   function surfaceOf(leaf: SavedSurface, workspace: string): BoardSurface | null {
-    const isClaude = leaf.command !== null;
+    const isClaude = restoresClaude(leaf);
     if (isClaude && leaf.sessionId && aliveOutside.has(leaf.sessionId)) return null;
     const missing = isClaude ? missingDir(workspace, leaf.cwd, existingDirs) : null;
     if (missing !== null) {
@@ -178,6 +202,7 @@ export function restorePlan(entries: TabEntry[], aliveOutside: ReadonlySet<strin
       command: null,
       held: isClaude ? heldOf(leaf) : null,
       mdRenderOff: isClaude && leaf.mdRenderOff,
+      ...shellField(leaf.shell),
       title: "",
       typedAt: null,
     };
@@ -210,6 +235,7 @@ export function restorePlan(entries: TabEntry[], aliveOutside: ReadonlySet<strin
       root,
       focused: leaves(root)[0],
       zoomed: false,
+      ...(entry.external === true ? { external: true } : {}), // 바깥에서 연 탭임을 다시 열 때까지 기억한다
     };
     tabs.push(tab);
     if (entry.selected) selectedTab = tab.id;
@@ -225,7 +251,7 @@ export function savedSessionIds(entries: TabEntry[]): string[] {
   const ids = new Set<string>();
   const walk = (node: SavedNode) => {
     if ("leaf" in node) {
-      if (node.leaf.command !== null && node.leaf.sessionId) ids.add(node.leaf.sessionId);
+      if (restoresClaude(node.leaf) && node.leaf.sessionId) ids.add(node.leaf.sessionId);
     } else {
       walk(node.first);
       walk(node.second);
